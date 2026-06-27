@@ -29,6 +29,20 @@ function parseTile(buf) {
   const I = dv.getUint32(12, true);
   let off = 16;
 
+  if (magic === 'VTL4') {
+    // Solid section (V/I already read at 8/12; arrays start at 16, like VTL3).
+    const positions = new Float32Array(buf, off, 3 * V); off += 12 * V;
+    const uv = new Float32Array(buf, off, 2 * V); off += 8 * V;
+    const layer = new Float32Array(buf, off, V); off += 4 * V;
+    const colors = new Uint8Array(buf, off, 4 * V); off += 4 * V;
+    const normalsI8 = new Int8Array(buf, off, 4 * V); off += 4 * V;
+    const biome = new Float32Array(buf, off, V); off += 4 * V;
+    const indices = new Uint32Array(buf, off, I); off += 4 * I;
+    const f = parseMeshSection(buf, dv, off); off = f.off;   // transparent fluids
+    const biomeNames = parseLegend(dv, buf, off);
+    return { textured: true, hasBiome: true, V, I, positions, uv, layer, colors, biome,
+      normals: expandNormals(normalsI8, V), indices, biomeNames, fluid: f.sec };
+  }
   if (magic === 'VTL3') {
     const positions = new Float32Array(buf, off, 3 * V); off += 12 * V;
     const uv = new Float32Array(buf, off, 2 * V); off += 8 * V;
@@ -58,6 +72,21 @@ function parseTile(buf) {
     return { textured: false, hasBiome: false, V, I, positions, colors, normals: expandNormals(normalsI8, V), indices };
   }
   throw new Error('bad magic: ' + magic);
+}
+
+// Parse one VTL4 geometry section (V, I, then the same arrays as the solid
+// mesh) at `off`; returns the section and the offset just past it.
+function parseMeshSection(buf, dv, off) {
+  const V = dv.getUint32(off, true); off += 4;
+  const I = dv.getUint32(off, true); off += 4;
+  const positions = new Float32Array(buf, off, 3 * V); off += 12 * V;
+  const uv = new Float32Array(buf, off, 2 * V); off += 8 * V;
+  const layer = new Float32Array(buf, off, V); off += 4 * V;
+  const colors = new Uint8Array(buf, off, 4 * V); off += 4 * V;
+  const normalsI8 = new Int8Array(buf, off, 4 * V); off += 4 * V;
+  const biome = new Float32Array(buf, off, V); off += 4 * V;
+  const indices = new Uint32Array(buf, off, I); off += 4 * I;
+  return { sec: { V, I, positions, uv, layer, colors, biome, normals: expandNormals(normalsI8, V), indices }, off };
 }
 
 function parseLegend(dv, buf, off) {
@@ -154,6 +183,7 @@ const FRAG = /* glsl */`
   uniform float uHi;         // highlighted biome id, or -1
   uniform vec3 uFogColor;
   uniform vec2 uFog;         // (near, far)
+  uniform float uAlpha;      // 1 = opaque terrain · <1 = transparent water
   in vec2 vUv;
   in vec4 vTint;
   in vec3 vBcol;
@@ -183,7 +213,7 @@ const FRAG = /* glsl */`
     float ndl = max(dot(N, normalize(lightDir)), 0.0);
     vec3 lit = base * (0.25 + 0.45 * ambient + 0.55 * SUN * ndl) * ao;
     float f = smoothstep(uFog.x, uFog.y, vFog);    // aerial depth into the horizon
-    frag = vec4(mix(lit, uFogColor, f), 1.0);
+    frag = vec4(mix(lit, uFogColor, f), uAlpha);
   }
 `;
 
@@ -237,10 +267,51 @@ function buildTexturedMaterial(texData) {
       uHi: { value: -1 },
       uFogColor: { value: new THREE.Vector3(...SKY_HORIZON) },
       uFog: { value: new THREE.Vector2(1e6, 2e6) },  // set from terrain extent
+      uAlpha: { value: 1.0 },
     },
     vertexShader: VERT,
     fragmentShader: FRAG,
   });
+}
+
+// A transparent water material: shares the terrain material's uniforms (so the
+// biome toggle, fog, and light track together) but draws blended with no depth
+// write — the seabed (already drawn opaque) shows through, and terrain in front
+// still occludes it via the depth test.
+function buildWaterMaterial(terrainMat) {
+  const u = {};
+  for (const k in terrainMat.uniforms) u[k] = terrainMat.uniforms[k]; // share refs
+  u.uAlpha = { value: 0.80 };                                          // own alpha
+  return new THREE.ShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    uniforms: u,
+    vertexShader: VERT,
+    fragmentShader: FRAG,
+    transparent: true,
+    depthWrite: false,
+  });
+}
+
+// Build a transparent water mesh from the tile's fluid section, reusing the
+// terrain palette for its per-vertex biome colour so the biome layer matches.
+function buildWaterMesh(fluid, terrainMat, palette) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(fluid.positions, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(fluid.normals, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(fluid.uv, 2));
+  g.setAttribute('alayer', new THREE.BufferAttribute(fluid.layer, 1));
+  g.setAttribute('atint', new THREE.BufferAttribute(fluid.colors, 4, true));
+  g.setAttribute('abiome', new THREE.BufferAttribute(fluid.biome, 1));
+  const bcol = new Float32Array(3 * fluid.V);
+  for (let i = 0; i < fluid.V; i++) {
+    const c = (palette && palette[fluid.biome[i] | 0]) || [0.3, 0.5, 0.85];
+    bcol[i * 3] = c[0]; bcol[i * 3 + 1] = c[1]; bcol[i * 3 + 2] = c[2];
+  }
+  g.setAttribute('abcol', new THREE.BufferAttribute(bcol, 3));
+  g.setIndex(new THREE.BufferAttribute(fluid.indices, 1));
+  const mesh = new THREE.Mesh(g, buildWaterMaterial(terrainMat));
+  mesh.renderOrder = 1;                                                // after opaque
+  return mesh;
 }
 
 async function fetchBuf(url) {
@@ -451,6 +522,12 @@ async function main() {
   const mesh = new THREE.Mesh(geom, material);
   scene.add(mesh);
 
+  // Transparent water pass (VTL4): drawn over the opaque terrain so the seabed
+  // shows through. Shares the terrain palette/uniforms.
+  if (tile.textured && tile.fluid && tile.fluid.V > 0) {
+    scene.add(buildWaterMesh(tile.fluid, material, biomeUI ? biomeUI.palette : null));
+  }
+
   const hoverTick = (tile.hasBiome && biomeUI) ? setupHover(renderer, camera, mesh, tile, biomeUI, controls) : null;
 
   const bb = geom.boundingBox;
@@ -474,10 +551,12 @@ async function main() {
     material.uniforms.uFog.value.set(maxDim * 0.85, maxDim * 2.4);
   }
 
-  const fmt = tile.hasBiome ? 'VTL3 textured + biomes' : (tile.textured ? 'VTL2 textured' : 'VTL1 flat');
+  const fmt = tile.fluid ? 'VTL4 · textured · biomes · water'
+    : (tile.hasBiome ? 'VTL3 textured + biomes' : (tile.textured ? 'VTL2 textured' : 'VTL1 flat'));
+  const waterVerts = tile.fluid ? tile.fluid.V : 0;
   hud.innerHTML =
     `<div class="title">vantage <b>· ${fmt}</b></div>` +
-    `<div class="sub">${tile.V.toLocaleString()} verts · ${(tile.I / 3).toLocaleString()} tris · ` +
+    `<div class="sub">${(tile.V + waterVerts).toLocaleString()} verts · ${((tile.I + (tile.fluid ? tile.fluid.I : 0)) / 3).toLocaleString()} tris · ` +
     `${Math.round(size.x)}×${Math.round(size.y)}×${Math.round(size.z)} blocks</div>` +
     `<div class="hint">drag orbit · scroll zoom${tile.hasBiome ? ' · <b>B</b> biomes · hover to identify' : ''}</div>`;
 

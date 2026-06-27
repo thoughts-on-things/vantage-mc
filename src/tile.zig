@@ -116,6 +116,49 @@ pub fn serializeTexturedBiome(arena: std.mem.Allocator, m: mesh.Mesh2, biome_nam
     return out.toOwnedSlice(arena);
 }
 
+pub const MAGIC4 = "VTL4";
+pub const VERSION4: u32 = 4;
+
+/// Serialize a textured + biome tile with a second geometry section for
+/// transparent fluids (water), drawn in a separate alpha-blended pass:
+///   "VTL4", u32 ver=4,
+///   <solid section>, <fluid section>,
+///   u32 biome_count, then per biome: u16 name_len + name bytes.
+/// A section is: u32 V, u32 I, f32[3V] pos, f32[2V] uv, f32[V] layer,
+///   u8[4V] color, i8[4V] normal, f32[V] biome, u32[I] indices.
+/// The solid section's header (V,I) sits at offset 8 so a VTL4 reader can share
+/// the VTL3 solid-mesh parse and just continue into the fluid section + legend.
+pub fn serializeWithFluid(arena: std.mem.Allocator, solid: mesh.Mesh2, fluid: mesh.Mesh2, biome_names: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, MAGIC4);
+    try appendU32(arena, &out, VERSION4);
+    try appendMeshSection(arena, &out, solid);
+    try appendMeshSection(arena, &out, fluid);
+
+    // Shared biome legend: count, then length-prefixed names (UTF-8, ns kept).
+    try appendU32(arena, &out, @intCast(biome_names.len));
+    for (biome_names) |name| {
+        var lb: [2]u8 = undefined;
+        std.mem.writeInt(u16, &lb, @intCast(@min(name.len, std.math.maxInt(u16))), .little);
+        try out.appendSlice(arena, &lb);
+        try out.appendSlice(arena, name[0..@min(name.len, std.math.maxInt(u16))]);
+    }
+
+    return out.toOwnedSlice(arena);
+}
+
+fn appendMeshSection(arena: std.mem.Allocator, out: *std.ArrayList(u8), m: mesh.Mesh2) !void {
+    try appendU32(arena, out, m.vertex_count);
+    try appendU32(arena, out, @intCast(m.indices.items.len));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.positions.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.uv.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.layer.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.color.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.normals.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.biome.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.indices.items));
+}
+
 test "serialized header is well-formed and sizes match" {
     const a = std.testing.allocator;
     var m: mesh.Mesh = .{};
@@ -183,4 +226,48 @@ test "VTL3 writes biome attribute and legend" {
     const n1_len = std.mem.readInt(u16, bytes[legend_off + 6 ..][0..2], .little);
     try std.testing.expectEqual(@as(u16, 16), n1_len);
     try std.testing.expectEqualStrings("minecraft:plains", bytes[legend_off + 8 ..][0..16]);
+}
+
+test "VTL4 writes both geometry sections and the shared legend" {
+    const a = std.testing.allocator;
+    var solid: mesh.Mesh2 = .{};
+    var fluid: mesh.Mesh2 = .{};
+    defer for ([_]*mesh.Mesh2{ &solid, &fluid }) |m| {
+        m.positions.deinit(a);
+        m.uv.deinit(a);
+        m.layer.deinit(a);
+        m.color.deinit(a);
+        m.normals.deinit(a);
+        m.biome.deinit(a);
+        m.indices.deinit(a);
+    };
+    // One quad in each section.
+    for ([_]*mesh.Mesh2{ &solid, &fluid }) |m| {
+        try m.positions.appendSlice(a, &.{ 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0 });
+        try m.uv.appendSlice(a, &([_]f32{ 0, 0 } ** 4));
+        try m.layer.appendSlice(a, &([_]f32{0} ** 4));
+        try m.color.appendSlice(a, &([_]u8{ 255, 255, 255, 255 } ** 4));
+        try m.normals.appendSlice(a, &([_]i8{ 0, 0, 1, 0 } ** 4));
+        try m.biome.appendSlice(a, &([_]f32{1} ** 4));
+        try m.indices.appendSlice(a, &.{ 0, 1, 2, 0, 2, 3 });
+        m.vertex_count = 4;
+    }
+
+    const names = [_][]const u8{ "", "minecraft:plains" };
+    const bytes = try serializeWithFluid(a, solid, fluid, &names);
+    defer a.free(bytes);
+
+    try std.testing.expectEqualSlices(u8, MAGIC4, bytes[0..4]);
+    try std.testing.expectEqual(VERSION4, std.mem.readInt(u32, bytes[4..8], .little));
+    // Solid section header at offset 8 (V, I).
+    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, bytes[8..12], .little));
+    try std.testing.expectEqual(@as(u32, 6), std.mem.readInt(u32, bytes[12..16], .little));
+    // Walk to the fluid section: solid arrays (36 bytes/vert) + indices (4/idx).
+    const sec_bytes = 36 * 4 + 4 * 6; // V=4, I=6
+    const fluid_off = 8 + 8 + sec_bytes;
+    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, bytes[fluid_off..][0..4], .little));
+    try std.testing.expectEqual(@as(u32, 6), std.mem.readInt(u32, bytes[fluid_off + 4 ..][0..4], .little));
+    // Legend follows the fluid section.
+    const legend_off = fluid_off + 8 + sec_bytes;
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, bytes[legend_off..][0..4], .little));
 }

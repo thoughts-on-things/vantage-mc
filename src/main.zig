@@ -223,7 +223,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
-    const m = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg);
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg);
     const arr = try builder.finish();
 
     // Resolve human-readable biome names from the language file for the legend.
@@ -232,7 +232,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     if (display.len > 0) display[0] = ""; // air/no-data sentinel
     for (g.biome_names[1..], 1..) |bn, i| display[i] = names.biomeName(a, bn);
 
-    const geo = try tile.serializeTexturedBiome(a, m, display);
+    const geo = try tile.serializeWithFluid(a, built.solid, built.fluid, display);
     const tex_blob = try texture.serialize(a, arr);
 
     const tex_path = try texArrayPath(a, out_path);
@@ -246,23 +246,23 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
         \\blocks:    {d} distinct, {d} biomes
         \\grid:      {d} x {d} x {d} blocks  (minY={d})
         \\textures:  {d} layers ({d}x{d})
-        \\mesh:      {d} vertices, {d} triangles
+        \\mesh:      {d} vertices, {d} triangles ({d} water verts)
         \\tile:      {s}  ({d} bytes)
         \\texarray:  {s}  ({d} bytes)
         \\
     , .{
-        region_path,           assets,
-        stats.chunks_loaded,   stats.chunks_missing,
-        cx0,                   cz0,
-        cx1,                   cz1,
-        stats.distinct_blocks, stats.distinct_biomes,
-        g.sx,                  g.sy,
-        g.sz,                  g.min_y,
-        arr.layer_count,       arr.width,
-        arr.height,            m.vertex_count,
-        m.triangleCount(),     out_path,
-        geo.len,               tex_path,
-        tex_blob.len,
+        region_path,                                               assets,
+        stats.chunks_loaded,                                       stats.chunks_missing,
+        cx0,                                                       cz0,
+        cx1,                                                       cz1,
+        stats.distinct_blocks,                                     stats.distinct_biomes,
+        g.sx,                                                      g.sy,
+        g.sz,                                                      g.min_y,
+        arr.layer_count,                                           arr.width,
+        arr.height,                                                built.solid.vertex_count + built.fluid.vertex_count,
+        built.solid.triangleCount() + built.fluid.triangleCount(), built.fluid.vertex_count,
+        out_path,                                                  geo.len,
+        tex_path,                                                  tex_blob.len,
     });
 
     // Resolved tint colours per biome present — confirms the data pack loaded and
@@ -401,7 +401,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
-    const m = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg);
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg);
     const arr = try builder.finish();
     mesh_node.end();
 
@@ -410,7 +410,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     const display = try a.alloc([]const u8, g.biome_names.len);
     if (display.len > 0) display[0] = "";
     for (g.biome_names[1..], 1..) |bn, idx| display[idx] = names.biomeName(a, bn);
-    const geo = try tile.serializeTexturedBiome(a, m, display);
+    const geo = try tile.serializeWithFluid(a, built.solid, built.fluid, display);
     const tex_blob = try texture.serialize(a, arr);
     const tex_path = try texArrayPath(a, out_path);
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = geo });
@@ -422,19 +422,19 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         \\chunks:  {d} rendered, {d} empty
         \\blocks:  {d} states, {d} biomes
         \\grid:    {d} × {d} × {d} blocks (minY={d})
-        \\mesh:    {d} vertices, {d} triangles
+        \\mesh:    {d} vertices, {d} triangles ({d} water verts)
         \\tile:    {s} ({d} bytes) + texture array ({d} layers)
         \\
         \\→ view it:  just serve   then open http://127.0.0.1:8753/
         \\
     , .{
-        stats.chunks_loaded,   stats.chunks_missing,
-        stats.distinct_blocks, stats.distinct_biomes,
-        g.sx,                  g.sy,
-        g.sz,                  g.min_y,
-        m.vertex_count,        m.triangleCount(),
-        out_path,              geo.len,
-        arr.layer_count,
+        stats.chunks_loaded,                                 stats.chunks_missing,
+        stats.distinct_blocks,                               stats.distinct_biomes,
+        g.sx,                                                g.sy,
+        g.sz,                                                g.min_y,
+        built.solid.vertex_count + built.fluid.vertex_count, built.solid.triangleCount() + built.fluid.triangleCount(),
+        built.fluid.vertex_count,                            out_path,
+        geo.len,                                             arr.layer_count,
     });
     if (geo.len > 150 * 1024 * 1024) std.debug.print(
         "  note: large tile — if it's slow in the browser, render less with --radius {d}\n",

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vantage — P1 viewer</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1015; }
+    #app { position: fixed; inset: 0; }
+    #hud {
+      position: fixed; top: 12px; left: 12px; padding: 10px 12px;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #cfe3ff; background: rgba(12, 16, 22, 0.72);
+      border: 1px solid rgba(120, 160, 220, 0.25); border-radius: 8px;
+      pointer-events: none; white-space: pre; text-shadow: 0 1px 2px #000;
+    }
+    #err {
+      position: fixed; inset: 0; display: none; place-content: center;
+      font: 14px ui-monospace, monospace; color: #ffb4b4; padding: 2rem; text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="hud">vantage · loading…</div>
+  <div id="err"></div>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="./viewer.js"></script>
+</body>
+</html>

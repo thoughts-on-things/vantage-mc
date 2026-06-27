@@ -1,30 +1,108 @@
-//! Vantage — P0 parsing spike.
+//! Vantage CLI.
 //!
-//! Reads a Minecraft Anvil region file, locates a chunk, decompresses it,
-//! parses the NBT, unpacks every section's paletted block-state array, and
-//! prints a block histogram. This validates the whole read foundation
-//! (region -> zlib -> NBT -> palette bit-unpacking) against real world data.
+//! Subcommands:
+//!   vantage mesh  <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
+//!       Decode a rectangular range of chunks (region-local coords 0..31,
+//!       inclusive; default 0 0 0 0 = one chunk), build a culled cube mesh, and
+//!       write a v1 `.vtile`. This is the P1 vertical slice: world file -> tile.
 //!
-//! Usage: vantage <region.mca> [localX localZ]   (local coords 0..31, default 0 0)
+//!   vantage histo <region.mca> [localX localZ]
+//!       P0-style block histogram for one chunk (default 0 0). Also runs when no
+//!       subcommand is given, for back-compat: `vantage <region.mca> [lx lz]`.
 
 const std = @import("std");
 const nbt = @import("nbt.zig");
 const region = @import("region.zig");
-
-const SECTION_BLOCKS = 4096; // 16 * 16 * 16
+const chunk = @import("chunk.zig");
+const grid = @import("grid.zig");
+const mesh = @import("mesh.zig");
+const tile = @import("tile.zig");
+const blocks = @import("blocks.zig");
 
 pub fn main(init: std.process.Init) !void {
-    // The runtime hands us a process-lifetime arena and the parsed args.
     const a = init.arena.allocator();
-
     const args = try init.minimal.args.toSlice(a);
-    if (args.len < 2) {
-        std.debug.print("usage: vantage <region.mca> [localX localZ]\n", .{});
-        return error.MissingArgument;
+    if (args.len < 2) return usage();
+
+    // Dispatch. If args[1] is a known subcommand use it, else treat args[1] as a
+    // region path for the legacy histogram form.
+    if (std.mem.eql(u8, args[1], "mesh")) {
+        return runMesh(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "histo")) {
+        return runHisto(init, a, args[2..]);
+    } else {
+        return runHisto(init, a, args[1..]);
     }
-    const path = args[1];
-    const lx: u5 = if (args.len > 2) @truncate(try std.fmt.parseInt(u8, args[2], 10)) else 0;
-    const lz: u5 = if (args.len > 3) @truncate(try std.fmt.parseInt(u8, args[3], 10)) else 0;
+}
+
+fn usage() error{MissingArgument} {
+    std.debug.print(
+        \\usage:
+        \\  vantage mesh  <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
+        \\  vantage histo <region.mca> [localX localZ]
+        \\
+    , .{});
+    return error.MissingArgument;
+}
+
+fn runMesh(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 2) return usage();
+    const region_path = args[0];
+    const out_path = args[1];
+
+    var cx0: u5 = 0;
+    var cz0: u5 = 0;
+    var cx1: u5 = 0;
+    var cz1: u5 = 0;
+    if (args.len >= 6) {
+        cx0 = @truncate(try std.fmt.parseInt(u8, args[2], 10));
+        cz0 = @truncate(try std.fmt.parseInt(u8, args[3], 10));
+        cx1 = @truncate(try std.fmt.parseInt(u8, args[4], 10));
+        cz1 = @truncate(try std.fmt.parseInt(u8, args[5], 10));
+    }
+    if (cx1 < cx0 or cz1 < cz0) return error.BadRange;
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, region_path, a, .unlimited);
+
+    var stats: grid.Stats = .{};
+    const g = try grid.assemble(a, bytes, cx0, cz0, cx1, cz1, &stats);
+    const m = try mesh.build(a, g);
+    const blob = try tile.serialize(a, m);
+
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = blob });
+
+    std.debug.print(
+        \\region:    {s}
+        \\chunks:    {d} loaded, {d} missing  (range {d},{d}..{d},{d})
+        \\grid:      {d} x {d} x {d} blocks  (minY={d})
+        \\mesh:      {d} vertices, {d} quads, {d} triangles
+        \\tile:      {s}  ({d} bytes)
+        \\
+    , .{
+        region_path,
+        stats.chunks_loaded,
+        stats.chunks_missing,
+        cx0,
+        cz0,
+        cx1,
+        cz1,
+        g.sx,
+        g.sy,
+        g.sz,
+        g.min_y,
+        m.vertex_count,
+        m.quadCount(),
+        m.triangleCount(),
+        out_path,
+        blob.len,
+    });
+}
+
+fn runHisto(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 1) return usage();
+    const path = args[0];
+    const lx: u5 = if (args.len > 1) @truncate(try std.fmt.parseInt(u8, args[1], 10)) else 0;
+    const lz: u5 = if (args.len > 2) @truncate(try std.fmt.parseInt(u8, args[2], 10)) else 0;
 
     const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, path, a, .unlimited);
     std.debug.print("region file: {s} ({d} bytes)\n", .{ path, bytes.len });
@@ -34,132 +112,43 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("chunk ({d},{d}) is absent in this region\n", .{ lx, lz });
         return;
     };
-    std.debug.print(
-        "chunk ({d},{d}): compression={s}, compressed={d} bytes\n",
-        .{ lx, lz, @tagName(raw.compression), raw.data.len },
-    );
-
     const chunk_nbt = try region.decompress(a, raw);
-    std.debug.print("decompressed NBT: {d} bytes ({d:.1}x)\n", .{
-        chunk_nbt.len,
-        @as(f64, @floatFromInt(chunk_nbt.len)) / @as(f64, @floatFromInt(raw.data.len)),
-    });
-
     var parser = nbt.Parser{ .buf = chunk_nbt, .arena = a };
     const root = try parser.parseRoot();
+    const ch = try chunk.decode(a, root);
 
-    printInt(root, "DataVersion");
-    printInt(root, "xPos");
-    printInt(root, "zPos");
-    printInt(root, "yPos");
-    if (nbt.get(root, "Status")) |s| {
-        if (s.* == .string) std.debug.print("Status: {s}\n", .{s.string});
-    }
-
-    const sections = blk: {
-        const t = nbt.get(root, "sections") orelse return error.NoSections;
-        if (t.* != .list) return error.BadFormat;
-        break :blk t.list.items;
-    };
+    std.debug.print("chunk ({d},{d}): DataVersion={d}, {d} sections\n", .{
+        ch.x, ch.z, ch.data_version, ch.sections.len,
+    });
 
     var hist = std.StringHashMap(u64).init(a);
     var total_nonair: u64 = 0;
-    var sections_with_blocks: usize = 0;
-
-    for (sections) |sec| {
-        if (sec != .compound) continue;
-        const bs = nbt.get(sec.compound, "block_states") orelse continue;
-        if (bs.* != .compound) continue;
-
-        const palette = blk: {
-            const t = nbt.get(bs.compound, "palette") orelse continue;
-            if (t.* != .list) continue;
-            break :blk t.list.items;
-        };
-        if (palette.len == 0) continue;
-
-        // Resolve palette index -> block name once.
-        const names = try a.alloc([]const u8, palette.len);
-        for (palette, names) |p, *nm| {
-            nm.* = "?";
-            if (p == .compound) {
-                if (nbt.get(p.compound, "Name")) |n| {
-                    if (n.* == .string) nm.* = n.string;
+    for (ch.sections) |s| {
+        var by: u32 = 0;
+        while (by < 16) : (by += 1) {
+            var bz: u32 = 0;
+            while (bz < 16) : (bz += 1) {
+                var bx: u32 = 0;
+                while (bx < 16) : (bx += 1) {
+                    const name = s.names[s.paletteIndexAt(bx, by, bz)];
+                    if (blocks.isAir(name)) continue;
+                    total_nonair += 1;
+                    try bump(&hist, name);
                 }
             }
         }
-
-        const data_tag = nbt.get(bs.compound, "data");
-        if (palette.len == 1 or data_tag == null) {
-            // Uniform section: all 4096 blocks are palette[0].
-            if (!isAir(names[0])) {
-                total_nonair += SECTION_BLOCKS;
-                try bump(&hist, names[0], SECTION_BLOCKS);
-                sections_with_blocks += 1;
-            }
-            continue;
-        }
-        if (data_tag.?.* != .long_array) continue;
-        const data = data_tag.?.long_array;
-
-        const bits = bitsForPalette(palette.len);
-        const per_long: usize = 64 / @as(usize, bits);
-        const mask: u64 = (@as(u64, 1) << bits) - 1;
-
-        var section_blocks: u64 = 0;
-        var i: usize = 0;
-        while (i < SECTION_BLOCKS) : (i += 1) {
-            const long_idx = i / per_long;
-            if (long_idx >= data.len) break;
-            const shift: u6 = @intCast((i % per_long) * @as(usize, bits));
-            const raw_long: u64 = @bitCast(data[long_idx]);
-            const pidx: usize = @intCast((raw_long >> shift) & mask);
-            if (pidx >= names.len) continue;
-            const name = names[pidx];
-            if (!isAir(name)) {
-                total_nonair += 1;
-                section_blocks += 1;
-                try bump(&hist, name, 1);
-            }
-        }
-        if (section_blocks > 0) sections_with_blocks += 1;
     }
 
-    std.debug.print(
-        "\nsections: {d} ({d} with non-air blocks)\nnon-air blocks: {d}\ndistinct block types: {d}\n\ntop blocks:\n",
-        .{ sections.len, sections_with_blocks, total_nonair, hist.count() },
-    );
+    std.debug.print("\nnon-air blocks: {d}\ndistinct types: {d}\n\ntop blocks:\n", .{
+        total_nonair, hist.count(),
+    });
     try printTop(a, &hist, 25);
 }
 
-fn printInt(entries: []const nbt.Entry, name: []const u8) void {
-    if (nbt.get(entries, name)) |t| {
-        switch (t.*) {
-            .int => |v| std.debug.print("{s}: {d}\n", .{ name, v }),
-            .byte => |v| std.debug.print("{s}: {d}\n", .{ name, v }),
-            .long => |v| std.debug.print("{s}: {d}\n", .{ name, v }),
-            else => {},
-        }
-    }
-}
-
-fn isAir(name: []const u8) bool {
-    return std.mem.eql(u8, name, "minecraft:air") or
-        std.mem.eql(u8, name, "minecraft:cave_air") or
-        std.mem.eql(u8, name, "minecraft:void_air");
-}
-
-/// bits-per-index = max(4, ceil(log2(palette_len))).
-fn bitsForPalette(n: usize) u6 {
-    var b: u6 = 4;
-    while ((@as(usize, 1) << b) < n) b += 1;
-    return b;
-}
-
-fn bump(hist: *std.StringHashMap(u64), name: []const u8, n: u64) !void {
+fn bump(hist: *std.StringHashMap(u64), name: []const u8) !void {
     const gop = try hist.getOrPut(name);
     if (!gop.found_existing) gop.value_ptr.* = 0;
-    gop.value_ptr.* += n;
+    gop.value_ptr.* += 1;
 }
 
 const Pair = struct { name: []const u8, count: u64 };
@@ -181,28 +170,12 @@ fn printTop(a: std.mem.Allocator, hist: *std.StringHashMap(u64), limit: usize) !
     }
 }
 
-test "bitsForPalette" {
-    try std.testing.expectEqual(@as(u6, 4), bitsForPalette(1));
-    try std.testing.expectEqual(@as(u6, 4), bitsForPalette(16));
-    try std.testing.expectEqual(@as(u6, 5), bitsForPalette(17));
-    try std.testing.expectEqual(@as(u6, 5), bitsForPalette(32));
-    try std.testing.expectEqual(@as(u6, 6), bitsForPalette(33));
-    try std.testing.expectEqual(@as(u6, 12), bitsForPalette(4096));
-}
-
-test "palette unpack: non-spanning packed longs" {
-    // 5 bits per index, 12 indices per long. Pack indices 0..11 into one long.
-    const bits: u6 = 5;
-    var word: u64 = 0;
-    var i: u6 = 0;
-    while (i < 12) : (i += 1) {
-        word |= @as(u64, i) << @as(u6, @intCast(i * bits));
-    }
-    const mask: u64 = (@as(u64, 1) << bits) - 1;
-    i = 0;
-    while (i < 12) : (i += 1) {
-        const shift: u6 = @intCast(i * bits);
-        const got: u64 = (word >> shift) & mask;
-        try std.testing.expectEqual(@as(u64, i), got);
-    }
+// Pull unit tests from the modules into the default test run.
+test {
+    std.testing.refAllDecls(@This());
+    _ = blocks;
+    _ = chunk;
+    _ = grid;
+    _ = mesh;
+    _ = tile;
 }

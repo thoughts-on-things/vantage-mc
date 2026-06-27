@@ -203,9 +203,15 @@ Tracer-bullet phases; each ends in something runnable and verifiable.
 - **P0 — Parsing spike. ✅ DONE.** Read region → decompress (zlib/C interop) →
   parse NBT → unpack paletted block-states → block histogram. Validated on Paper
   1.21.4 (`DataVersion 4189`, 24 sections, correct distribution). Locked Zig 0.16.
-- **P1 — Vertical slice (pixels).** Resolve a few full-cube blocks from vanilla
-  assets → naive culled mesh → minimal indexed binary tile → minimal three.js
-  viewer renders it. *Done = a chunk of real terrain visible in a browser.*
+- **P1 — Vertical slice (pixels). ✅ DONE.** Dense block-grid assembler (multi-
+  chunk, cross-chunk culling) → naive culled **indexed** cube mesh → versioned
+  binary tile (`VTL1`: positions, RGBA, normals, u32 indices) → three.js viewer.
+  Block appearance is a curated per-block average-color table (a deliberate
+  stand-in; the real vanilla-asset/texture resolver is P2). Validated on the
+  beacon 1.21.4 world: a 176-chunk patch renders as recognizable terrain (grass/
+  dirt/stone strata, acacia trees, caves, bedrock floor) matching the histogram.
+  See `docs/p1-render.png`. New modules: `blocks.zig`, `chunk.zig`, `grid.zig`,
+  `mesh.zig`, `tile.zig`; `web/` viewer.
 - **P2 — Full model resolver.** blockstates variants/multipart, model parent
   inheritance, elements/faces, rotations/uvlock, texture resolution, tinting,
   KTX2 texture-array build. *Done = arbitrary blocks render with correct textures.*
@@ -247,6 +253,12 @@ Tracer-bullet phases; each ends in something runnable and verifiable.
   old `std.fs.cwd()` / `std.process.argsAlloc` are gone); `linkSystemLibrary` is
   on the module (`exe.root_module.linkSystemLibrary("z", .{})`), not the Compile
   step; `std.ArrayList(T) = .empty` with allocator-passing methods.
+  More, from P1: file writes via `std.Io.Dir.cwd().writeFile(io, .{ .sub_path,
+  .data })`; **`std.time.Timer` is gone** (timing goes through the `Io` clock now
+  — we dropped instrumentation rather than chase it); `std.StaticStringMap(V)`
+  with `.initComptime(.{ .{"k", v}, … })` + `.get` is the comptime perfect-hash
+  table (block-color table). Reminder: a paletted section's bit width is
+  `max(4, ceil(log2(len)))`, so a ≤16-entry palette is **4** bits, not 5.
 - **Decompression**: system zlib via C interop today; vendor **libdeflate** /
   **zstd** for the production decode path. We deliberately avoid `std.compress`.
 - **Test data**: the local `beacon` Paper 1.21.4 server world (which also has

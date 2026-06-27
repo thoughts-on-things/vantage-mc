@@ -1,0 +1,7 @@
+node_modules/
+dist/
+dist-demo/
+
+# Rendered tiles (regenerate with `just render` / `vantage meshtex`)
+public/*.vtile
+public/*.vtexarr

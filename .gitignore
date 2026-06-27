@@ -2,8 +2,11 @@
 zig-out/
 .DS_Store
 
-# Generated tiles (regenerate with `vantage mesh` / `meshtex`)
+# Generated tiles (regenerate with `vantage mesh` / `meshtex` → web/public/)
 *.vtile
 *.vtexarr
-web/terrain.vtile
-web/terrain.vtexarr
+
+# Web package (see web/.gitignore for the rest)
+web/node_modules/
+web/dist/
+web/dist-demo/

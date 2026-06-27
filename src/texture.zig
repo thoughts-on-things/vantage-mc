@@ -104,6 +104,25 @@ pub const Builder = struct {
     }
 };
 
+pub const Decoded = struct { width: u32, height: u32, pixels: []u8 };
+
+/// Decode a PNG file to raw RGBA, at its native resolution (no resampling). Used
+/// for the biome colormaps, which are 256×256 and must not be tiled to 16×16.
+pub fn decodeRgba(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Decoded {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited);
+    var w: c_int = 0;
+    var h: c_int = 0;
+    var ch: c_int = 0;
+    const data = c.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &w, &h, &ch, 4) orelse
+        return error.DecodeFailed;
+    defer c.stbi_image_free(data);
+    if (w <= 0 or h <= 0) return error.DecodeFailed;
+    const n: usize = @as(usize, @intCast(w)) * @as(usize, @intCast(h)) * 4;
+    const out = try arena.alloc(u8, n);
+    @memcpy(out, data[0..n]);
+    return .{ .width = @intCast(w), .height = @intCast(h), .pixels = out };
+}
+
 pub const ARRAY_MAGIC = "VTA1";
 
 /// Serialize a texture array to a `.vtexarr` blob:

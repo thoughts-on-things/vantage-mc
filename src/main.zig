@@ -20,6 +20,7 @@ const tile = @import("tile.zig");
 const blocks = @import("blocks.zig");
 const model = @import("model.zig");
 const texture = @import("texture.zig");
+const biome = @import("biome.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -388,4 +389,5 @@ test {
     _ = tile;
     _ = model;
     _ = texture;
+    _ = biome;
 }

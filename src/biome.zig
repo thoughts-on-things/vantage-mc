@@ -1,19 +1,24 @@
-//! Biome colour data — what makes grass plains-green and savanna-gold.
+//! Biome colour — read from game data, not hard-coded.
 //!
 //! Minecraft tints certain block faces (those whose model marks a `tintindex`)
-//! by biome. Grass and foliage colours come from two 256×256 gradient images
-//! (`textures/colormap/{grass,foliage}.png`) indexed by the biome's temperature
-//! and downfall; water is a flat per-biome constant; a few biomes hard-override
-//! grass/foliage outright (badlands, swamp). This module owns:
+//! by biome. The numbers that drive that tint — temperature, downfall, and any
+//! grass/foliage/water overrides — live in the **data pack**
+//! (`data/minecraft/worldgen/biome/<name>.json`), not the resource pack. So this
+//! module reads them per biome via `Registry` rather than carrying a table, which
+//! keeps it correct across Minecraft versions and for modded biomes with no code
+//! changes. Grass/foliage colours then come from the vanilla 256×256 colormap
+//! gradients (`textures/colormap/{grass,foliage}.png`) indexed by temperature and
+//! downfall; water is a flat per-biome colour.
 //!
-//!   * a curated table of vanilla biome temperature/downfall/overrides,
-//!   * the colormap-lookup formula (the same math the game uses),
-//!   * `blockTint` — which colormap (if any) a given block's tinted faces use.
+//! What stays in code is *game logic with no data source*: the colormap lookup
+//! formula, the `grass_color_modifier` algorithms (swamp/dark_forest), and
+//! `blockTint` — which colormap a block uses, which Minecraft hard-codes in Java.
 //!
 //! The mesher precomputes, per biome present in a grid, the RGB for each `Tint`
 //! kind, so per-face tinting is a table lookup (see mesh.zig).
 
 const std = @import("std");
+const json = std.json;
 const texture = @import("texture.zig");
 
 pub const COLORMAP_DIM = 256;
@@ -38,22 +43,77 @@ pub const Tint = enum(u8) {
     pub const count = 7;
 };
 
-/// Per-biome colour parameters. `grass`/`foliage` overrides (0xRRGGBB) win over
-/// the colormap when present; `water` is always a flat constant.
+/// `grass_color_modifier` from the biome's effects — a post-process the game
+/// applies to the grass colour (no data source for the algorithm itself).
+pub const GrassModifier = enum { none, swamp, dark_forest };
+
+/// Per-biome colour parameters, as read from the data pack. `grass`/`foliage`
+/// overrides (0xRRGGBB) win over the colormap when present.
 pub const BiomeInfo = struct {
-    temperature: f32,
-    downfall: f32,
+    temperature: f32 = 0.8,
+    downfall: f32 = 0.4,
     grass: ?u24 = null,
     foliage: ?u24 = null,
+    dry_foliage: ?u24 = null,
     water: u24 = 0x3F76E4, // vanilla default water
+    grass_modifier: GrassModifier = .none,
 };
 
-/// Default for any biome not in the table (plains-like temperate).
-pub const default_biome: BiomeInfo = .{ .temperature = 0.8, .downfall = 0.4 };
+/// Temperate default for biomes with no data file (modded/unknown, or when the
+/// data pack wasn't extracted) — renders rather than failing.
+pub const default_biome: BiomeInfo = .{};
 
-pub fn lookup(name: []const u8) BiomeInfo {
-    return table.get(stripNs(name)) orelse default_biome;
-}
+/// Loads and caches biome colour parameters from the data pack. `data_root`
+/// points at `data/minecraft` (or is empty when unavailable, in which case every
+/// biome resolves to `default_biome`). `missing` counts unresolved lookups so
+/// the CLI can warn that biome colours are degraded.
+pub const Registry = struct {
+    arena: std.mem.Allocator,
+    io: std.Io,
+    data_root: []const u8,
+    cache: std.StringHashMap(BiomeInfo),
+    missing: usize = 0,
+
+    pub fn init(arena: std.mem.Allocator, io: std.Io, data_root: []const u8) Registry {
+        return .{ .arena = arena, .io = io, .data_root = data_root, .cache = std.StringHashMap(BiomeInfo).init(arena) };
+    }
+
+    pub fn lookup(self: *Registry, name: []const u8) BiomeInfo {
+        const base = stripNs(name);
+        if (self.cache.get(base)) |b| return b;
+        const info = self.load(base) catch blk: {
+            self.missing += 1;
+            break :blk default_biome;
+        };
+        self.cache.put(base, info) catch {};
+        return info;
+    }
+
+    fn load(self: *Registry, base: []const u8) !BiomeInfo {
+        if (self.data_root.len == 0) return error.NoData;
+        const path = try std.fmt.allocPrint(self.arena, "{s}/worldgen/biome/{s}.json", .{ self.data_root, base });
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, path, self.arena, .unlimited);
+        const v = try json.parseFromSliceLeaky(json.Value, self.arena, bytes, .{});
+        if (v != .object) return error.BadFormat;
+        const o = v.object;
+
+        var info: BiomeInfo = .{
+            .temperature = asF32(o.get("temperature"), 0.8),
+            .downfall = asF32(o.get("downfall"), 0.4),
+        };
+        if (o.get("effects")) |e| {
+            if (e == .object) {
+                const eo = e.object;
+                info.grass = parseColor(eo.get("grass_color"));
+                info.foliage = parseColor(eo.get("foliage_color"));
+                info.dry_foliage = parseColor(eo.get("dry_foliage_color"));
+                if (parseColor(eo.get("water_color"))) |w| info.water = w;
+                info.grass_modifier = parseModifier(eo.get("grass_color_modifier"));
+            }
+        }
+        return info;
+    }
+};
 
 /// Loaded 256×256 RGBA colormaps. Either may be empty if the asset is missing,
 /// in which case a plains-ish fallback colour is used.
@@ -84,12 +144,31 @@ const foliage_fallback: [3]u8 = .{ 110, 160, 80 };
 pub fn colorFor(maps: Colormaps, tint: Tint, info: BiomeInfo) [3]u8 {
     return switch (tint) {
         .none => .{ 255, 255, 255 },
-        .grass => if (info.grass) |c| unpackRgb(c) else colormapColor(maps.grass, info, grass_fallback),
+        .grass => grassColor(maps, info),
         .foliage => if (info.foliage) |c| unpackRgb(c) else colormapColor(maps.foliage, info, foliage_fallback),
         .water => unpackRgb(info.water),
         .spruce => .{ 0x61, 0x99, 0x61 }, // FoliageColor.getSpruceColor
         .birch => .{ 0x80, 0xa7, 0x55 }, // FoliageColor.getBirchColor
         .lily => .{ 0x20, 0x80, 0x30 }, // lily pad
+    };
+}
+
+fn grassColor(maps: Colormaps, info: BiomeInfo) [3]u8 {
+    const base = if (info.grass) |c| unpackRgb(c) else colormapColor(maps.grass, info, grass_fallback);
+    return applyGrassModifier(base, info.grass_modifier);
+}
+
+/// The `grass_color_modifier` post-process, matching the game's `GrassColor`:
+/// swamp returns a fixed colour; dark_forest darkens toward 0x28340A.
+fn applyGrassModifier(c: [3]u8, m: GrassModifier) [3]u8 {
+    return switch (m) {
+        .none => c,
+        .swamp => .{ 0x6A, 0x70, 0x39 },
+        .dark_forest => blk: {
+            const packed_c: u32 = (@as(u32, c[0]) << 16) | (@as(u32, c[1]) << 8) | c[2];
+            const m2: u32 = ((packed_c & 0xFEFEFE) + 0x28340A) >> 1;
+            break :blk .{ @intCast((m2 >> 16) & 0xFF), @intCast((m2 >> 8) & 0xFF), @intCast(m2 & 0xFF) };
+        },
     };
 }
 
@@ -110,9 +189,43 @@ fn unpackRgb(c: u24) [3]u8 {
     return .{ @intCast((c >> 16) & 0xFF), @intCast((c >> 8) & 0xFF), @intCast(c & 0xFF) };
 }
 
+/// Parse a biome-effects colour, accepting both modern hex strings ("#3f76e4")
+/// and the legacy packed-integer form older versions used.
+fn parseColor(v: ?json.Value) ?u24 {
+    const val = v orelse return null;
+    switch (val) {
+        .string => |s| {
+            const hex = if (s.len > 0 and s[0] == '#') s[1..] else s;
+            const n = std.fmt.parseInt(u32, hex, 16) catch return null;
+            return @intCast(n & 0xFFFFFF);
+        },
+        .integer => |i| return @intCast(@as(u32, @intCast(i & 0xFFFFFF))),
+        else => return null,
+    }
+}
+
+fn parseModifier(v: ?json.Value) GrassModifier {
+    const val = v orelse return .none;
+    if (val != .string) return .none;
+    if (std.mem.eql(u8, val.string, "swamp")) return .swamp;
+    if (std.mem.eql(u8, val.string, "dark_forest")) return .dark_forest;
+    return .none;
+}
+
+fn asF32(v: ?json.Value, default: f32) f32 {
+    const val = v orelse return default;
+    return switch (val) {
+        .float => |f| @floatCast(f),
+        .integer => |i| @floatFromInt(i),
+        else => default,
+    };
+}
+
 /// Which tint a block's faces use *when the model marks them with a tintindex*.
-/// Only consulted for tintindex>=0 faces, so the default (grass) is harmless for
-/// everything else. Names are namespace-stripped before matching.
+/// This mapping has no data source — Minecraft hard-codes it in Java (the
+/// `BlockColors` registry) — so it stays a heuristic here. Only consulted for
+/// tintindex>=0 faces, so the default (grass) is harmless for everything else;
+/// new `*_leaves`/`*vine*` blocks classify correctly without changes.
 pub fn blockTint(name: []const u8) Tint {
     const b = stripNs(name);
     if (std.mem.endsWith(u8, b, "_leaves") or std.mem.eql(u8, b, "leaves")) {
@@ -129,82 +242,6 @@ pub fn blockTint(name: []const u8) Tint {
     return .grass;
 }
 
-/// Curated vanilla biome temperature/downfall (+ a few colour overrides). Values
-/// match the vanilla worldgen biome JSONs (which live in the data pack, not the
-/// assets we read). Biomes absent here fall back to `default_biome`.
-const table = std.StaticStringMap(BiomeInfo).initComptime(.{
-    // temperate
-    .{ "plains", BiomeInfo{ .temperature = 0.8, .downfall = 0.4 } },
-    .{ "sunflower_plains", BiomeInfo{ .temperature = 0.8, .downfall = 0.4 } },
-    .{ "meadow", BiomeInfo{ .temperature = 0.5, .downfall = 0.8, .water = 0x0E4ECF } },
-    .{ "forest", BiomeInfo{ .temperature = 0.7, .downfall = 0.8 } },
-    .{ "flower_forest", BiomeInfo{ .temperature = 0.7, .downfall = 0.8 } },
-    .{ "birch_forest", BiomeInfo{ .temperature = 0.6, .downfall = 0.6 } },
-    .{ "old_growth_birch_forest", BiomeInfo{ .temperature = 0.6, .downfall = 0.6 } },
-    .{ "dark_forest", BiomeInfo{ .temperature = 0.7, .downfall = 0.8 } },
-    .{ "cherry_grove", BiomeInfo{ .temperature = 0.5, .downfall = 0.8, .grass = 0xB6DB61, .foliage = 0xB6DB61, .water = 0x5DB7EF } },
-
-    // cold / taiga
-    .{ "taiga", BiomeInfo{ .temperature = 0.25, .downfall = 0.8 } },
-    .{ "snowy_taiga", BiomeInfo{ .temperature = -0.5, .downfall = 0.4, .water = 0x3D57D6 } },
-    .{ "old_growth_pine_taiga", BiomeInfo{ .temperature = 0.3, .downfall = 0.8 } },
-    .{ "old_growth_spruce_taiga", BiomeInfo{ .temperature = 0.25, .downfall = 0.8 } },
-    .{ "grove", BiomeInfo{ .temperature = -0.2, .downfall = 0.8 } },
-    .{ "snowy_plains", BiomeInfo{ .temperature = 0.0, .downfall = 0.5 } },
-    .{ "ice_spikes", BiomeInfo{ .temperature = 0.0, .downfall = 0.5 } },
-    .{ "snowy_slopes", BiomeInfo{ .temperature = -0.3, .downfall = 0.9 } },
-    .{ "frozen_peaks", BiomeInfo{ .temperature = -0.7, .downfall = 0.9 } },
-    .{ "jagged_peaks", BiomeInfo{ .temperature = -0.7, .downfall = 0.9 } },
-    .{ "stony_peaks", BiomeInfo{ .temperature = 1.0, .downfall = 0.3 } },
-
-    // warm / dry
-    .{ "savanna", BiomeInfo{ .temperature = 2.0, .downfall = 0.0 } },
-    .{ "savanna_plateau", BiomeInfo{ .temperature = 2.0, .downfall = 0.0 } },
-    .{ "windswept_savanna", BiomeInfo{ .temperature = 2.0, .downfall = 0.0 } },
-    .{ "desert", BiomeInfo{ .temperature = 2.0, .downfall = 0.0 } },
-    .{ "badlands", BiomeInfo{ .temperature = 2.0, .downfall = 0.0, .grass = 0x90814D, .foliage = 0x9E814D } },
-    .{ "eroded_badlands", BiomeInfo{ .temperature = 2.0, .downfall = 0.0, .grass = 0x90814D, .foliage = 0x9E814D } },
-    .{ "wooded_badlands", BiomeInfo{ .temperature = 2.0, .downfall = 0.0, .grass = 0x90814D, .foliage = 0x9E814D } },
-
-    // windswept hills
-    .{ "windswept_hills", BiomeInfo{ .temperature = 0.2, .downfall = 0.3 } },
-    .{ "windswept_gravelly_hills", BiomeInfo{ .temperature = 0.2, .downfall = 0.3 } },
-    .{ "windswept_forest", BiomeInfo{ .temperature = 0.2, .downfall = 0.3 } },
-    .{ "stony_shore", BiomeInfo{ .temperature = 0.2, .downfall = 0.3 } },
-
-    // jungle
-    .{ "jungle", BiomeInfo{ .temperature = 0.95, .downfall = 0.9 } },
-    .{ "sparse_jungle", BiomeInfo{ .temperature = 0.95, .downfall = 0.8 } },
-    .{ "bamboo_jungle", BiomeInfo{ .temperature = 0.95, .downfall = 0.9 } },
-
-    // swamp (grass/foliage are special-cased in game; approximate constants)
-    .{ "swamp", BiomeInfo{ .temperature = 0.8, .downfall = 0.9, .grass = 0x6A7039, .foliage = 0x6A7039, .water = 0x617B64 } },
-    .{ "mangrove_swamp", BiomeInfo{ .temperature = 0.8, .downfall = 0.9, .grass = 0x6A7039, .foliage = 0x8DB127, .water = 0x3A7A6A } },
-
-    // mushroom / caves / special
-    .{ "mushroom_fields", BiomeInfo{ .temperature = 0.9, .downfall = 1.0 } },
-    .{ "dripstone_caves", BiomeInfo{ .temperature = 0.8, .downfall = 0.4 } },
-    .{ "lush_caves", BiomeInfo{ .temperature = 0.5, .downfall = 0.5 } },
-    .{ "deep_dark", BiomeInfo{ .temperature = 0.8, .downfall = 0.4 } },
-
-    // beaches / rivers
-    .{ "beach", BiomeInfo{ .temperature = 0.8, .downfall = 0.4 } },
-    .{ "snowy_beach", BiomeInfo{ .temperature = 0.05, .downfall = 0.3, .water = 0x3D57D6 } },
-    .{ "river", BiomeInfo{ .temperature = 0.5, .downfall = 0.5 } },
-    .{ "frozen_river", BiomeInfo{ .temperature = 0.0, .downfall = 0.5, .water = 0x3938C9 } },
-
-    // oceans (water colour is the visible difference)
-    .{ "ocean", BiomeInfo{ .temperature = 0.5, .downfall = 0.5 } },
-    .{ "deep_ocean", BiomeInfo{ .temperature = 0.5, .downfall = 0.5 } },
-    .{ "warm_ocean", BiomeInfo{ .temperature = 0.5, .downfall = 0.5, .water = 0x43D5EE } },
-    .{ "lukewarm_ocean", BiomeInfo{ .temperature = 0.5, .downfall = 0.5, .water = 0x45ADF5 } },
-    .{ "deep_lukewarm_ocean", BiomeInfo{ .temperature = 0.5, .downfall = 0.5, .water = 0x45ADF5 } },
-    .{ "cold_ocean", BiomeInfo{ .temperature = 0.5, .downfall = 0.5, .water = 0x3D57D6 } },
-    .{ "deep_cold_ocean", BiomeInfo{ .temperature = 0.5, .downfall = 0.5, .water = 0x3D57D6 } },
-    .{ "frozen_ocean", BiomeInfo{ .temperature = 0.0, .downfall = 0.5, .water = 0x3938C9 } },
-    .{ "deep_frozen_ocean", BiomeInfo{ .temperature = 0.5, .downfall = 0.5, .water = 0x3938C9 } },
-});
-
 test "blockTint classification" {
     try std.testing.expectEqual(Tint.grass, blockTint("minecraft:grass_block"));
     try std.testing.expectEqual(Tint.grass, blockTint("minecraft:short_grass"));
@@ -218,12 +255,22 @@ test "blockTint classification" {
     try std.testing.expectEqual(Tint.foliage, blockTint("minecraft:vine"));
 }
 
-test "biome table lookup + default fallback" {
-    try std.testing.expectEqual(@as(f32, 2.0), lookup("minecraft:savanna").temperature);
-    try std.testing.expectEqual(@as(f32, 0.0), lookup("savanna").downfall);
-    try std.testing.expectEqual(@as(u24, 0x90814D), lookup("minecraft:badlands").grass.?);
-    // unknown -> default plains-like
-    try std.testing.expectEqual(@as(f32, 0.8), lookup("minecraft:made_up").temperature);
+test "parseColor accepts hex strings and integers" {
+    try std.testing.expectEqual(@as(u24, 0x3F76E4), parseColor(.{ .string = "#3f76e4" }).?);
+    try std.testing.expectEqual(@as(u24, 0x90814D), parseColor(.{ .string = "90814d" }).?);
+    try std.testing.expectEqual(@as(u24, 0x3F76E4), parseColor(.{ .integer = 4159204 }).?);
+    try std.testing.expect(parseColor(null) == null);
+    try std.testing.expect(parseColor(.{ .bool = true }) == null);
+}
+
+test "grass_color_modifier matches the game's algorithm" {
+    // swamp ignores the input and returns a fixed colour.
+    try std.testing.expectEqual([3]u8{ 0x6A, 0x70, 0x39 }, applyGrassModifier(.{ 0x91, 0xBD, 0x59 }, .swamp));
+    // dark_forest: ((c & 0xFEFEFE) + 0x28340A) >> 1 on the packed value.
+    // plains grass 0x91BD59 -> (0x90BC58 + 0x28340A)>>1 = 0xB8F062>>1 = 0x5C7831.
+    try std.testing.expectEqual([3]u8{ 0x5C, 0x78, 0x31 }, applyGrassModifier(.{ 0x91, 0xBD, 0x59 }, .dark_forest));
+    // none is identity.
+    try std.testing.expectEqual([3]u8{ 0x91, 0xBD, 0x59 }, applyGrassModifier(.{ 0x91, 0xBD, 0x59 }, .none));
 }
 
 test "colormap lookup samples the (1-t, 1-d) corner of a gradient" {
@@ -256,10 +303,10 @@ test "colormap lookup samples the (1-t, 1-d) corner of a gradient" {
 
 test "overrides and constants bypass the colormap" {
     const maps: Colormaps = .{}; // empty -> would hit fallback for colormap kinds
-    const bad = colorFor(maps, .grass, lookup("minecraft:badlands"));
-    try std.testing.expectEqual([3]u8{ 0x90, 0x81, 0x4D }, bad);
-    const spruce = colorFor(maps, .spruce, default_biome);
-    try std.testing.expectEqual([3]u8{ 0x61, 0x99, 0x61 }, spruce);
-    const water = colorFor(maps, .water, lookup("minecraft:warm_ocean"));
-    try std.testing.expectEqual([3]u8{ 0x43, 0xD5, 0xEE }, water);
+    const badlands: BiomeInfo = .{ .temperature = 2.0, .downfall = 0.0, .grass = 0x90814D, .foliage = 0x9E814D };
+    try std.testing.expectEqual([3]u8{ 0x90, 0x81, 0x4D }, colorFor(maps, .grass, badlands));
+    try std.testing.expectEqual([3]u8{ 0x9E, 0x81, 0x4D }, colorFor(maps, .foliage, badlands));
+    try std.testing.expectEqual([3]u8{ 0x61, 0x99, 0x61 }, colorFor(maps, .spruce, default_biome));
+    const warm_ocean: BiomeInfo = .{ .temperature = 0.5, .downfall = 0.5, .water = 0x43D5EE };
+    try std.testing.expectEqual([3]u8{ 0x43, 0xD5, 0xEE }, colorFor(maps, .water, warm_ocean));
 }

@@ -215,7 +215,9 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = assets };
     var builder = try texture.Builder.init(a, init.io, assets);
     const maps = biome.Colormaps.load(a, init.io, assets);
-    const m = try mesh.buildTextured(a, g, resolver, &builder, maps);
+    const data_root = dataRootFromAssets(a, assets);
+    var reg = biome.Registry.init(a, init.io, data_root);
+    const m = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg);
     const arr = try builder.finish();
 
     const geo = try tile.serializeTexturedBiome(a, m, g.biome_names);
@@ -251,12 +253,14 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
         tex_blob.len,
     });
 
-    // Resolved tint colours per biome present — confirms the colormap loaded and
+    // Resolved tint colours per biome present — confirms the data pack loaded and
     // that biomes map to distinct grass/foliage/water (savanna gold vs plains green).
     if (g.biome_names.len > 1) {
-        std.debug.print("biome tints (grass / foliage / water):\n", .{});
+        std.debug.print("biome data: {s}\nbiome tints (grass / foliage / water):\n", .{
+            if (data_root.len > 0) data_root else "(none — using temperate defaults)",
+        });
         for (g.biome_names[1..]) |bname| {
-            const info = biome.lookup(bname);
+            const info = reg.lookup(bname);
             const gr = biome.colorFor(maps, .grass, info);
             const fo = biome.colorFor(maps, .foliage, info);
             const wa = biome.colorFor(maps, .water, info);
@@ -273,7 +277,22 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
                 wa[2],
             });
         }
+        if (reg.missing > 0) std.debug.print(
+            "  note: {d} biome(s) had no data file — extract data/minecraft/worldgen/biome\n",
+            .{reg.missing},
+        );
     }
+}
+
+/// Map `<root>/assets/minecraft` -> `<root>/data/minecraft` (the data pack lives
+/// beside the resource pack in an extracted client jar). Returns "" if the assets
+/// path isn't in that layout, in which case the registry falls back to defaults.
+fn dataRootFromAssets(a: std.mem.Allocator, assets: []const u8) []const u8 {
+    var p = assets;
+    if (std.mem.endsWith(u8, p, "/")) p = p[0 .. p.len - 1];
+    const suffix = "assets/minecraft";
+    if (!std.mem.endsWith(u8, p, suffix)) return "";
+    return std.fmt.allocPrint(a, "{s}data/minecraft", .{p[0 .. p.len - suffix.len]}) catch "";
 }
 
 /// `foo.vtile` -> `foo.vtexarr`; otherwise append `.vtexarr`.

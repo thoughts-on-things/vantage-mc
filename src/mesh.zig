@@ -169,14 +169,16 @@ const Cached = struct {
 /// fully open). Tuned gentle so creases read without crushing the texture.
 const AO_LUT = [4]u8{ 130, 178, 218, 255 };
 
-/// Build the textured mesh. `maps` are the biome colormaps used to resolve each
-/// tinted face's colour from the biome at its block position.
+/// Build the textured mesh. `maps` are the biome colormaps and `reg` the
+/// data-pack biome registry used to resolve each tinted face's colour from the
+/// biome at its block position.
 pub fn buildTextured(
     arena: std.mem.Allocator,
     g: grid.Grid,
     resolver: model.Resolver,
     tex: *texture.Builder,
     maps: biome.Colormaps,
+    reg: *biome.Registry,
 ) !Mesh2 {
     var mesh: Mesh2 = .{};
     if (g.ids.len == 0) return mesh;
@@ -185,7 +187,7 @@ pub fn buildTextured(
     @memset(cache, null);
 
     // Precompute RGB per (biome, tint-kind) so per-face tinting is a lookup.
-    const tint_colors = try buildTintTable(arena, g, maps);
+    const tint_colors = try buildTintTable(arena, g, maps, reg);
     const nkind = @as(usize, biome.Tint.count);
 
     // Precompute occluder-ness per block id (bakes every present type once) so
@@ -253,14 +255,14 @@ fn occ(g: grid.Grid, id_occluder: []const bool, x: usize, y: usize, z: usize, o:
 
 /// `[biome_id][tint_kind] -> RGB` flat table. Index 0 covers the no-data biome
 /// (resolves to plains-like defaults), so a missing biome never indexes OOB.
-fn buildTintTable(arena: std.mem.Allocator, g: grid.Grid, maps: biome.Colormaps) ![][3]u8 {
+fn buildTintTable(arena: std.mem.Allocator, g: grid.Grid, maps: biome.Colormaps, reg: *biome.Registry) ![][3]u8 {
     const nkind = @as(usize, biome.Tint.count);
     const nbiome = @max(1, g.biome_names.len);
     const kinds = [_]biome.Tint{ .none, .grass, .foliage, .water, .spruce, .birch, .lily };
     const out = try arena.alloc([3]u8, nbiome * nkind);
     for (0..nbiome) |bi| {
         const name = if (bi < g.biome_names.len) g.biome_names[bi] else "";
-        const info = biome.lookup(name);
+        const info = if (name.len == 0) biome.default_biome else reg.lookup(name);
         for (kinds) |k| out[bi * nkind + @intFromEnum(k)] = biome.colorFor(maps, k, info);
     }
     return out;

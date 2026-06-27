@@ -18,6 +18,7 @@ const grid = @import("grid.zig");
 const mesh = @import("mesh.zig");
 const tile = @import("tile.zig");
 const blocks = @import("blocks.zig");
+const model = @import("model.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -30,6 +31,8 @@ pub fn main(init: std.process.Init) !void {
         return runMesh(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "histo")) {
         return runHisto(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "resolve")) {
+        return runResolve(init, a, args[2..]);
     } else {
         return runHisto(init, a, args[1..]);
     }
@@ -38,11 +41,43 @@ pub fn main(init: std.process.Init) !void {
 fn usage() error{MissingArgument} {
     std.debug.print(
         \\usage:
-        \\  vantage mesh  <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
-        \\  vantage histo <region.mca> [localX localZ]
+        \\  vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
+        \\  vantage histo   <region.mca> [localX localZ]
+        \\  vantage resolve <assets/minecraft dir> <block-name>
         \\
     , .{});
     return error.MissingArgument;
+}
+
+fn runResolve(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 2) return usage();
+    const root = args[0];
+    const block = args[1];
+
+    const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = root };
+    const parts = try resolver.resolveBlock(block);
+
+    std.debug.print("block: {s}\nassets: {s}\nparts: {d}\n", .{ block, root, parts.len });
+    for (parts, 0..) |rm, pi| {
+        std.debug.print("\npart[{d}]  rot(x={d},y={d}) uvlock={}  elements={d}\n", .{
+            pi, rm.x, rm.y, rm.uvlock, rm.elements.len,
+        });
+        for (rm.elements, 0..) |el, ei| {
+            std.debug.print("  element[{d}] from({d:.0},{d:.0},{d:.0}) to({d:.0},{d:.0},{d:.0})\n", .{
+                ei, el.from[0], el.from[1], el.from[2], el.to[0], el.to[1], el.to[2],
+            });
+            for (el.faces) |f| {
+                std.debug.print("     {s:<6} tex={s:<34} uv=[{d:.0},{d:.0},{d:.0},{d:.0}] cull={s:<5} tint={d} rot={d}\n", .{
+                    @tagName(f.dir),
+                    f.texture,
+                    f.uv[0],     f.uv[1], f.uv[2], f.uv[3],
+                    if (f.cullface) |c| @tagName(c) else "-",
+                    f.tintindex,
+                    f.rotation,
+                });
+            }
+        }
+    }
 }
 
 fn runMesh(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
@@ -178,4 +213,5 @@ test {
     _ = grid;
     _ = mesh;
     _ = tile;
+    _ = model;
 }

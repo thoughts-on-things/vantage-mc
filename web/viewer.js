@@ -454,8 +454,15 @@ async function main() {
   const center = new THREE.Vector3(); bb.getCenter(center);
   const size = new THREE.Vector3(); bb.getSize(size);
   const maxDim = Math.max(size.x, size.y, size.z);
-  controls.target.copy(center);
-  camera.position.set(center.x + maxDim * 0.7, center.y + maxDim * 0.6, center.z + maxDim * 0.7);
+  if (/top/i.test(location.hash)) {
+    // Top-down: look straight down at the surface, framed to the footprint.
+    const span = Math.max(size.x, size.z);
+    controls.target.set(center.x, bb.max.y, center.z);
+    camera.position.set(center.x, bb.max.y + span * 0.9, center.z + 0.001);
+  } else {
+    controls.target.copy(center);
+    camera.position.set(center.x + maxDim * 0.7, center.y + maxDim * 0.6, center.z + maxDim * 0.7);
+  }
   camera.far = maxDim * 12;
   camera.updateProjectionMatrix();
 

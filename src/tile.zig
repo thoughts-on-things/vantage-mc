@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const mesh = @import("mesh.zig");
+const grid = @import("grid.zig");
 
 pub const MAGIC = "VTL1";
 pub const VERSION: u32 = 1;
@@ -145,6 +146,57 @@ pub fn serializeWithFluid(arena: std.mem.Allocator, solid: mesh.Mesh2, fluid: me
     }
 
     return out.toOwnedSlice(arena);
+}
+
+pub const MAGIC5 = "VTL5";
+pub const VERSION5: u32 = 5;
+
+/// VTL5 = VTL4 plus a top-down surface map (for fast hover-picking without
+/// raycasting geometry). Layout:
+///   "VTL5", u32 ver=5,
+///   <solid section>, <fluid section>,
+///   u32 sx, u32 sz, i32 min_x, i32 min_z,
+///   u16[sx*sz] biome, i16[sx*sz] height,
+///   u32 biome_count, legend.
+/// The u16/i16 arrays stay 2-byte aligned because every preceding field is
+/// 4-byte sized, so the frontend can view them zero-copy.
+pub fn serializeWithSurface(
+    arena: std.mem.Allocator,
+    solid: mesh.Mesh2,
+    fluid: mesh.Mesh2,
+    surface: grid.Surface,
+    biome_names: []const []const u8,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, MAGIC5);
+    try appendU32(arena, &out, VERSION5);
+    try appendMeshSection(arena, &out, solid);
+    try appendMeshSection(arena, &out, fluid);
+
+    // Surface map: dims + world origin, then the two parallel column arrays.
+    try appendU32(arena, &out, @intCast(surface.sx));
+    try appendU32(arena, &out, @intCast(surface.sz));
+    try appendI32(arena, &out, surface.min_x);
+    try appendI32(arena, &out, surface.min_z);
+    try out.appendSlice(arena, std.mem.sliceAsBytes(surface.biome));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(surface.height));
+
+    // Shared biome legend: count, then length-prefixed names (UTF-8, ns kept).
+    try appendU32(arena, &out, @intCast(biome_names.len));
+    for (biome_names) |name| {
+        var lb: [2]u8 = undefined;
+        std.mem.writeInt(u16, &lb, @intCast(@min(name.len, std.math.maxInt(u16))), .little);
+        try out.appendSlice(arena, &lb);
+        try out.appendSlice(arena, name[0..@min(name.len, std.math.maxInt(u16))]);
+    }
+
+    return out.toOwnedSlice(arena);
+}
+
+fn appendI32(arena: std.mem.Allocator, out: *std.ArrayList(u8), v: i32) !void {
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(i32, &buf, v, .little);
+    try out.appendSlice(arena, &buf);
 }
 
 fn appendMeshSection(arena: std.mem.Allocator, out: *std.ArrayList(u8), m: mesh.Mesh2) !void {

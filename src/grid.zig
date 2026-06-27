@@ -90,6 +90,50 @@ pub const Stats = struct {
     distinct_biomes: usize = 0,
 };
 
+/// A top-down surface map: per world column, the Y of the topmost non-air block
+/// and the biome there. Drives fast hover-picking in the viewer — it marches
+/// this 2D grid along the camera ray instead of raycasting millions of
+/// triangles, so identifying a biome is O(columns along the ray), independent of
+/// mesh size. `min_x`/`min_z` give the world origin so the frontend can map a
+/// world (x,z) back to a column index.
+pub const Surface = struct {
+    sx: usize,
+    sz: usize,
+    min_x: i32,
+    min_z: i32,
+    biome: []u16, // sx*sz, biome id at the top (0 = no data)
+    height: []i16, // sx*sz, world Y of the topmost non-air block (min_y-1 if empty)
+};
+
+/// Build the surface map by scanning each column from the top down for the first
+/// non-air block. Water/plants count (the hover over an ocean reports the ocean,
+/// not the seabed). Cheap relative to meshing — it stops at the first hit.
+pub fn buildSurface(arena: std.mem.Allocator, g: Grid) !Surface {
+    const n = g.sx * g.sz;
+    const biome = try arena.alloc(u16, n);
+    const height = try arena.alloc(i16, n);
+    @memset(biome, 0);
+    const empty: i16 = @intCast(g.min_y - 1);
+    var z: usize = 0;
+    while (z < g.sz) : (z += 1) {
+        var x: usize = 0;
+        while (x < g.sx) : (x += 1) {
+            const ci = z * g.sx + x;
+            height[ci] = empty;
+            var y: usize = g.sy;
+            while (y > 0) {
+                y -= 1;
+                if (g.ids[g.index(x, y, z)] != AIR) {
+                    height[ci] = @intCast(g.min_y + @as(i32, @intCast(y)));
+                    biome[ci] = g.biomeAt(x, y, z);
+                    break;
+                }
+            }
+        }
+    }
+    return .{ .sx = g.sx, .sz = g.sz, .min_x = g.min_x, .min_z = g.min_z, .biome = biome, .height = height };
+}
+
 const Interner = struct {
     arena: std.mem.Allocator,
     names: std.ArrayList([]const u8) = .empty,
@@ -325,6 +369,39 @@ test "biome interner does not air-filter and assigns ids from 1" {
     try std.testing.expectEqual(@as(u16, 1), p);
     try std.testing.expectEqual(@as(u16, 2), sv);
     try std.testing.expectEqual(p, try it.intern("minecraft:plains", ""));
+}
+
+test "buildSurface finds the topmost block and its biome per column" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    // 2x4x1 grid (sx=2, sy=4, sz=1). Column x=0 has a block at y=2; x=1 empty.
+    var ids = [_]u16{0} ** 8;
+    var names = [_][]const u8{ "", "minecraft:stone" };
+    var biome_ids = [_]u16{ 0, 5 }; // one 4x4x4 cell per column-ish (bsx=... small grid)
+    var biome_names = [_][]const u8{ "", "minecraft:plains", "minecraft:ocean", "x", "y", "z" };
+    var g: Grid = .{
+        .sx = 2,
+        .sy = 4,
+        .sz = 1,
+        .min_x = 10,
+        .min_y = -64,
+        .min_z = 20,
+        .ids = &ids,
+        .names = &names,
+        .bsx = 2,
+        .bsy = 1,
+        .bsz = 1,
+        .biome_ids = &biome_ids,
+        .biome_names = &biome_names,
+    };
+    g.ids[g.index(0, 2, 0)] = 1; // top of column x=0 is y=2
+    const s = try buildSurface(a, g);
+    try std.testing.expectEqual(@as(usize, 2), s.sx);
+    try std.testing.expectEqual(@as(i32, 10), s.min_x);
+    try std.testing.expectEqual(@as(i16, -64 + 2), s.height[0]); // world Y of the block
+    try std.testing.expectEqual(@as(u16, 0), s.biome[0]); // biome cell (0,0,0) is id 0
+    try std.testing.expectEqual(@as(i16, -64 - 1), s.height[1]); // empty column
 }
 
 test "biomeAt maps blocks to 4x4x4 cells" {

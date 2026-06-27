@@ -232,7 +232,8 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     if (display.len > 0) display[0] = ""; // air/no-data sentinel
     for (g.biome_names[1..], 1..) |bn, i| display[i] = names.biomeName(a, bn);
 
-    const geo = try tile.serializeWithFluid(a, built.solid, built.fluid, display);
+    const surface = try grid.buildSurface(a, g);
+    const geo = try tile.serializeWithSurface(a, built.solid, built.fluid, surface, display);
     const tex_blob = try texture.serialize(a, arr);
 
     const tex_path = try texArrayPath(a, out_path);
@@ -410,7 +411,8 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     const display = try a.alloc([]const u8, g.biome_names.len);
     if (display.len > 0) display[0] = "";
     for (g.biome_names[1..], 1..) |bn, idx| display[idx] = names.biomeName(a, bn);
-    const geo = try tile.serializeWithFluid(a, built.solid, built.fluid, display);
+    const surface = try grid.buildSurface(a, g);
+    const geo = try tile.serializeWithSurface(a, built.solid, built.fluid, surface, display);
     const tex_blob = try texture.serialize(a, arr);
     const tex_path = try texArrayPath(a, out_path);
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = geo });

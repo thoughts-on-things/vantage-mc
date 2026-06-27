@@ -29,6 +29,21 @@ function parseTile(buf) {
   const I = dv.getUint32(12, true);
   let off = 16;
 
+  if (magic === 'VTL5') {
+    // Solid section (V/I already read at 8/12; arrays start at 16, like VTL3).
+    const positions = new Float32Array(buf, off, 3 * V); off += 12 * V;
+    const uv = new Float32Array(buf, off, 2 * V); off += 8 * V;
+    const layer = new Float32Array(buf, off, V); off += 4 * V;
+    const colors = new Uint8Array(buf, off, 4 * V); off += 4 * V;
+    const normalsI8 = new Int8Array(buf, off, 4 * V); off += 4 * V;
+    const biome = new Float32Array(buf, off, V); off += 4 * V;
+    const indices = new Uint32Array(buf, off, I); off += 4 * I;
+    const f = parseMeshSection(buf, dv, off); off = f.off;   // transparent fluids
+    const surface = parseSurface(buf, dv, off); off = surface.off;
+    const biomeNames = parseLegend(dv, buf, off);
+    return { textured: true, hasBiome: true, V, I, positions, uv, layer, colors, biome,
+      normals: expandNormals(normalsI8, V), indices, biomeNames, fluid: f.sec, surface: surface.surf };
+  }
   if (magic === 'VTL4') {
     // Solid section (V/I already read at 8/12; arrays start at 16, like VTL3).
     const positions = new Float32Array(buf, off, 3 * V); off += 12 * V;
@@ -87,6 +102,19 @@ function parseMeshSection(buf, dv, off) {
   const biome = new Float32Array(buf, off, V); off += 4 * V;
   const indices = new Uint32Array(buf, off, I); off += 4 * I;
   return { sec: { V, I, positions, uv, layer, colors, biome, normals: expandNormals(normalsI8, V), indices }, off };
+}
+
+// Parse the VTL5 surface map (dims + world origin, then parallel column arrays)
+// at `off`; returns the surface and the offset just past it.
+function parseSurface(buf, dv, off) {
+  const sx = dv.getUint32(off, true); off += 4;
+  const sz = dv.getUint32(off, true); off += 4;
+  const minX = dv.getInt32(off, true); off += 4;
+  const minZ = dv.getInt32(off, true); off += 4;
+  const n = sx * sz;
+  const biome = new Uint16Array(buf, off, n); off += 2 * n;
+  const height = new Int16Array(buf, off, n); off += 2 * n;
+  return { surf: { sx, sz, minX, minZ, biome, height }, off };
 }
 
 function parseLegend(dv, buf, off) {
@@ -433,11 +461,36 @@ function setupBiomeUI(tile, material) {
   return { bcol, palette, tick, setMeshHover };
 }
 
-// Hover-to-identify: raycast the terrain and report the biome under the cursor
+// March the surface map along a world-space ray and return the biome id at the
+// first column the ray drops below the terrain top, or -1. O(columns along the
+// ray) — independent of mesh size, so it never stalls on huge renders (unlike a
+// per-triangle raycast). `bb` bounds the march so empty sky/space is skipped.
+function pickBiome(ray, surf, bb, _entry) {
+  let t = 0;
+  if (!bb.containsPoint(ray.origin)) {
+    if (!ray.intersectBox(bb, _entry)) return -1;     // ray misses the terrain box
+    t = ray.origin.distanceTo(_entry);                // direction is unit -> t == distance
+  }
+  const maxT = t + bb.min.distanceTo(bb.max) + 4;
+  for (; t <= maxT; t += 0.5) {
+    const x = ray.origin.x + ray.direction.x * t;
+    const y = ray.origin.y + ray.direction.y * t;
+    const z = ray.origin.z + ray.direction.z * t;
+    const cxi = Math.floor(x - surf.minX);
+    const czi = Math.floor(z - surf.minZ);
+    if (cxi < 0 || czi < 0 || cxi >= surf.sx || czi >= surf.sz) continue;
+    const idx = czi * surf.sx + cxi;
+    if (y <= surf.height[idx] + 1) return surf.biome[idx];
+  }
+  return -1;
+}
+
+// Hover-to-identify: find the biome under the cursor (via pickBiome) and show it
 // in a floating chip, mirrored as a highlight on the matching legend row.
-function setupHover(renderer, camera, mesh, tile, biomeUI, controls) {
+function setupHover(renderer, camera, surf, tile, biomeUI, controls, bb) {
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
+  const entry = new THREE.Vector3();
   let cx = 0, cy = 0, dirty = false, inside = false, dragging = false;
   const tip = document.createElement('div');
   tip.id = 'tip';
@@ -451,20 +504,19 @@ function setupHover(renderer, camera, mesh, tile, biomeUI, controls) {
     dirty = true; inside = true;
   });
   dom.addEventListener('pointerleave', () => { inside = false; dirty = true; });
-  // Don't raycast the (large) mesh while orbiting/panning — that's the lag.
+  // Skip the pick while orbiting/panning — keep interaction perfectly smooth.
   controls.addEventListener('start', () => { dragging = true; hide(); });
   controls.addEventListener('end', () => { dragging = false; });
 
   function hide() { tip.style.display = 'none'; biomeUI.setMeshHover(-1); }
 
   return function tick() {
-    if (dragging || !dirty) return; // raycast at most once per frame, never mid-drag
+    if (dragging || !dirty) return; // pick at most once per frame, never mid-drag
     dirty = false;
     if (!inside) return hide();
     raycaster.setFromCamera(ndc, camera);
-    const hit = raycaster.intersectObject(mesh, false)[0];
-    if (!hit || hit.face == null) return hide();
-    const id = tile.biome[hit.face.a] | 0;
+    const id = pickBiome(raycaster.ray, surf, bb, entry);
+    if (id < 0) return hide();
     const named = tile.biomeNames[id] && tile.biomeNames[id].length;
     const c = biomeUI.palette[id] || [0.5, 0.5, 0.5];
     tip.innerHTML = `<span class="chip" style="background:rgb(${(c[0] * 255) | 0},${(c[1] * 255) | 0},${(c[2] * 255) | 0})"></span>${named ? stripNs(tile.biomeNames[id]) : '—'}`;
@@ -547,9 +599,11 @@ async function main() {
     scene.add(buildWaterMesh(tile.fluid, material, biomeUI ? biomeUI.palette : null));
   }
 
-  const hoverTick = (tile.hasBiome && biomeUI) ? setupHover(renderer, camera, mesh, tile, biomeUI, controls) : null;
-
   const bb = geom.boundingBox;
+  // Surface-map hover picking (VTL5): O(ray length), so it stays instant on
+  // huge renders where a per-triangle raycast would freeze the page.
+  const hoverTick = (tile.surface && biomeUI) ? setupHover(renderer, camera, tile.surface, tile, biomeUI, controls, bb) : null;
+
   const center = new THREE.Vector3(); bb.getCenter(center);
   const size = new THREE.Vector3(); bb.getSize(size);
   const maxDim = Math.max(size.x, size.y, size.z);
@@ -570,8 +624,9 @@ async function main() {
     material.uniforms.uFog.value.set(maxDim * 0.85, maxDim * 2.4);
   }
 
-  const fmt = tile.fluid ? 'VTL4 · textured · biomes · water'
-    : (tile.hasBiome ? 'VTL3 textured + biomes' : (tile.textured ? 'VTL2 textured' : 'VTL1 flat'));
+  const fmt = tile.surface ? 'VTL5 · textured · biomes · water'
+    : (tile.fluid ? 'VTL4 · textured · biomes · water'
+      : (tile.hasBiome ? 'VTL3 textured + biomes' : (tile.textured ? 'VTL2 textured' : 'VTL1 flat')));
   const waterVerts = tile.fluid ? tile.fluid.V : 0;
   hud.innerHTML =
     `<div class="title">vantage <b>· ${fmt}</b></div>` +

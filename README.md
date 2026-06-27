@@ -82,10 +82,23 @@ Textured (P2) — needs an extracted `assets/minecraft` dir (Minecraft 26.2+):
 Flat-color (P1, no assets needed): use `mesh` instead of `meshtex` and drop the
 assets argument. The viewer auto-detects the tile version.
 
-> The block model/texture schema is unchanged from 1.21.x, so any modern version
-> works; the world side is version-agnostic. Asset extraction is currently manual
-> (auto-download is a pending P2 slice):
-> `unzip -oq <client>.jar 'assets/minecraft/blockstates/*' 'assets/minecraft/models/block/*' 'assets/minecraft/textures/block/*' 'assets/minecraft/textures/colormap/*' -d ~/.cache/vantage/assets/26.2`
+> Everything version-specific is read from the jar — models, textures, the biome
+> colormaps, **and the biome definitions (`data/minecraft/worldgen/biome`) and
+> names (`lang/en_us.json`)** — so pointing at a new version's jar "just works"
+> with no code changes. Extraction is currently manual (auto-download is a pending
+> P2 slice); grab the resource pack *and* the biome data pack + language file:
+>
+> ```sh
+> unzip -oq <client>.jar \
+>   'assets/minecraft/blockstates/*' 'assets/minecraft/models/block/*' \
+>   'assets/minecraft/textures/block/*' 'assets/minecraft/textures/colormap/*' \
+>   'assets/minecraft/lang/en_us.json' 'data/minecraft/worldgen/biome/*' \
+>   -d ~/.cache/vantage/assets/26.2
+> ```
+>
+> The generator derives the `data/minecraft` path from the `assets/minecraft` path
+> you pass. If the biome data isn't present it still renders, using temperate
+> defaults, and says so.
 
 ```
 region:    .../r.0.0.mca

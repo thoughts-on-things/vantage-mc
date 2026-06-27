@@ -226,16 +226,21 @@ Tracer-bullet phases; each ends in something runnable and verifiable.
   Zig 0.16 has `std.http.Client.fetch` + `std.zip` to do it in-binary).
 - **P2.5 — Biomes + interactive layers. ✅ DONE.** Biome data parsed from the
   Anvil 4×4×4 paletted arrays (`chunk.zig`), assembled into a quarter-resolution
-  biome grid (`grid.zig`), and resolved to colour through a curated vanilla
-  temperature/downfall table + the real grass/foliage colormap formula and
-  per-biome water/overrides (`biome.zig`). The mesher tints each `tintindex`
-  face by the biome at its block — true plains-green vs savanna-gold, no more
-  fixed tint. The `VTL3` tile adds a per-vertex biome id + a biome legend, and
-  the viewer ships a toggleable **biome layer** (`B` key / panel / `#biome`
-  hash): terrain recoloured by biome with relief preserved, plus a clickable
-  legend that isolates a biome. This is the first interactive map layer — biome
-  borders read at a glance. *Later:* swamp/dark-forest special grass blending,
-  a 2D top-down biome map, hover-to-identify, and natural-colour biome mode.
+  biome grid (`grid.zig`). Colour is **read from game data, not hard-coded**
+  (`biome.zig`): a `Registry` reads `data/minecraft/worldgen/biome/<name>.json`
+  for temperature/downfall/effects colours + `grass_color_modifier`, then applies
+  the vanilla grass/foliage colormap formula and the swamp/dark-forest modifiers;
+  display names come from `lang/en_us.json` (`lang.zig`). The only things still in
+  code are sourceless game logic (the colormap formula, the modifier algorithms,
+  and `blockTint` — Java's `BlockColors` registry, which no data file describes).
+  Unknown/modded biomes degrade to a temperate default. The mesher tints each
+  `tintindex` face by the biome at its block — true plains-green vs savanna-gold.
+  The `VTL3` tile adds a per-vertex biome id + a named legend; the viewer ships a
+  toggleable **biome layer** (`B` / panel / `#biome`) with ambient occlusion and
+  a lit atmosphere (sky/fog/hemispheric light), a clickable legend that isolates
+  a biome, legend-hover preview, and hover-to-identify. First interactive map
+  layer — biome borders read at a glance. *Later:* per-block height-adjusted
+  temperature, a 2D top-down biome map, and a natural-colour biome mode.
 - **P3 — Mesher hardening.** Hybrid greedy meshing; AO + light bake; fluids,
   waterlogging, transparency sorting; block-entity placeholders. *Done = a full
   region renders correctly vs in-game / BlueMap reference.*

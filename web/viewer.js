@@ -465,11 +465,11 @@ async function main() {
   }
 
   const fmt = tile.hasBiome ? 'VTL3 textured + biomes' : (tile.textured ? 'VTL2 textured' : 'VTL1 flat');
-  hud.textContent =
-    `vantage · ${fmt}\n` +
-    `${tile.V.toLocaleString()} verts · ${(tile.I / 3).toLocaleString()} tris\n` +
-    `extent ${Math.round(size.x)}×${Math.round(size.y)}×${Math.round(size.z)} blocks\n` +
-    `drag: orbit · scroll: zoom${tile.hasBiome ? ' · B: biome view' : ''}`;
+  hud.innerHTML =
+    `<div class="title">vantage <b>· ${fmt}</b></div>` +
+    `<div class="sub">${tile.V.toLocaleString()} verts · ${(tile.I / 3).toLocaleString()} tris · ` +
+    `${Math.round(size.x)}×${Math.round(size.y)}×${Math.round(size.z)} blocks</div>` +
+    `<div class="hint">drag orbit · scroll zoom${tile.hasBiome ? ' · <b>B</b> biomes · hover to identify' : ''}</div>`;
 
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;

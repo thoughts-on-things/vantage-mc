@@ -278,20 +278,36 @@ function setupBiomeUI(tile, material) {
 
   // Deep-link: #biome opens straight into the biome layer.
   let on = /biome/i.test(location.hash);
-  let hi = -1;
+  let hi = -1;             // committed (clicked) highlight, or -1
+  let preview = -1;        // transient legend-hover highlight, or -1
+  let targetMix = on ? 1 : 0;
+  let curMix = targetMix;
+  const rows = new Map();  // biome id -> row element
 
-  function setMix() {
-    material.uniforms.uBiomeMix.value = on ? 1 : 0;
-    material.uniforms.uHi.value = on ? hi : -1;
+  const effHi = () => (preview >= 0 ? preview : hi);
+  function refresh() {
+    const e = on ? effHi() : -1;
+    material.uniforms.uHi.value = e;
     toggle.textContent = on ? 'on' : 'off';
     toggle.classList.toggle('on', on);
-    for (const r of legend.children) {
-      const id = +r.dataset.id;
+    for (const [id, r] of rows) {
       r.classList.toggle('sel', on && id === hi);
-      r.classList.toggle('dim', on && hi >= 0 && id !== hi);
+      r.classList.toggle('dim', on && e >= 0 && id !== e);
     }
   }
-  function setOn(v) { on = v; if (!on) hi = -1; setMix(); }
+  function setOn(v) { on = v; if (!on) { hi = -1; preview = -1; } targetMix = on ? 1 : 0; refresh(); }
+
+  // Ease the textured<->biome blend instead of snapping; driven from the loop.
+  function tick() {
+    curMix += (targetMix - curMix) * 0.2;
+    if (Math.abs(curMix - targetMix) < 0.0015) curMix = targetMix;
+    material.uniforms.uBiomeMix.value = curMix;
+  }
+
+  // Highlight a biome's legend row from a mesh hover (distinct from sel/dim).
+  function setMeshHover(id) {
+    for (const [rid, r] of rows) r.classList.toggle('hover', rid === id);
+  }
 
   toggle.addEventListener('click', () => setOn(!on));
   window.addEventListener('keydown', (e) => { if (e.key === 'b' || e.key === 'B') setOn(!on); });
@@ -313,14 +329,57 @@ function setupBiomeUI(tile, material) {
     row.append(chip, name, pct);
     row.addEventListener('click', () => {
       if (!on) setOn(true);
-      hi = (hi === id) ? -1 : id;     // click selected biome again to clear
-      setMix();
+      hi = (hi === id) ? -1 : id;        // click the selected biome again to clear
+      refresh();
     });
+    // Sweep the legend to preview each biome isolated in the 3D view.
+    row.addEventListener('mouseenter', () => { preview = id; refresh(); });
+    row.addEventListener('mouseleave', () => { preview = -1; refresh(); });
+    rows.set(id, row);
     legend.appendChild(row);
   }
 
-  setMix();
-  return bcol;
+  refresh();
+  return { bcol, palette, tick, setMeshHover };
+}
+
+// Hover-to-identify: raycast the terrain and report the biome under the cursor
+// in a floating chip, mirrored as a highlight on the matching legend row.
+function setupHover(renderer, camera, mesh, tile, biomeUI) {
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  let cx = 0, cy = 0, dirty = false, inside = false;
+  const tip = document.createElement('div');
+  tip.id = 'tip';
+  document.body.appendChild(tip);
+  const dom = renderer.domElement;
+
+  dom.addEventListener('pointermove', (e) => {
+    cx = e.clientX; cy = e.clientY;
+    ndc.x = (e.clientX / window.innerWidth) * 2 - 1;
+    ndc.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    dirty = true; inside = true;
+  });
+  dom.addEventListener('pointerleave', () => { inside = false; dirty = true; });
+
+  function hide() { tip.style.display = 'none'; biomeUI.setMeshHover(-1); }
+
+  return function tick() {
+    if (!dirty) return;             // raycast at most once per frame, only on move
+    dirty = false;
+    if (!inside) return hide();
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObject(mesh, false)[0];
+    if (!hit || hit.face == null) return hide();
+    const id = tile.biome[hit.face.a] | 0;
+    const named = tile.biomeNames[id] && tile.biomeNames[id].length;
+    const c = biomeUI.palette[id] || [0.5, 0.5, 0.5];
+    tip.innerHTML = `<span class="chip" style="background:rgb(${(c[0] * 255) | 0},${(c[1] * 255) | 0},${(c[2] * 255) | 0})"></span>${named ? stripNs(tile.biomeNames[id]) : '—'}`;
+    tip.style.display = 'flex';
+    tip.style.left = (cx + 14) + 'px';
+    tip.style.top = (cy + 14) + 'px';
+    biomeUI.setMeshHover(id);
+  };
 }
 
 async function main() {
@@ -354,6 +413,7 @@ async function main() {
   geom.setIndex(new THREE.BufferAttribute(tile.indices, 1));
 
   let material;
+  let biomeUI = null;
   if (tile.textured) {
     let texData;
     try {
@@ -368,8 +428,8 @@ async function main() {
 
     if (tile.hasBiome) {
       geom.setAttribute('abiome', new THREE.BufferAttribute(tile.biome, 1));
-      const bcol = setupBiomeUI(tile, material);
-      geom.setAttribute('abcol', new THREE.BufferAttribute(bcol, 3));
+      biomeUI = setupBiomeUI(tile, material);
+      geom.setAttribute('abcol', new THREE.BufferAttribute(biomeUI.bcol, 3));
     } else {
       // No biome data: feed neutral defaults so the shared shader still links.
       geom.setAttribute('abiome', new THREE.BufferAttribute(new Float32Array(tile.V), 1));
@@ -387,6 +447,8 @@ async function main() {
   geom.computeBoundingBox();
   const mesh = new THREE.Mesh(geom, material);
   scene.add(mesh);
+
+  const hoverTick = (tile.hasBiome && biomeUI) ? setupHover(renderer, camera, mesh, tile, biomeUI) : null;
 
   const bb = geom.boundingBox;
   const center = new THREE.Vector3(); bb.getCenter(center);
@@ -418,6 +480,8 @@ async function main() {
   renderer.setAnimationLoop(() => {
     controls.update();
     sky.position.copy(camera.position);            // keep the dome centred on the eye
+    if (biomeUI) biomeUI.tick();                   // ease the biome crossfade
+    if (hoverTick) hoverTick();                    // resolve hover-to-identify
     renderer.render(scene, camera);
   });
 }

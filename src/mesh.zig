@@ -277,15 +277,15 @@ fn getCached(
     id: u16,
 ) !Cached {
     if (cache[id]) |c| return c;
-    const c = try bake(arena, g.nameOf(id), resolver, tex);
+    const c = try bake(arena, g.nameOf(id), g.stateOf(id), resolver, tex);
     cache[id] = c;
     return c;
 }
 
-fn bake(arena: std.mem.Allocator, name: []const u8, resolver: model.Resolver, tex: *texture.Builder) !Cached {
+fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver: model.Resolver, tex: *texture.Builder) !Cached {
     var list: std.ArrayList(BakedFace) = .empty;
 
-    const parts = resolver.resolveBlock(name) catch {
+    const parts = resolver.resolveBlock(name, state) catch {
         // Fallback: a flat-color full cube via a solid texture-array layer.
         const layer: f32 = @floatFromInt(try tex.solidLayer(blocks.lookup(name).color));
         try bakeFullCube(arena, &list, layer);

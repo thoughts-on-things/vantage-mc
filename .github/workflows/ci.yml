@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch: # allow manual re-runs (e.g. after a billing fix)
 
 # Cancel superseded runs on the same ref.
 concurrency:

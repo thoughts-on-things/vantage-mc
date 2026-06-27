@@ -1,5 +1,7 @@
 # Vantage
 
+[![CI](https://github.com/thoughts-on-things/vantage-mc/actions/workflows/ci.yml/badge.svg)](https://github.com/thoughts-on-things/vantage-mc/actions/workflows/ci.yml)
+
 A high-performance Minecraft (Java Edition) world → 3D web map renderer, written in Zig.
 
 Vantage turns a Minecraft world into a fast, beautiful, navigable 3D map in the

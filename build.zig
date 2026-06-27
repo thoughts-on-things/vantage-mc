@@ -17,6 +17,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.linkSystemLibrary("z", .{});
+    // Vendored stb_image (PNG decode) — C interop, the path DESIGN endorses over
+    // a churning std image decoder. PNG-only, decode-from-memory (see the impl TU).
+    exe.root_module.addIncludePath(b.path("vendor/stb"));
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("vendor/stb/stb_image_impl.c"),
+        .flags = &.{"-std=c99"},
+    });
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

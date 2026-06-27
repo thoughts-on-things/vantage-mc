@@ -19,6 +19,7 @@ const mesh = @import("mesh.zig");
 const tile = @import("tile.zig");
 const blocks = @import("blocks.zig");
 const model = @import("model.zig");
+const texture = @import("texture.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -33,6 +34,8 @@ pub fn main(init: std.process.Init) !void {
         return runHisto(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "resolve")) {
         return runResolve(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "texinfo")) {
+        return runTexinfo(init, a, args[2..]);
     } else {
         return runHisto(init, a, args[1..]);
     }
@@ -47,6 +50,48 @@ fn usage() error{MissingArgument} {
         \\
     , .{});
     return error.MissingArgument;
+}
+
+fn runTexinfo(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 2) return usage();
+    const root = args[0];
+    const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = root };
+    var builder = try texture.Builder.init(a, init.io, root);
+
+    // Track which (texture -> layer) we assign so we can report a sample pixel.
+    var samples: std.ArrayList([]const u8) = .empty;
+    for (args[1..]) |block| {
+        const parts = resolver.resolveBlock(block) catch |e| {
+            std.debug.print("{s}: resolve failed: {s}\n", .{ block, @errorName(e) });
+            continue;
+        };
+        for (parts) |rm| {
+            for (rm.elements) |el| {
+                for (el.faces) |f| {
+                    _ = builder.layerFor(f.texture);
+                    try samples.append(a, f.texture);
+                }
+            }
+        }
+    }
+
+    const arr = try builder.finish();
+    std.debug.print("texture array: {d}x{d}, {d} layers ({d} bytes)\n\n", .{
+        arr.width, arr.height, arr.layer_count, arr.pixels.len,
+    });
+    // Report unique texture -> layer + center pixel.
+    var seen = std.StringHashMap(void).init(a);
+    for (samples.items) |path| {
+        if (seen.contains(path)) continue;
+        try seen.put(path, {});
+        const layer = builder.layerFor(path);
+        const center = (layer * texture.TILE * texture.TILE + (texture.TILE / 2) * texture.TILE + texture.TILE / 2) * 4;
+        std.debug.print("  layer {d:>3}  {s:<34}  center rgba=({d},{d},{d},{d})\n", .{
+            layer,        path,
+            arr.pixels[center + 0], arr.pixels[center + 1],
+            arr.pixels[center + 2], arr.pixels[center + 3],
+        });
+    }
 }
 
 fn runResolve(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
@@ -214,4 +259,5 @@ test {
     _ = mesh;
     _ = tile;
     _ = model;
+    _ = texture;
 }

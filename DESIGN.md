@@ -217,14 +217,25 @@ Tracer-bullet phases; each ends in something runnable and verifiable.
   `sampler2DArray` viewer shader): blockstate variants/multipart(all-parts),
   model parent inheritance, elements/faces, model + per-face texture rotation,
   uv defaults, `#texture` var resolution, cullface culling (rotation-correct),
-  PNG decode (vendored stb_image), normalized texture-array build, fixed-tint.
+  PNG decode (vendored stb_image), normalized texture-array build.
   Validated: beacon 1.21.4 renders with correct textures (`docs/p2-render.png`).
   *Remaining hardening:* state-accurate variant selection (block Properties →
   variant; today picks the default/first, so axis/facing blocks may mis-orient),
-  real multipart `when` matching, **biome-colormap tint** (grass/foliage/water
-  vs today's fixed green), proper leaf/glass transparency, KTX2/Basis
+  real multipart `when` matching, proper leaf/glass transparency, KTX2/Basis
   supercompression, and **asset auto-download** (today: manual jar extract;
   Zig 0.16 has `std.http.Client.fetch` + `std.zip` to do it in-binary).
+- **P2.5 — Biomes + interactive layers. ✅ DONE.** Biome data parsed from the
+  Anvil 4×4×4 paletted arrays (`chunk.zig`), assembled into a quarter-resolution
+  biome grid (`grid.zig`), and resolved to colour through a curated vanilla
+  temperature/downfall table + the real grass/foliage colormap formula and
+  per-biome water/overrides (`biome.zig`). The mesher tints each `tintindex`
+  face by the biome at its block — true plains-green vs savanna-gold, no more
+  fixed tint. The `VTL3` tile adds a per-vertex biome id + a biome legend, and
+  the viewer ships a toggleable **biome layer** (`B` key / panel / `#biome`
+  hash): terrain recoloured by biome with relief preserved, plus a clickable
+  legend that isolates a biome. This is the first interactive map layer — biome
+  borders read at a glance. *Later:* swamp/dark-forest special grass blending,
+  a 2D top-down biome map, hover-to-identify, and natural-colour biome mode.
 - **P3 — Mesher hardening.** Hybrid greedy meshing; AO + light bake; fluids,
   waterlogging, transparency sorting; block-entity placeholders. *Done = a full
   region renders correctly vs in-game / BlueMap reference.*

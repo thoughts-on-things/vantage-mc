@@ -23,7 +23,8 @@ See **[DESIGN.md](./DESIGN.md)** for the full architecture, decisions, and roadm
 
 ## Status
 
-Early, but it draws — with real textures. **Phases 0–2 (core) are complete.**
+Early, but it draws — with real textures **and biome-aware colour, plus an
+interactive biome layer.** **Phases 0–2 (core) and the biome layer are complete.**
 
 - **P0 — parsing spike:** reads real Anvil region files, decompresses chunks
   (zlib via C interop), parses NBT, and unpacks the paletted block-state arrays.
@@ -35,8 +36,14 @@ Early, but it draws — with real textures. **Phases 0–2 (core) are complete.*
   textures, UVs, cullface, rotation, tint. Decodes vanilla PNGs (vendored
   stb_image) into a **texture array**, and a textured mesher emits geometry with
   per-face texture layers sampled by a WebGL2 `sampler2DArray` shader. Remaining
-  P2 hardening (state-accurate variants, multipart, biome-colormap tint, KTX2,
-  asset auto-download) is in progress.
+  P2 hardening (state-accurate variants, multipart, KTX2, asset auto-download)
+  is in progress.
+- **P2.5 — biomes & the first interactive layer:** parses Anvil biome data,
+  tints grass/foliage/water by **real biome colour** (plains-green vs
+  savanna-gold, via the vanilla temperature/downfall colormap), and ships a
+  toggleable **biome layer** in the viewer (`B` key) — terrain recoloured by
+  biome with relief preserved, plus a clickable legend that isolates a biome.
+  Biome borders read at a glance. The tile gains a per-vertex biome id (`VTL3`).
 
 Textured render of the beacon 1.21.4 world (stone→deepslate strata, grass, acacia trees):
 
@@ -68,6 +75,8 @@ Textured (P2) — needs an extracted `assets/minecraft` dir (Minecraft 26.2+):
 # 2. Serve the viewer and open it.
 ( cd web && python3 -m http.server 8753 )
 # → http://127.0.0.1:8753/index.html   (drag to orbit, scroll to zoom)
+#   Press B (or use the panel, or open #biome) to toggle the biome layer;
+#   click a biome in the legend to isolate it.
 ```
 
 Flat-color (P1, no assets needed): use `mesh` instead of `meshtex` and drop the
@@ -81,15 +90,22 @@ assets argument. The viewer auto-detects the tile version.
 ```
 region:    .../r.0.0.mca
 chunks:    176 loaded, 0 missing  (range 0,0..10,15)
+blocks:    39 distinct, 4 biomes
 grid:      176 x 384 x 256 blocks  (minY=-64)
-mesh:      272312 vertices, 68078 quads, 136156 triangles
-tile:      web/terrain.vtile  (7080128 bytes)
+textures:  41 layers (16x16)
+mesh:      291312 vertices, 145656 triangles
+tile:      web/terrain.vtile  (12235211 bytes)
+texarray:  web/terrain.vtexarr  (42004 bytes)
+biome tints (grass / foliage / water):
+  savanna                      #bfb755 / #aea42a / #3f76e4
+  plains                       #91bd59 / #77ab2f / #3f76e4
 ```
 
-### Inspect a chunk's blocks
+### Inspect a chunk's blocks (or biomes)
 
 ```sh
-./zig-out/bin/vantage histo path/to/world/region/r.0.0.mca 0 0
+./zig-out/bin/vantage histo  path/to/world/region/r.0.0.mca 0 0          # block histogram
+./zig-out/bin/vantage biomes path/to/world/region/r.0.0.mca 0 0 31 31    # biome histogram
 ```
 
 ```

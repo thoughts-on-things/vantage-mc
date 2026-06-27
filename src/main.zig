@@ -34,6 +34,8 @@ pub fn main(init: std.process.Init) !void {
         return runMeshTex(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "histo")) {
         return runHisto(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "biomes")) {
+        return runBiomes(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "resolve")) {
         return runResolve(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "texinfo")) {
@@ -49,6 +51,7 @@ fn usage() error{MissingArgument} {
         \\  vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
         \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1]
         \\  vantage histo   <region.mca> [localX localZ]
+        \\  vantage biomes  <region.mca> [cx0 cz0 cx1 cz1]
         \\  vantage resolve <assets/minecraft dir> <block-name>
         \\  vantage texinfo <assets/minecraft dir> <block-name...>
         \\
@@ -300,6 +303,54 @@ fn runHisto(init: std.process.Init, a: std.mem.Allocator, args: []const []const 
         total_nonair, hist.count(),
     });
     try printTop(a, &hist, 25);
+}
+
+/// Histogram of biome cells over a chunk range — verifies biome decode and
+/// enumerates which biomes a region actually contains.
+fn runBiomes(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 1) return usage();
+    const path = args[0];
+    var cx0: u5 = 0;
+    var cz0: u5 = 0;
+    var cx1: u5 = 0;
+    var cz1: u5 = 0;
+    if (args.len >= 5) {
+        cx0 = @truncate(try std.fmt.parseInt(u8, args[1], 10));
+        cz0 = @truncate(try std.fmt.parseInt(u8, args[2], 10));
+        cx1 = @truncate(try std.fmt.parseInt(u8, args[3], 10));
+        cz1 = @truncate(try std.fmt.parseInt(u8, args[4], 10));
+    }
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, path, a, .unlimited);
+    const reg = region.Region.fromBytes(bytes);
+
+    var hist = std.StringHashMap(u64).init(a);
+    var sections: u64 = 0;
+    var cz: u32 = cz0;
+    while (cz <= cz1) : (cz += 1) {
+        var cx: u32 = cx0;
+        while (cx <= cx1) : (cx += 1) {
+            const raw = (try reg.rawChunk(@intCast(cx), @intCast(cz))) orelse continue;
+            const chunk_nbt = try region.decompress(a, raw);
+            var parser = nbt.Parser{ .buf = chunk_nbt, .arena = a };
+            const root = try parser.parseRoot();
+            const ch = try chunk.decode(a, root);
+            for (ch.sections) |s| {
+                if (s.biome_names.len == 0) continue;
+                sections += 1;
+                var cell: u32 = 0;
+                while (cell < chunk.BIOME_CELLS) : (cell += 1) {
+                    const idx = if (s.biome_indices.len == 0) 0 else s.biome_indices[cell];
+                    try bump(&hist, s.biome_names[idx]);
+                }
+            }
+        }
+    }
+
+    std.debug.print("biome cells over chunks ({d},{d})..({d},{d}): {d} sections, {d} distinct biomes\n\n", .{
+        cx0, cz0, cx1, cz1, sections, hist.count(),
+    });
+    try printTop(a, &hist, 50);
 }
 
 fn bump(hist: *std.StringHashMap(u64), name: []const u8) !void {

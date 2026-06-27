@@ -58,12 +58,12 @@ zig build test            # run unit tests
 
 ### Render terrain in the browser
 
-Textured (P2) — needs an extracted `assets/minecraft` dir (vanilla 1.21.x):
+Textured (P2) — needs an extracted `assets/minecraft` dir (Minecraft 26.2+):
 
 ```sh
 # 1. Mesh a rectangle of chunks (region-local coords 0..31, inclusive) with textures.
 ./zig-out/bin/vantage meshtex path/to/region/r.0.0.mca web/terrain.vtile \
-    ~/.cache/vantage/assets/1.21.8/assets/minecraft 0 0 10 15
+    ~/.cache/vantage/assets/26.2/assets/minecraft 0 0 10 15
 
 # 2. Serve the viewer and open it.
 ( cd web && python3 -m http.server 8753 )
@@ -73,8 +73,10 @@ Textured (P2) — needs an extracted `assets/minecraft` dir (vanilla 1.21.x):
 Flat-color (P1, no assets needed): use `mesh` instead of `meshtex` and drop the
 assets argument. The viewer auto-detects the tile version.
 
-> Asset extraction is currently manual (auto-download is a pending P2 slice):
-> `unzip -oq <client>.jar 'assets/minecraft/blockstates/*' 'assets/minecraft/models/block/*' 'assets/minecraft/textures/block/*' 'assets/minecraft/textures/colormap/*' -d ~/.cache/vantage/assets/1.21.8`
+> The block model/texture schema is unchanged from 1.21.x, so any modern version
+> works; the world side is version-agnostic. Asset extraction is currently manual
+> (auto-download is a pending P2 slice):
+> `unzip -oq <client>.jar 'assets/minecraft/blockstates/*' 'assets/minecraft/models/block/*' 'assets/minecraft/textures/block/*' 'assets/minecraft/textures/colormap/*' -d ~/.cache/vantage/assets/26.2`
 
 ```
 region:    .../r.0.0.mca

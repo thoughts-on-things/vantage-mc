@@ -155,6 +155,7 @@ const FRAG = /* glsl */`
   void main() {
     vec4 t = texture(map, vec3(vUv, vLayer));
     if (t.a < 0.5) discard;                       // alpha cutout (grass overlay etc.)
+    float ao = vTint.a;                           // baked ambient occlusion (colour alpha)
     vec3 texcol = t.rgb * vTint.rgb;
     float luma = dot(texcol, vec3(0.299, 0.587, 0.114));
     // Biome view keeps terrain relief by modulating the flat biome colour by luma.
@@ -166,7 +167,7 @@ const FRAG = /* glsl */`
     }
     float ndl = max(dot(normalize(vN), normalize(lightDir)), 0.0);
     float light = 0.45 + 0.55 * ndl;              // ambient + diffuse
-    frag = vec4(base * light, 1.0);
+    frag = vec4(base * light * ao, 1.0);
   }
 `;
 

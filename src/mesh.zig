@@ -153,11 +153,21 @@ const BakedFace = struct {
     /// position at emit time, since the same model bakes once but tints by biome.
     tint: biome.Tint,
     cull: ?model.Dir,
+    /// Whether to compute per-vertex ambient occlusion for this face (only full,
+    /// cullface-bearing faces — billboards/cross models stay full-bright).
+    ao: bool = false,
+    /// Per corner, the three neighbour offsets (side1, side2, corner) sampled in
+    /// the face's outward plane for AO. World-space (already rotation-baked).
+    ao_off: [4][3][3]i8 = undefined,
 };
 const Cached = struct {
     faces: []BakedFace,
     occluder: bool,
 };
+
+/// Per-vertex AO brightness by occlusion level 0..3 (darkest concave corner ->
+/// fully open). Tuned gentle so creases read without crushing the texture.
+const AO_LUT = [4]u8{ 130, 178, 218, 255 };
 
 /// Build the textured mesh. `maps` are the biome colormaps used to resolve each
 /// tinted face's colour from the biome at its block position.
@@ -178,6 +188,13 @@ pub fn buildTextured(
     const tint_colors = try buildTintTable(arena, g, maps);
     const nkind = @as(usize, biome.Tint.count);
 
+    // Precompute occluder-ness per block id (bakes every present type once) so
+    // AO neighbour tests and cull tests are a flat array read, not a re-bake.
+    const id_occluder = try arena.alloc(bool, g.names.len);
+    for (id_occluder, 0..) |*o, id| {
+        o.* = if (id == 0) false else (try getCached(arena, g, resolver, tex, cache, @intCast(id))).occluder;
+    }
+
     var y: usize = 0;
     while (y < g.sy) : (y += 1) {
         var z: usize = 0;
@@ -186,7 +203,7 @@ pub fn buildTextured(
             while (x < g.sx) : (x += 1) {
                 const id = g.ids[g.index(x, y, z)];
                 if (id == grid.AIR) continue;
-                const cb = try getCached(arena, g, resolver, tex, cache, id);
+                const cb = cache[id].?; // populated by the occluder pre-pass
                 const bid: usize = g.biomeAt(x, y, z);
                 const wx: f32 = @floatFromInt(@as(i64, g.min_x) + @as(i64, @intCast(x)));
                 const wy: f32 = @floatFromInt(@as(i64, g.min_y) + @as(i64, @intCast(y)));
@@ -194,23 +211,44 @@ pub fn buildTextured(
                 for (cb.faces) |face| {
                     if (face.cull) |c| {
                         const off = dirOffset(c);
-                        const nb = g.at(
-                            @as(isize, @intCast(x)) + off[0],
-                            @as(isize, @intCast(y)) + off[1],
-                            @as(isize, @intCast(z)) + off[2],
-                        );
-                        if (nb != grid.AIR) {
-                            const ncb = try getCached(arena, g, resolver, tex, cache, nb);
-                            if (ncb.occluder) continue;
-                        }
+                        if (id_occluder[
+                            g.at(
+                                @as(isize, @intCast(x)) + off[0],
+                                @as(isize, @intCast(y)) + off[1],
+                                @as(isize, @intCast(z)) + off[2],
+                            )
+                        ]) continue;
                     }
                     const rgb = tint_colors[bid * nkind + @intFromEnum(face.tint)];
-                    try emitBaked(arena, &mesh, wx, wy, wz, face, .{ rgb[0], rgb[1], rgb[2], 255 }, bid);
+                    var ao = [4]u8{ 255, 255, 255, 255 };
+                    if (face.ao) {
+                        for (0..4) |ci| ao[ci] = cornerAo(g, id_occluder, x, y, z, face.ao_off[ci]);
+                    }
+                    try emitBaked(arena, &mesh, wx, wy, wz, face, rgb, ao, bid);
                 }
             }
         }
     }
     return mesh;
+}
+
+/// Ambient-occlusion brightness for one face corner: 3-4 = open, 0 = a full
+/// concave pocket. side1 & side2 both solid forces the darkest level.
+fn cornerAo(g: grid.Grid, id_occluder: []const bool, x: usize, y: usize, z: usize, off: [3][3]i8) u8 {
+    const s1 = occ(g, id_occluder, x, y, z, off[0]);
+    const s2 = occ(g, id_occluder, x, y, z, off[1]);
+    const cn = occ(g, id_occluder, x, y, z, off[2]);
+    const level: usize = if (s1 == 1 and s2 == 1) 0 else 3 - @as(usize, s1 + s2 + cn);
+    return AO_LUT[level];
+}
+
+fn occ(g: grid.Grid, id_occluder: []const bool, x: usize, y: usize, z: usize, o: [3]i8) u8 {
+    const nb = g.at(
+        @as(isize, @intCast(x)) + o[0],
+        @as(isize, @intCast(y)) + o[1],
+        @as(isize, @intCast(z)) + o[2],
+    );
+    return if (id_occluder[nb]) 1 else 0;
 }
 
 /// `[biome_id][tint_kind] -> RGB` flat table. Index 0 covers the no-data biome
@@ -273,7 +311,10 @@ fn bake(arena: std.mem.Allocator, name: []const u8, resolver: model.Resolver, te
                 // blocks (logs, deepslate axis variants) cull against the wrong
                 // neighbor and punch holes.
                 const cull: ?model.Dir = if (mf.cullface) |cf| rotateDir(cf, rm.x, rm.y) else null;
-                var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = tint, .cull = cull };
+                // AO only on cullface-bearing faces (real exposed block faces);
+                // cross/plant billboards have no cullface and stay full-bright.
+                const ao_on = mf.cullface != null;
+                var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = tint, .cull = cull, .ao = ao_on };
                 for (0..4) |i| {
                     const cs = tf.corners[i];
                     var p = [3]f32{
@@ -283,6 +324,7 @@ fn bake(arena: std.mem.Allocator, name: []const u8, resolver: model.Resolver, te
                     };
                     var n = [3]f32{ @floatFromInt(tf.n[0]), @floatFromInt(tf.n[1]), @floatFromInt(tf.n[2]) };
                     rotate(&p, &n, rm.x, rm.y);
+                    if (ao_on) bf.ao_off[i] = cornerAoOffsets(n, p);
                     const u: f32 = @floatCast((if (tf.uvsel[i][0] == 1) mf.uv[2] else mf.uv[0]) / 16.0);
                     const v: f32 = @floatCast((if (tf.uvsel[i][1] == 1) mf.uv[3] else mf.uv[1]) / 16.0);
                     bf.verts[i] = .{
@@ -304,11 +346,14 @@ fn bake(arena: std.mem.Allocator, name: []const u8, resolver: model.Resolver, te
 
 fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32) !void {
     for (tex_faces) |tf| {
-        var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = .none, .cull = tf.dir };
+        var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = .none, .cull = tf.dir, .ao = true };
+        const n = [3]f32{ @floatFromInt(tf.n[0]), @floatFromInt(tf.n[1]), @floatFromInt(tf.n[2]) };
         for (0..4) |i| {
             const cs = tf.corners[i];
+            const p = [3]f32{ @floatFromInt(cs[0]), @floatFromInt(cs[1]), @floatFromInt(cs[2]) };
+            bf.ao_off[i] = cornerAoOffsets(n, p);
             bf.verts[i] = .{
-                .pos = .{ @floatFromInt(cs[0]), @floatFromInt(cs[1]), @floatFromInt(cs[2]) },
+                .pos = p,
                 .uv = .{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(1 - tf.uvsel[i][1]) },
                 .n = tf.n,
             };
@@ -317,14 +362,43 @@ fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer
     }
 }
 
-fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, wx: f32, wy: f32, wz: f32, face: BakedFace, color: [4]u8, bid: usize) !void {
+/// The three neighbour offsets (side1, side2, corner) for one face corner's AO,
+/// in the plane just outside the face. `n` is the (rotated) face normal; `p` the
+/// corner position in 0..1 cube space — its side on each tangent axis picks the
+/// neighbour direction. Correct for axis-aligned cube faces (the vast majority);
+/// approximate for sub-cube elements, which is why AO is gated to cullface faces.
+fn cornerAoOffsets(n: [3]f32, p: [3]f32) [3][3]i8 {
+    const base = [3]i8{ quantNormal(n[0]), quantNormal(n[1]), quantNormal(n[2]) };
+    var du = [3]i8{ 0, 0, 0 };
+    var dv = [3]i8{ 0, 0, 0 };
+    var have_u = false;
+    for (0..3) |a| {
+        if (base[a] != 0) continue;
+        const sign: i8 = if (p[a] > 0.5) 1 else -1;
+        if (!have_u) {
+            du[a] = sign;
+            have_u = true;
+        } else {
+            dv[a] = sign;
+        }
+    }
+    return .{ addv(base, du), addv(base, dv), addv(addv(base, du), dv) };
+}
+
+fn addv(a: [3]i8, b: [3]i8) [3]i8 {
+    return .{ a[0] + b[0], a[1] + b[1], a[2] + b[2] };
+}
+
+/// `rgb` is the face's biome tint (shared by all 4 verts); `ao` is the per-vertex
+/// ambient-occlusion brightness, carried in the colour's alpha channel.
+fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, wx: f32, wy: f32, wz: f32, face: BakedFace, rgb: [3]u8, ao: [4]u8, bid: usize) !void {
     const base = mesh.vertex_count;
     const bid_f: f32 = @floatFromInt(bid);
-    for (face.verts) |v| {
+    for (face.verts, 0..) |v, i| {
         try mesh.positions.appendSlice(arena, &.{ wx + v.pos[0], wy + v.pos[1], wz + v.pos[2] });
         try mesh.uv.appendSlice(arena, &.{ v.uv[0], v.uv[1] });
         try mesh.layer.append(arena, face.layer);
-        try mesh.color.appendSlice(arena, &color);
+        try mesh.color.appendSlice(arena, &.{ rgb[0], rgb[1], rgb[2], ao[i] });
         try mesh.normals.appendSlice(arena, &.{ v.n[0], v.n[1], v.n[2], 0 });
         try mesh.biome.append(arena, bid_f);
     }
@@ -448,6 +522,19 @@ fn isTransparent(name: []const u8) bool {
         if (std.mem.indexOf(u8, name, nd) != null) return true;
     }
     return false;
+}
+
+test "cornerAoOffsets samples the right in-plane neighbours" {
+    // Up face (+Y), min corner (x=0,z=0): tangents point toward -x and -z.
+    const lo = cornerAoOffsets(.{ 0, 1, 0 }, .{ 0, 1, 0 });
+    try std.testing.expectEqual([3]i8{ -1, 1, 0 }, lo[0]); // side along -x
+    try std.testing.expectEqual([3]i8{ 0, 1, -1 }, lo[1]); // side along -z
+    try std.testing.expectEqual([3]i8{ -1, 1, -1 }, lo[2]); // diagonal corner
+    // Up face, max corner (x=1,z=1): tangents point toward +x and +z.
+    const hi = cornerAoOffsets(.{ 0, 1, 0 }, .{ 1, 1, 1 });
+    try std.testing.expectEqual([3]i8{ 1, 1, 0 }, hi[0]);
+    try std.testing.expectEqual([3]i8{ 0, 1, 1 }, hi[1]);
+    try std.testing.expectEqual([3]i8{ 1, 1, 1 }, hi[2]);
 }
 
 test "rotateDir matches the geometry/normal rotation convention" {

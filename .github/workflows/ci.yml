@@ -24,7 +24,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.0
 
       # The generator links system zlib via C interop (compress.zig); Linux
       # runners need the dev package for zlib.h.
@@ -49,7 +49,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.0
       - name: Set up Zig
         uses: mlugg/setup-zig@v2.2.1
         with:

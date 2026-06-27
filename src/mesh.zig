@@ -199,11 +199,16 @@ pub fn buildTextured(
 
     // Precompute occluder-ness and water-ness per block id (bakes every present
     // type once) so cull/AO tests are a flat array read, not a re-bake. Water is
-    // never an occluder, so the floor under it still meshes.
+    // never an occluder, so the floor under it still meshes. `waterish` also
+    // covers waterlogged blocks (seagrass, kelp, waterlogged stairs/…) so the
+    // water reads as one continuous body, not a shell around each plant.
     const id_occluder = try arena.alloc(bool, g.names.len);
-    const is_water = try arena.alloc(bool, g.names.len);
-    for (id_occluder, is_water, 0..) |*o, *w, id| {
-        w.* = id != 0 and isWater(g.nameOf(@intCast(id)));
+    const is_water = try arena.alloc(bool, g.names.len); // pure water (no block model)
+    const waterish = try arena.alloc(bool, g.names.len); // water OR waterlogged
+    for (id_occluder, is_water, waterish, 0..) |*o, *w, *wi, id| {
+        const nm = g.nameOf(@intCast(id));
+        w.* = id != 0 and isWater(nm);
+        wi.* = id != 0 and (w.* or isWaterlogged(nm, g.stateOf(@intCast(id))));
         o.* = if (id == 0) false else (try getCached(arena, g, resolver, tex, cache, @intCast(id))).occluder;
     }
     const water_layer: f32 = @floatFromInt(tex.layerFor("block/water_still"));
@@ -221,12 +226,11 @@ pub fn buildTextured(
                 const wy: f32 = @floatFromInt(@as(i64, g.min_y) + @as(i64, @intCast(y)));
                 const wz: f32 = @floatFromInt(@as(i64, g.min_z) + @as(i64, @intCast(z)));
 
-                // Water: transparent pass. Boundary-only faces (hidden behind
-                // opaque, merged with adjacent water), a lowered surface lip, and
-                // depth darkening — see emitFluid.
+                // Pure water: transparent pass only (no block model). Boundary
+                // faces, surface lip, depth — see emitFluid.
                 if (is_water[id]) {
                     const rgb = tint_colors[bid * nkind + @intFromEnum(biome.Tint.water)];
-                    try emitFluid(arena, &fluid, g, id_occluder, is_water, water_layer, x, y, z, wx, wy, wz, rgb, bid);
+                    try emitFluid(arena, &fluid, g, id_occluder, waterish, water_layer, x, y, z, wx, wy, wz, rgb, bid);
                     continue;
                 }
 
@@ -249,6 +253,14 @@ pub fn buildTextured(
                     }
                     try emitBaked(arena, &mesh, wx, wy, wz, face, rgb, ao, bid);
                 }
+
+                // Waterlogged block (seagrass, kelp, waterlogged stair/…): it just
+                // rendered its model into the opaque mesh; now lay continuous water
+                // over its cell so it sits *in* the water instead of in a shell.
+                if (waterish[id]) {
+                    const rgb = tint_colors[bid * nkind + @intFromEnum(biome.Tint.water)];
+                    try emitFluid(arena, &fluid, g, id_occluder, waterish, water_layer, x, y, z, wx, wy, wz, rgb, bid);
+                }
             }
         }
     }
@@ -259,17 +271,31 @@ fn isWater(name: []const u8) bool {
     return std.mem.eql(u8, model.stripNs(name), "water");
 }
 
+/// Whether a block holds water in its cell (so water should flow through it
+/// rather than wall it off). Explicit `waterlogged=true` comes from the
+/// blockstate; the always-water-filled plants are defined in game *code*, not
+/// data, so a small curated set is unavoidable — kept minimal and version-stable.
+fn isWaterlogged(name: []const u8, state: []const u8) bool {
+    if (std.mem.indexOf(u8, state, "waterlogged=true") != null) return true;
+    const always = [_][]const u8{ "seagrass", "tall_seagrass", "kelp", "kelp_plant", "bubble_column" };
+    const b = model.stripNs(name);
+    for (always) |w| if (std.mem.eql(u8, b, w)) return true;
+    return false;
+}
+
 /// Emit a water cell's boundary faces into the transparent `mesh`. A face draws
-/// only when its neighbour is neither opaque (would hide it) nor water (merged),
-/// so an ocean interior is empty and only the surface sheet + exposed edges cost
-/// geometry. Cells open to air get the classic 14/16 surface lip; deeper water
-/// (more cells below) is darkened, stored in the colour's alpha like AO.
+/// only when its neighbour is neither opaque (would hide it) nor waterish (water
+/// or waterlogged — merged), so an ocean interior is empty and only the surface
+/// sheet + exposed edges cost geometry. Cells open to sky get the classic 14/16
+/// surface lip. A 0..1 depth factor (cells below, capped) rides in the colour
+/// alpha; the shader turns it into opacity so shallow water is clear and deep
+/// water reads as solid blue — smooth accumulation, not hard per-block shading.
 fn emitFluid(
     arena: std.mem.Allocator,
     mesh: *Mesh2,
     g: grid.Grid,
     id_occluder: []const bool,
-    is_water: []const bool,
+    waterish: []const bool,
     layer: f32,
     x: usize,
     y: usize,
@@ -286,16 +312,16 @@ fn emitFluid(
     // Lowered surface when open to sky above (the classic lip); a covered or
     // submerged cell fills full height so columns join seamlessly.
     const top: f32 = if (g.at(xi, yi + 1, zi) == grid.AIR) 14.0 / 16.0 else 1.0;
-    // Depth shading: count water cells directly below, darken with depth.
+    // Depth: count waterish cells directly below (capped) -> 0..1 in the alpha.
     var below: u32 = 0;
     var yy: isize = yi - 1;
-    while (below < 24 and is_water[g.at(xi, yy, zi)]) : (yy -= 1) below += 1;
-    const dark = depthDark(below);
+    while (below < 32 and waterish[g.at(xi, yy, zi)]) : (yy -= 1) below += 1;
+    const depth = depthFactor(below);
     const bid_f: f32 = @floatFromInt(bid);
 
     for (tex_faces) |tf| {
         const nb = g.at(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2]);
-        if (id_occluder[nb] or is_water[nb]) continue; // hidden by solid / merged with water
+        if (id_occluder[nb] or waterish[nb]) continue; // hidden by solid / merged with water
         const base = mesh.vertex_count;
         for (0..4) |i| {
             const cs = tf.corners[i];
@@ -307,7 +333,7 @@ fn emitFluid(
             });
             try mesh.uv.appendSlice(arena, &.{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(1 - tf.uvsel[i][1]) });
             try mesh.layer.append(arena, layer);
-            try mesh.color.appendSlice(arena, &.{ rgb[0], rgb[1], rgb[2], dark });
+            try mesh.color.appendSlice(arena, &.{ rgb[0], rgb[1], rgb[2], depth });
             try mesh.normals.appendSlice(arena, &.{ tf.n[0], tf.n[1], tf.n[2], 0 });
             try mesh.biome.append(arena, bid_f);
         }
@@ -316,11 +342,11 @@ fn emitFluid(
     }
 }
 
-/// Brightness multiplier (in the colour alpha, like AO) for water `below` cells
-/// deep: 1.0 at the surface fading to 0.5 by ~14 deep, so oceans read as deep.
-fn depthDark(below: u32) u8 {
-    const t = @min(@as(f32, @floatFromInt(below)) / 14.0, 1.0);
-    return @intFromFloat((1.0 - 0.5 * t) * 255.0);
+/// Water depth as a 0..1 factor (0 = surface/shallow, 1 = deep) for `below`
+/// cells of water, saturating near ~16 deep. The shader maps it to opacity.
+fn depthFactor(below: u32) u8 {
+    const t = @min(@as(f32, @floatFromInt(below)) / 16.0, 1.0);
+    return @intFromFloat(t * 255.0);
 }
 
 /// Ambient-occlusion brightness for one face corner: 3-4 = open, 0 = a full

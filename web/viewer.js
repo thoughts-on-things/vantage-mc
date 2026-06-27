@@ -183,7 +183,8 @@ const FRAG = /* glsl */`
   uniform float uHi;         // highlighted biome id, or -1
   uniform vec3 uFogColor;
   uniform vec2 uFog;         // (near, far)
-  uniform float uAlpha;      // 1 = opaque terrain · <1 = transparent water
+  uniform float uAlpha;      // terrain opacity (1)
+  uniform float uWater;      // 1 = this is the water pass
   in vec2 vUv;
   in vec4 vTint;
   in vec3 vBcol;
@@ -198,6 +199,26 @@ const FRAG = /* glsl */`
   void main() {
     vec4 t = texture(map, vec3(vUv, vLayer));
     if (t.a < 0.5) discard;                        // alpha cutout (grass overlay etc.)
+    vec3 N = normalize(vN);
+    vec3 ambient = mix(GND, SKY, 0.5 + 0.5 * N.y); // sky above, earth below
+    float ndl = max(dot(N, normalize(lightDir)), 0.0);
+
+    // Water pass: a mostly-flat biome-coloured surface (only a faint ripple from
+    // the texture, so it doesn't read as noise). Depth (colour alpha, 0..1) drives
+    // *opacity* — shallow water is clear so the seabed shows, deep water turns to
+    // solid blue. That accumulation reads as real depth without per-block shading.
+    if (uWater > 0.5) {
+      float ripple = dot(t.rgb, vec3(0.299, 0.587, 0.114));
+      vec3 wcol = vTint.rgb * (0.82 + 0.20 * ripple);
+      float depth = vTint.a;
+      wcol = mix(wcol, wcol * vec3(0.55, 0.66, 0.85), depth);   // deep water cools + deepens
+      vec3 wlit = wcol * (0.55 + 0.40 * ambient + 0.45 * SUN * ndl);
+      float wf = smoothstep(uFog.x, uFog.y, vFog);
+      float wa = mix(0.35, 0.88, depth);                        // shallow clear -> deep opaque
+      frag = vec4(mix(wlit, uFogColor, wf), wa);
+      return;
+    }
+
     float ao = vTint.a;                            // baked ambient occlusion (colour alpha)
     vec3 texcol = t.rgb * vTint.rgb;
     float luma = dot(texcol, vec3(0.299, 0.587, 0.114));
@@ -208,9 +229,6 @@ const FRAG = /* glsl */`
       float g = dot(base, vec3(0.299, 0.587, 0.114));
       base = mix(base, vec3(g) * 0.55, 0.82);      // fade biomes other than the selected one
     }
-    vec3 N = normalize(vN);
-    vec3 ambient = mix(GND, SKY, 0.5 + 0.5 * N.y); // sky above, earth below
-    float ndl = max(dot(N, normalize(lightDir)), 0.0);
     vec3 lit = base * (0.25 + 0.45 * ambient + 0.55 * SUN * ndl) * ao;
     float f = smoothstep(uFog.x, uFog.y, vFog);    // aerial depth into the horizon
     frag = vec4(mix(lit, uFogColor, f), uAlpha);
@@ -268,6 +286,7 @@ function buildTexturedMaterial(texData) {
       uFogColor: { value: new THREE.Vector3(...SKY_HORIZON) },
       uFog: { value: new THREE.Vector2(1e6, 2e6) },  // set from terrain extent
       uAlpha: { value: 1.0 },
+      uWater: { value: 0.0 },
     },
     vertexShader: VERT,
     fragmentShader: FRAG,
@@ -281,7 +300,7 @@ function buildTexturedMaterial(texData) {
 function buildWaterMaterial(terrainMat) {
   const u = {};
   for (const k in terrainMat.uniforms) u[k] = terrainMat.uniforms[k]; // share refs
-  u.uAlpha = { value: 0.80 };                                          // own alpha
+  u.uWater = { value: 1.0 };                                           // own water flag
   return new THREE.ShaderMaterial({
     glslVersion: THREE.GLSL3,
     uniforms: u,

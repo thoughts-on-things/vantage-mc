@@ -212,18 +212,21 @@ Tracer-bullet phases; each ends in something runnable and verifiable.
   dirt/stone strata, acacia trees, caves, bedrock floor) matching the histogram.
   See `docs/p1-render.png`. New modules: `blocks.zig`, `chunk.zig`, `grid.zig`,
   `mesh.zig`, `tile.zig`; `web/` viewer.
-- **P2 — Full model resolver. 🚧 CORE DONE.** Implemented (`model.zig`,
-  `texture.zig`, textured path in `mesh.zig`, `VTL2` tile + `VTA1` texture array,
-  `sampler2DArray` viewer shader): blockstate variants/multipart(all-parts),
-  model parent inheritance, elements/faces, model + per-face texture rotation,
-  uv defaults, `#texture` var resolution, cullface culling (rotation-correct),
-  PNG decode (vendored stb_image), normalized texture-array build.
-  Validated: beacon 1.21.4 renders with correct textures (`docs/p2-render.png`).
-  *Remaining hardening:* state-accurate variant selection (block Properties →
-  variant; today picks the default/first, so axis/facing blocks may mis-orient),
-  real multipart `when` matching, proper leaf/glass transparency, KTX2/Basis
-  supercompression, and **asset auto-download** (today: manual jar extract;
-  Zig 0.16 has `std.http.Client.fetch` + `std.zip` to do it in-binary).
+- **P2 — Full model resolver. ✅ CORE + accuracy done.** Implemented (`model.zig`,
+  `texture.zig`, textured path in `mesh.zig`, `VTL3` tile + `VTA1` texture array,
+  `sampler2DArray` viewer shader): blockstate variants, **state-accurate variant
+  selection** (block-state Properties → normalized key → matching variant) and
+  **multipart `when`** matching (AND / `a|b` alternatives / OR), model parent
+  inheritance, elements/faces, **element-local rotation** (origin/axis/angle/
+  rescale — cross & rotated models), model + per-face texture rotation, uv
+  defaults, `#texture` var resolution, cullface culling (rotation-correct),
+  **leaf occlusion** (clean canopies), PNG decode (vendored stb_image),
+  normalized texture-array build, and per-vertex ambient occlusion.
+  Validated on the beacon world: acacia trees, grass/plants (diagonal crosses),
+  axis-oriented logs all render correctly. *Remaining hardening:* uvlock, fluids/
+  waterlogging, KTX2/Basis supercompression, and **asset auto-download** (today:
+  manual jar extract via `just extract`; Zig 0.16 has `std.http.Client.fetch` +
+  `std.zip` to do it in-binary).
 - **P2.5 — Biomes + interactive layers. ✅ DONE.** Biome data parsed from the
   Anvil 4×4×4 paletted arrays (`chunk.zig`), assembled into a quarter-resolution
   biome grid (`grid.zig`). Colour is **read from game data, not hard-coded**

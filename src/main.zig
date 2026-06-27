@@ -214,7 +214,8 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
 
     const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = assets };
     var builder = try texture.Builder.init(a, init.io, assets);
-    const m = try mesh.buildTextured(a, g, resolver, &builder);
+    const maps = biome.Colormaps.load(a, init.io, assets);
+    const m = try mesh.buildTextured(a, g, resolver, &builder, maps);
     const arr = try builder.finish();
 
     const geo = try tile.serializeTextured(a, m);
@@ -228,7 +229,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
         \\region:    {s}
         \\assets:    {s}
         \\chunks:    {d} loaded, {d} missing  (range {d},{d}..{d},{d})
-        \\blocks:    {d} distinct
+        \\blocks:    {d} distinct, {d} biomes
         \\grid:      {d} x {d} x {d} blocks  (minY={d})
         \\textures:  {d} layers ({d}x{d})
         \\mesh:      {d} vertices, {d} triangles
@@ -240,14 +241,39 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
         stats.chunks_loaded,   stats.chunks_missing,
         cx0,                   cz0,
         cx1,                   cz1,
-        stats.distinct_blocks, g.sx,
-        g.sy,                  g.sz,
-        g.min_y,               arr.layer_count,
-        arr.width,             arr.height,
-        m.vertex_count,        m.triangleCount(),
-        out_path,              geo.len,
-        tex_path,              tex_blob.len,
+        stats.distinct_blocks, stats.distinct_biomes,
+        g.sx,                  g.sy,
+        g.sz,                  g.min_y,
+        arr.layer_count,       arr.width,
+        arr.height,            m.vertex_count,
+        m.triangleCount(),     out_path,
+        geo.len,               tex_path,
+        tex_blob.len,
     });
+
+    // Resolved tint colours per biome present — confirms the colormap loaded and
+    // that biomes map to distinct grass/foliage/water (savanna gold vs plains green).
+    if (g.biome_names.len > 1) {
+        std.debug.print("biome tints (grass / foliage / water):\n", .{});
+        for (g.biome_names[1..]) |bname| {
+            const info = biome.lookup(bname);
+            const gr = biome.colorFor(maps, .grass, info);
+            const fo = biome.colorFor(maps, .foliage, info);
+            const wa = biome.colorFor(maps, .water, info);
+            std.debug.print("  {s:<28} #{x:0>2}{x:0>2}{x:0>2} / #{x:0>2}{x:0>2}{x:0>2} / #{x:0>2}{x:0>2}{x:0>2}\n", .{
+                model.stripNs(bname),
+                gr[0],
+                gr[1],
+                gr[2],
+                fo[0],
+                fo[1],
+                fo[2],
+                wa[0],
+                wa[1],
+                wa[2],
+            });
+        }
+    }
 }
 
 /// `foo.vtile` -> `foo.vtexarr`; otherwise append `.vtexarr`.

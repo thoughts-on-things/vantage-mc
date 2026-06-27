@@ -13,6 +13,7 @@ const grid = @import("grid.zig");
 const blocks = @import("blocks.zig");
 const model = @import("model.zig");
 const texture = @import("texture.zig");
+const biome = @import("biome.zig");
 
 pub const Mesh = struct {
     positions: std.ArrayList(f32) = .empty, // 3 per vertex (world coords)
@@ -147,7 +148,9 @@ const BakedVertex = struct { pos: [3]f32, uv: [2]f32, n: [3]i8 };
 const BakedFace = struct {
     verts: [4]BakedVertex,
     layer: f32,
-    color: [4]u8,
+    /// Which biome colormap (if any) tints this face; resolved to RGB per block
+    /// position at emit time, since the same model bakes once but tints by biome.
+    tint: biome.Tint,
     cull: ?model.Dir,
 };
 const Cached = struct {
@@ -155,23 +158,24 @@ const Cached = struct {
     occluder: bool,
 };
 
-/// Fixed tint for any tintindex>=0 (plains-ish grass/foliage green). Real biome
-/// colormaps are P2.4; water/lava use the flat fallback so this green never
-/// lands on them.
-const TINT: [4]u8 = .{ 121, 182, 91, 255 };
-const WHITE: [4]u8 = .{ 255, 255, 255, 255 };
-
+/// Build the textured mesh. `maps` are the biome colormaps used to resolve each
+/// tinted face's colour from the biome at its block position.
 pub fn buildTextured(
     arena: std.mem.Allocator,
     g: grid.Grid,
     resolver: model.Resolver,
     tex: *texture.Builder,
+    maps: biome.Colormaps,
 ) !Mesh2 {
     var mesh: Mesh2 = .{};
     if (g.ids.len == 0) return mesh;
 
     const cache = try arena.alloc(?Cached, g.names.len);
     @memset(cache, null);
+
+    // Precompute RGB per (biome, tint-kind) so per-face tinting is a lookup.
+    const tint_colors = try buildTintTable(arena, g, maps);
+    const nkind = @as(usize, biome.Tint.count);
 
     var y: usize = 0;
     while (y < g.sy) : (y += 1) {
@@ -182,6 +186,7 @@ pub fn buildTextured(
                 const id = g.ids[g.index(x, y, z)];
                 if (id == grid.AIR) continue;
                 const cb = try getCached(arena, g, resolver, tex, cache, id);
+                const bid: usize = g.biomeAt(x, y, z);
                 const wx: f32 = @floatFromInt(@as(i64, g.min_x) + @as(i64, @intCast(x)));
                 const wy: f32 = @floatFromInt(@as(i64, g.min_y) + @as(i64, @intCast(y)));
                 const wz: f32 = @floatFromInt(@as(i64, g.min_z) + @as(i64, @intCast(z)));
@@ -198,12 +203,28 @@ pub fn buildTextured(
                             if (ncb.occluder) continue;
                         }
                     }
-                    try emitBaked(arena, &mesh, wx, wy, wz, face);
+                    const rgb = tint_colors[bid * nkind + @intFromEnum(face.tint)];
+                    try emitBaked(arena, &mesh, wx, wy, wz, face, .{ rgb[0], rgb[1], rgb[2], 255 });
                 }
             }
         }
     }
     return mesh;
+}
+
+/// `[biome_id][tint_kind] -> RGB` flat table. Index 0 covers the no-data biome
+/// (resolves to plains-like defaults), so a missing biome never indexes OOB.
+fn buildTintTable(arena: std.mem.Allocator, g: grid.Grid, maps: biome.Colormaps) ![][3]u8 {
+    const nkind = @as(usize, biome.Tint.count);
+    const nbiome = @max(1, g.biome_names.len);
+    const kinds = [_]biome.Tint{ .none, .grass, .foliage, .water, .spruce, .birch, .lily };
+    const out = try arena.alloc([3]u8, nbiome * nkind);
+    for (0..nbiome) |bi| {
+        const name = if (bi < g.biome_names.len) g.biome_names[bi] else "";
+        const info = biome.lookup(name);
+        for (kinds) |k| out[bi * nkind + @intFromEnum(k)] = biome.colorFor(maps, k, info);
+    }
+    return out;
 }
 
 fn getCached(
@@ -246,12 +267,12 @@ fn bake(arena: std.mem.Allocator, name: []const u8, resolver: model.Resolver, te
             for (el.faces) |mf| {
                 const tf = texFaceFor(mf.dir);
                 const layer: f32 = @floatFromInt(tex.layerFor(mf.texture));
-                const color: [4]u8 = if (mf.tintindex >= 0) TINT else WHITE;
+                const tint: biome.Tint = if (mf.tintindex >= 0) biome.blockTint(name) else .none;
                 // The cullface direction must rotate with the model, or rotated
                 // blocks (logs, deepslate axis variants) cull against the wrong
                 // neighbor and punch holes.
                 const cull: ?model.Dir = if (mf.cullface) |cf| rotateDir(cf, rm.x, rm.y) else null;
-                var bf: BakedFace = .{ .verts = undefined, .layer = layer, .color = color, .cull = cull };
+                var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = tint, .cull = cull };
                 for (0..4) |i| {
                     const cs = tf.corners[i];
                     var p = [3]f32{
@@ -282,7 +303,7 @@ fn bake(arena: std.mem.Allocator, name: []const u8, resolver: model.Resolver, te
 
 fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32) !void {
     for (tex_faces) |tf| {
-        var bf: BakedFace = .{ .verts = undefined, .layer = layer, .color = WHITE, .cull = tf.dir };
+        var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = .none, .cull = tf.dir };
         for (0..4) |i| {
             const cs = tf.corners[i];
             bf.verts[i] = .{
@@ -295,13 +316,13 @@ fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer
     }
 }
 
-fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, wx: f32, wy: f32, wz: f32, face: BakedFace) !void {
+fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, wx: f32, wy: f32, wz: f32, face: BakedFace, color: [4]u8) !void {
     const base = mesh.vertex_count;
     for (face.verts) |v| {
         try mesh.positions.appendSlice(arena, &.{ wx + v.pos[0], wy + v.pos[1], wz + v.pos[2] });
         try mesh.uv.appendSlice(arena, &.{ v.uv[0], v.uv[1] });
         try mesh.layer.append(arena, face.layer);
-        try mesh.color.appendSlice(arena, &face.color);
+        try mesh.color.appendSlice(arena, &color);
         try mesh.normals.appendSlice(arena, &.{ v.n[0], v.n[1], v.n[2], 0 });
     }
     try mesh.indices.appendSlice(arena, &.{ base + 0, base + 1, base + 2, base + 0, base + 2, base + 3 });

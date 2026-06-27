@@ -56,6 +56,25 @@ pub const Builder = struct {
         return idx;
     }
 
+    /// Layer index for a flat solid color (used by the mesher's fallback path
+    /// for blocks with no resolvable model — fluids, unknowns). Cached by color.
+    pub fn solidLayer(self: *Builder, rgb: [3]u8) !u32 {
+        const key = try std.fmt.allocPrint(self.arena, "#solid:{x:0>2}{x:0>2}{x:0>2}", .{ rgb[0], rgb[1], rgb[2] });
+        if (self.map.get(key)) |i| return i;
+        const buf = try self.arena.alloc(u8, BYTES_PER_LAYER);
+        var p: usize = 0;
+        while (p < BYTES_PER_LAYER) : (p += 4) {
+            buf[p + 0] = rgb[0];
+            buf[p + 1] = rgb[1];
+            buf[p + 2] = rgb[2];
+            buf[p + 3] = 0xFF;
+        }
+        const idx: u32 = @intCast(self.layers.items.len);
+        try self.layers.append(self.arena, buf);
+        try self.map.put(key, idx);
+        return idx;
+    }
+
     fn load(self: *Builder, path: []const u8) !u32 {
         const full = try std.fmt.allocPrint(self.arena, "{s}/textures/{s}.png", .{ self.root, path });
         const bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, full, self.arena, .unlimited);
@@ -84,6 +103,22 @@ pub const Builder = struct {
         return .{ .width = TILE, .height = TILE, .layer_count = @intCast(n), .pixels = pixels };
     }
 };
+
+pub const ARRAY_MAGIC = "VTA1";
+
+/// Serialize a texture array to a `.vtexarr` blob:
+///   "VTA1", u32 version=1, u32 width, u32 height, u32 layer_count, then RGBA pixels.
+pub fn serialize(arena: std.mem.Allocator, arr: Array) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, ARRAY_MAGIC);
+    for ([_]u32{ 1, arr.width, arr.height, arr.layer_count }) |v| {
+        var buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &buf, v, .little);
+        try out.appendSlice(arena, &buf);
+    }
+    try out.appendSlice(arena, arr.pixels);
+    return out.toOwnedSlice(arena);
+}
 
 /// Point-resample a decoded RGBA image to TILE×TILE. Animated textures (height a
 /// multiple of width, height>width) collapse to the first (top) frame.

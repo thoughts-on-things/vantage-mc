@@ -1,22 +1,17 @@
 //! Dense block grid spanning a rectangular range of chunks.
 //!
-//! P1 uses a straightforward dense voxel grid rather than the chunk+neighbor
-//! streaming the production mesher will use: decode every requested chunk, find
-//! the combined bounds, allocate one `[]Cell` covering them, and splat each
-//! block in. Cross-chunk face culling then falls out for free because adjacent
-//! chunks share the same array. Memory is ~4 bytes/voxel (e.g. a 4x4-chunk slice
-//! of a full-height world is ~6 MB), which is fine at P1 scale.
+//! P1 used a dense voxel grid for simplicity over the chunk+neighbor streaming
+//! the production mesher will eventually use; P2 keeps it. Each voxel stores an
+//! interned block id (0 = air) into a per-grid `names` table, so both the
+//! flat-color mesher and the textured mesher can recover the block name (and
+//! resolve its model) without re-reading NBT. ~2 bytes/voxel.
 
 const std = @import("std");
 const region = @import("region.zig");
 const nbt = @import("nbt.zig");
 const chunk = @import("chunk.zig");
-const blocks = @import("blocks.zig");
 
-pub const Cell = struct {
-    color: [3]u8 = .{ 0, 0, 0 },
-    solid: bool = false,
-};
+pub const AIR: u16 = 0;
 
 pub const Grid = struct {
     /// Dimensions in blocks.
@@ -27,29 +22,65 @@ pub const Grid = struct {
     min_x: i32,
     min_y: i32,
     min_z: i32,
-    cells: []Cell,
+    /// Interned block id per voxel (0 = air).
+    ids: []u16,
+    /// names[0] = "" (air sentinel); names[id] is the block name for id>=1.
+    names: [][]const u8,
 
     pub fn index(self: Grid, x: usize, y: usize, z: usize) usize {
-        // y-major, then z, then x.
-        return (y * self.sz + z) * self.sx + x;
+        return (y * self.sz + z) * self.sx + x; // y-major, then z, then x
     }
 
-    /// Cell at world-local grid coords; out-of-bounds reads as air. Signed so
+    /// Block id at world-local grid coords; out-of-bounds reads as air. Signed so
     /// the mesher can probe neighbors at -1 / dim without special-casing edges.
-    pub fn at(self: Grid, x: isize, y: isize, z: isize) Cell {
-        if (x < 0 or y < 0 or z < 0) return .{};
+    pub fn at(self: Grid, x: isize, y: isize, z: isize) u16 {
+        if (x < 0 or y < 0 or z < 0) return AIR;
         const ux: usize = @intCast(x);
         const uy: usize = @intCast(y);
         const uz: usize = @intCast(z);
-        if (ux >= self.sx or uy >= self.sy or uz >= self.sz) return .{};
-        return self.cells[self.index(ux, uy, uz)];
+        if (ux >= self.sx or uy >= self.sy or uz >= self.sz) return AIR;
+        return self.ids[self.index(ux, uy, uz)];
+    }
+
+    pub fn nameOf(self: Grid, id: u16) []const u8 {
+        return self.names[id];
     }
 };
 
 pub const Stats = struct {
     chunks_loaded: usize = 0,
     chunks_missing: usize = 0,
+    distinct_blocks: usize = 0,
 };
+
+const Interner = struct {
+    arena: std.mem.Allocator,
+    names: std.ArrayList([]const u8) = .empty,
+    ids: std.StringHashMap(u16),
+
+    fn init(arena: std.mem.Allocator) !Interner {
+        var self: Interner = .{ .arena = arena, .ids = std.StringHashMap(u16).init(arena) };
+        try self.names.append(arena, ""); // id 0 = air sentinel
+        return self;
+    }
+
+    fn intern(self: *Interner, name: []const u8) !u16 {
+        if (isAir(name)) return AIR;
+        const gop = try self.ids.getOrPut(name);
+        if (!gop.found_existing) {
+            const id: u16 = @intCast(self.names.items.len);
+            try self.names.append(self.arena, name);
+            gop.value_ptr.* = id;
+        }
+        return gop.value_ptr.*;
+    }
+};
+
+fn isAir(name: []const u8) bool {
+    return std.mem.eql(u8, name, "minecraft:air") or
+        std.mem.eql(u8, name, "minecraft:cave_air") or
+        std.mem.eql(u8, name, "minecraft:void_air");
+}
 
 /// Assemble a grid over region-local chunk coords [cx0..cx1] x [cz0..cz1]
 /// (inclusive, each 0..31). Chunks that are absent or fail to decode are skipped
@@ -65,7 +96,6 @@ pub fn assemble(
 ) !Grid {
     const reg = region.Region.fromBytes(region_bytes);
 
-    // Pass 1: decode every requested chunk and collect bounds.
     var loaded: std.ArrayList(chunk.Chunk) = .empty;
     var min_cx: i32 = std.math.maxInt(i32);
     var max_cx: i32 = std.math.minInt(i32);
@@ -103,7 +133,7 @@ pub fn assemble(
     }
 
     if (loaded.items.len == 0) {
-        return .{ .sx = 0, .sy = 0, .sz = 0, .min_x = 0, .min_y = 0, .min_z = 0, .cells = &.{} };
+        return .{ .sx = 0, .sy = 0, .sz = 0, .min_x = 0, .min_y = 0, .min_z = 0, .ids = &.{}, .names = &.{} };
     }
 
     const sx: usize = @intCast((max_cx - min_cx + 1) * 16);
@@ -114,25 +144,21 @@ pub fn assemble(
     const min_y = min_sy * 16;
 
     var grid: Grid = .{
-        .sx = sx,
-        .sy = sy,
-        .sz = sz,
-        .min_x = min_x,
-        .min_y = min_y,
-        .min_z = min_z,
-        .cells = try arena.alloc(Cell, sx * sy * sz),
+        .sx = sx, .sy = sy, .sz = sz,
+        .min_x = min_x, .min_y = min_y, .min_z = min_z,
+        .ids = try arena.alloc(u16, sx * sy * sz),
+        .names = undefined,
     };
-    @memset(grid.cells, .{});
+    @memset(grid.ids, AIR);
 
-    // Pass 2: splat each chunk's blocks into the grid.
+    var interner = try Interner.init(arena);
+
     for (loaded.items) |ch| {
-        // Resolve each section's palette to Cells once, then fill.
         for (ch.sections) |s| {
-            const resolved = try arena.alloc(Cell, s.names.len);
-            for (s.names, resolved) |name, *cell| {
-                const b = blocks.lookup(name);
-                cell.* = .{ .color = b.color, .solid = b.solid };
-            }
+            // Intern this section's palette once.
+            const sec_ids = try arena.alloc(u16, s.names.len);
+            for (s.names, sec_ids) |name, *id| id.* = try interner.intern(name);
+
             const base_x: usize = @intCast(ch.x * 16 - min_x);
             const base_z: usize = @intCast(ch.z * 16 - min_z);
             const base_y: usize = @intCast(s.y * 16 - min_y);
@@ -142,16 +168,17 @@ pub fn assemble(
                 while (bz < 16) : (bz += 1) {
                     var bx: u32 = 0;
                     while (bx < 16) : (bx += 1) {
-                        const pidx = s.paletteIndexAt(bx, by, bz);
-                        const cell = resolved[pidx];
-                        if (!cell.solid) continue;
-                        grid.cells[grid.index(base_x + bx, base_y + by, base_z + bz)] = cell;
+                        const id = sec_ids[s.paletteIndexAt(bx, by, bz)];
+                        if (id == AIR) continue;
+                        grid.ids[grid.index(base_x + bx, base_y + by, base_z + bz)] = id;
                     }
                 }
             }
         }
     }
 
+    grid.names = try interner.names.toOwnedSlice(arena);
+    stats.distinct_blocks = grid.names.len - 1;
     return grid;
 }
 
@@ -164,7 +191,20 @@ fn decodeChunk(arena: std.mem.Allocator, reg: region.Region, cx: u5, cz: u5) !?c
 }
 
 test "empty grid reads as air everywhere" {
-    const g: Grid = .{ .sx = 0, .sy = 0, .sz = 0, .min_x = 0, .min_y = 0, .min_z = 0, .cells = &.{} };
-    try std.testing.expect(!g.at(0, 0, 0).solid);
-    try std.testing.expect(!g.at(-1, 5, 100).solid);
+    const g: Grid = .{ .sx = 0, .sy = 0, .sz = 0, .min_x = 0, .min_y = 0, .min_z = 0, .ids = &.{}, .names = &.{} };
+    try std.testing.expectEqual(AIR, g.at(0, 0, 0));
+    try std.testing.expectEqual(AIR, g.at(-1, 5, 100));
+}
+
+test "interner: air is 0, names get stable ids" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    var it = try Interner.init(a);
+    try std.testing.expectEqual(AIR, try it.intern("minecraft:air"));
+    const s1 = try it.intern("minecraft:stone");
+    const d1 = try it.intern("minecraft:dirt");
+    try std.testing.expectEqual(s1, try it.intern("minecraft:stone"));
+    try std.testing.expect(s1 != d1);
+    try std.testing.expectEqualStrings("minecraft:stone", it.names.items[s1]);
 }

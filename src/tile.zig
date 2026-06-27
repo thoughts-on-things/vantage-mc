@@ -49,6 +49,33 @@ fn appendU32(arena: std.mem.Allocator, out: *std.ArrayList(u8), v: u32) !void {
     try out.appendSlice(arena, &buf);
 }
 
+pub const MAGIC2 = "VTL2";
+pub const VERSION2: u32 = 2;
+
+/// Serialize a textured mesh into a `.vtile` (v2) buffer. Adds per-vertex UV,
+/// a texture-array layer index, and a tint-multiply color over the v1 layout:
+///   "VTL2", u32 ver, u32 V, u32 I,
+///   f32[3V] positions, f32[2V] uv, f32[V] layer, u8[4V] color, i8[4V] normal,
+///   u32[I] indices.   (all little-endian, 4-byte aligned for zero-copy views)
+pub fn serializeTextured(arena: std.mem.Allocator, m: mesh.Mesh2) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const v = m.vertex_count;
+    const i: u32 = @intCast(m.indices.items.len);
+
+    try out.appendSlice(arena, MAGIC2);
+    try appendU32(arena, &out, VERSION2);
+    try appendU32(arena, &out, v);
+    try appendU32(arena, &out, i);
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.positions.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.uv.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.layer.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.color.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.normals.items));
+    try out.appendSlice(arena, std.mem.sliceAsBytes(m.indices.items));
+
+    return out.toOwnedSlice(arena);
+}
+
 test "serialized header is well-formed and sizes match" {
     const a = std.testing.allocator;
     var m: mesh.Mesh = .{};

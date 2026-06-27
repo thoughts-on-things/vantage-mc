@@ -212,9 +212,19 @@ Tracer-bullet phases; each ends in something runnable and verifiable.
   dirt/stone strata, acacia trees, caves, bedrock floor) matching the histogram.
   See `docs/p1-render.png`. New modules: `blocks.zig`, `chunk.zig`, `grid.zig`,
   `mesh.zig`, `tile.zig`; `web/` viewer.
-- **P2 — Full model resolver.** blockstates variants/multipart, model parent
-  inheritance, elements/faces, rotations/uvlock, texture resolution, tinting,
-  KTX2 texture-array build. *Done = arbitrary blocks render with correct textures.*
+- **P2 — Full model resolver. 🚧 CORE DONE.** Implemented (`model.zig`,
+  `texture.zig`, textured path in `mesh.zig`, `VTL2` tile + `VTA1` texture array,
+  `sampler2DArray` viewer shader): blockstate variants/multipart(all-parts),
+  model parent inheritance, elements/faces, model + per-face texture rotation,
+  uv defaults, `#texture` var resolution, cullface culling (rotation-correct),
+  PNG decode (vendored stb_image), normalized texture-array build, fixed-tint.
+  Validated: beacon 1.21.4 renders with correct textures (`docs/p2-render.png`).
+  *Remaining hardening:* state-accurate variant selection (block Properties →
+  variant; today picks the default/first, so axis/facing blocks may mis-orient),
+  real multipart `when` matching, **biome-colormap tint** (grass/foliage/water
+  vs today's fixed green), proper leaf/glass transparency, KTX2/Basis
+  supercompression, and **asset auto-download** (today: manual jar extract;
+  Zig 0.16 has `std.http.Client.fetch` + `std.zip` to do it in-binary).
 - **P3 — Mesher hardening.** Hybrid greedy meshing; AO + light bake; fluids,
   waterlogging, transparency sorting; block-entity placeholders. *Done = a full
   region renders correctly vs in-game / BlueMap reference.*

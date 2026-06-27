@@ -2,6 +2,8 @@
 zig-out/
 .DS_Store
 
-# Generated tiles (regenerate with `vantage mesh`)
+# Generated tiles (regenerate with `vantage mesh` / `meshtex`)
 *.vtile
+*.vtexarr
 web/terrain.vtile
+web/terrain.vtexarr

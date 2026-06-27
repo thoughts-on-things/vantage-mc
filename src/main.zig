@@ -30,6 +30,8 @@ pub fn main(init: std.process.Init) !void {
     // region path for the legacy histogram form.
     if (std.mem.eql(u8, args[1], "mesh")) {
         return runMesh(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "meshtex")) {
+        return runMeshTex(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "histo")) {
         return runHisto(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "resolve")) {
@@ -45,8 +47,10 @@ fn usage() error{MissingArgument} {
     std.debug.print(
         \\usage:
         \\  vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
+        \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1]
         \\  vantage histo   <region.mca> [localX localZ]
         \\  vantage resolve <assets/minecraft dir> <block-name>
+        \\  vantage texinfo <assets/minecraft dir> <block-name...>
         \\
     , .{});
     return error.MissingArgument;
@@ -176,6 +180,77 @@ fn runMesh(init: std.process.Init, a: std.mem.Allocator, args: []const []const u
         out_path,
         blob.len,
     });
+}
+
+fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 3) return usage();
+    const region_path = args[0];
+    const out_path = args[1];
+    const assets = args[2];
+
+    var cx0: u5 = 0;
+    var cz0: u5 = 0;
+    var cx1: u5 = 0;
+    var cz1: u5 = 0;
+    if (args.len >= 7) {
+        cx0 = @truncate(try std.fmt.parseInt(u8, args[3], 10));
+        cz0 = @truncate(try std.fmt.parseInt(u8, args[4], 10));
+        cx1 = @truncate(try std.fmt.parseInt(u8, args[5], 10));
+        cz1 = @truncate(try std.fmt.parseInt(u8, args[6], 10));
+    }
+    if (cx1 < cx0 or cz1 < cz0) return error.BadRange;
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, region_path, a, .unlimited);
+
+    var stats: grid.Stats = .{};
+    const g = try grid.assemble(a, bytes, cx0, cz0, cx1, cz1, &stats);
+
+    const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = assets };
+    var builder = try texture.Builder.init(a, init.io, assets);
+    const m = try mesh.buildTextured(a, g, resolver, &builder);
+    const arr = try builder.finish();
+
+    const geo = try tile.serializeTextured(a, m);
+    const tex_blob = try texture.serialize(a, arr);
+
+    const tex_path = try texArrayPath(a, out_path);
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = geo });
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = tex_path, .data = tex_blob });
+
+    std.debug.print(
+        \\region:    {s}
+        \\assets:    {s}
+        \\chunks:    {d} loaded, {d} missing  (range {d},{d}..{d},{d})
+        \\blocks:    {d} distinct
+        \\grid:      {d} x {d} x {d} blocks  (minY={d})
+        \\textures:  {d} layers ({d}x{d})
+        \\mesh:      {d} vertices, {d} triangles
+        \\tile:      {s}  ({d} bytes)
+        \\texarray:  {s}  ({d} bytes)
+        \\
+    , .{
+        region_path,         assets,
+        stats.chunks_loaded, stats.chunks_missing,
+        cx0,                 cz0,
+        cx1,                 cz1,
+        stats.distinct_blocks,
+        g.sx,                g.sy,
+        g.sz,                g.min_y,
+        arr.layer_count,     arr.width,
+        arr.height,          m.vertex_count,
+        m.triangleCount(),   out_path,
+        geo.len,             tex_path,
+        tex_blob.len,
+    });
+}
+
+/// `foo.vtile` -> `foo.vtexarr`; otherwise append `.vtexarr`.
+fn texArrayPath(a: std.mem.Allocator, out_path: []const u8) ![]u8 {
+    const stem = if (std.mem.endsWith(u8, out_path, ".vtile"))
+        out_path[0 .. out_path.len - ".vtile".len]
+    else
+        out_path;
+    return std.fmt.allocPrint(a, "{s}.vtexarr", .{stem});
 }
 
 fn runHisto(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {

@@ -21,19 +21,29 @@ See **[DESIGN.md](./DESIGN.md)** for the full architecture, decisions, and roadm
 
 ## Status
 
-Early, but it draws. **Phases 0 and 1 are complete.**
+Early, but it draws — with real textures. **Phases 0–2 (core) are complete.**
 
 - **P0 — parsing spike:** reads real Anvil region files, decompresses chunks
   (zlib via C interop), parses NBT, and unpacks the paletted block-state arrays.
 - **P1 — vertical slice:** the full tracer bullet, *world file → pixels in a
-  browser.* The native generator assembles chunks into a dense block grid, emits
-  a naive **culled, indexed** cube mesh (per-block flat colors as a stand-in for
-  the P2 texture resolver), and writes a versioned binary tile (`VTL1`); a thin
-  three.js viewer streams and renders it.
+  browser.* Dense block grid → **culled, indexed** cube mesh → versioned binary
+  tile (`VTL1`) → three.js viewer.
+- **P2 — model & texture resolver:** the vanilla resource pipeline —
+  blockstate → variant → model parent-chain → resolved elements/faces with
+  textures, UVs, cullface, rotation, tint. Decodes vanilla PNGs (vendored
+  stb_image) into a **texture array**, and a textured mesher emits geometry with
+  per-face texture layers sampled by a WebGL2 `sampler2DArray` shader. Remaining
+  P2 hardening (state-accurate variants, multipart, biome-colormap tint, KTX2,
+  asset auto-download) is in progress.
 
-Validated against a live Paper 1.21.4 world:
+Textured render of the beacon 1.21.4 world (stone→deepslate strata, grass, acacia trees):
 
-![P1 render — a patch of real terrain](./docs/p1-render.png)
+![P2 render — textured terrain](./docs/p2-render.png)
+
+<details><summary>P1 flat-color render (for comparison)</summary>
+
+![P1 render — flat-color terrain](./docs/p1-render.png)
+</details>
 
 ## Build & run
 
@@ -44,16 +54,25 @@ zig build                 # build the `vantage` binary into zig-out/bin
 zig build test            # run unit tests
 ```
 
-### Render terrain in the browser (P1)
+### Render terrain in the browser
+
+Textured (P2) — needs an extracted `assets/minecraft` dir (vanilla 1.21.x):
 
 ```sh
-# 1. Mesh a rectangle of chunks (region-local coords 0..31, inclusive) into a tile.
-./zig-out/bin/vantage mesh path/to/world/region/r.0.0.mca web/terrain.vtile 0 0 10 15
+# 1. Mesh a rectangle of chunks (region-local coords 0..31, inclusive) with textures.
+./zig-out/bin/vantage meshtex path/to/region/r.0.0.mca web/terrain.vtile \
+    ~/.cache/vantage/assets/1.21.8/assets/minecraft 0 0 10 15
 
 # 2. Serve the viewer and open it.
 ( cd web && python3 -m http.server 8753 )
 # → http://127.0.0.1:8753/index.html   (drag to orbit, scroll to zoom)
 ```
+
+Flat-color (P1, no assets needed): use `mesh` instead of `meshtex` and drop the
+assets argument. The viewer auto-detects the tile version.
+
+> Asset extraction is currently manual (auto-download is a pending P2 slice):
+> `unzip -oq <client>.jar 'assets/minecraft/blockstates/*' 'assets/minecraft/models/block/*' 'assets/minecraft/textures/block/*' 'assets/minecraft/textures/colormap/*' -d ~/.cache/vantage/assets/1.21.8`
 
 ```
 region:    .../r.0.0.mca

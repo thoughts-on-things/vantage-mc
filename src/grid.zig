@@ -144,13 +144,6 @@ pub fn assemble(
     const reg = region.Region.fromBytes(region_bytes);
 
     var loaded: std.ArrayList(chunk.Chunk) = .empty;
-    var min_cx: i32 = std.math.maxInt(i32);
-    var max_cx: i32 = std.math.minInt(i32);
-    var min_cz: i32 = std.math.maxInt(i32);
-    var max_cz: i32 = std.math.minInt(i32);
-    var min_sy: i32 = std.math.maxInt(i32);
-    var max_sy: i32 = std.math.minInt(i32);
-
     var cz: u32 = cz0;
     while (cz <= cz1) : (cz += 1) {
         var cx: u32 = cx0;
@@ -167,19 +160,34 @@ pub fn assemble(
                 continue;
             }
             stats.chunks_loaded += 1;
-            min_cx = @min(min_cx, ch.x);
-            max_cx = @max(max_cx, ch.x);
-            min_cz = @min(min_cz, ch.z);
-            max_cz = @max(max_cz, ch.z);
-            for (ch.sections) |s| {
-                min_sy = @min(min_sy, s.y);
-                max_sy = @max(max_sy, s.y);
-            }
             try loaded.append(arena, ch);
         }
     }
+    return buildGrid(arena, loaded.items, stats);
+}
 
-    if (loaded.items.len == 0) {
+/// Build a dense grid from already-decoded chunks (single- or multi-region),
+/// sizing it to their tight bounds. Cross-region culling is automatic because
+/// adjacent regions' chunks share one grid. All allocations come from `arena`.
+pub fn buildGrid(arena: std.mem.Allocator, loaded: []const chunk.Chunk, stats: *Stats) !Grid {
+    var min_cx: i32 = std.math.maxInt(i32);
+    var max_cx: i32 = std.math.minInt(i32);
+    var min_cz: i32 = std.math.maxInt(i32);
+    var max_cz: i32 = std.math.minInt(i32);
+    var min_sy: i32 = std.math.maxInt(i32);
+    var max_sy: i32 = std.math.minInt(i32);
+    for (loaded) |ch| {
+        min_cx = @min(min_cx, ch.x);
+        max_cx = @max(max_cx, ch.x);
+        min_cz = @min(min_cz, ch.z);
+        max_cz = @max(max_cz, ch.z);
+        for (ch.sections) |s| {
+            min_sy = @min(min_sy, s.y);
+            max_sy = @max(max_sy, s.y);
+        }
+    }
+
+    if (loaded.len == 0) {
         return .{ .sx = 0, .sy = 0, .sz = 0, .min_x = 0, .min_y = 0, .min_z = 0, .ids = &.{}, .names = &.{} };
     }
 
@@ -215,7 +223,7 @@ pub fn assemble(
     var interner = try Interner.init(arena, true);
     var biomes = try Interner.init(arena, false);
 
-    for (loaded.items) |ch| {
+    for (loaded) |ch| {
         for (ch.sections) |s| {
             // Intern this section's palette once (by name + state).
             const sec_ids = try arena.alloc(u16, s.names.len);
@@ -266,7 +274,7 @@ pub fn assemble(
     return grid;
 }
 
-fn decodeChunk(arena: std.mem.Allocator, reg: region.Region, cx: u5, cz: u5) !?chunk.Chunk {
+pub fn decodeChunk(arena: std.mem.Allocator, reg: region.Region, cx: u5, cz: u5) !?chunk.Chunk {
     const raw = (try reg.rawChunk(cx, cz)) orelse return null;
     const nbt_bytes = try region.decompress(arena, raw);
     var parser = nbt.Parser{ .buf = nbt_bytes, .arena = arena };

@@ -22,6 +22,7 @@ const model = @import("model.zig");
 const texture = @import("texture.zig");
 const biome = @import("biome.zig");
 const lang = @import("lang.zig");
+const world = @import("world.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -30,7 +31,9 @@ pub fn main(init: std.process.Init) !void {
 
     // Dispatch. If args[1] is a known subcommand use it, else treat args[1] as a
     // region path for the legacy histogram form.
-    if (std.mem.eql(u8, args[1], "mesh")) {
+    if (std.mem.eql(u8, args[1], "render")) {
+        return runRender(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "mesh")) {
         return runMesh(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "meshtex")) {
         return runMeshTex(init, a, args[2..]);
@@ -50,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
 fn usage() error{MissingArgument} {
     std.debug.print(
         \\usage:
+        \\  vantage render  <world-save-dir> [--assets <dir>] [--radius <chunks>]
         \\  vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
         \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1]
         \\  vantage histo   <region.mca> [localX localZ]
@@ -303,6 +307,170 @@ fn dataRootFromAssets(a: std.mem.Allocator, assets: []const u8) []const u8 {
     return std.fmt.allocPrint(a, "{s}data/minecraft", .{p[0 .. p.len - suffix.len]}) catch "";
 }
 
+/// `vantage render <save-dir>` — the friendly entry point: auto-discover the
+/// world's region directory and the extracted assets, render the populated area
+/// (capped to a window) into web/terrain.vtile, with a live progress bar.
+fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 1) return usage();
+    const save = args[0];
+    var assets_opt: ?[]const u8 = null;
+    var radius: i32 = 6; // default window half-size in chunks (kept browser-loadable
+    // until greedy meshing/LOD land; --radius widens it)
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--assets") and i + 1 < args.len) {
+            assets_opt = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--radius") and i + 1 < args.len) {
+            radius = std.fmt.parseInt(i32, args[i + 1], 10) catch radius;
+            i += 1;
+        }
+    }
+    const out_path = "web/terrain.vtile";
+
+    const region_dir = (try world.findRegionDir(a, init.io, save)) orelse {
+        std.debug.print(
+            \\no Minecraft region files found under:
+            \\  {s}
+            \\Point me at a world save folder (the one with level.dat), e.g.
+            \\  ~/Library/Application Support/minecraft/saves/<World>
+            \\
+        , .{save});
+        return error.NoRegions;
+    };
+
+    const home = init.environ_map.get("HOME") orelse "";
+    const assets = assets_opt orelse (try findAssets(a, init.io, home)) orelse {
+        std.debug.print(
+            \\no extracted assets found. Get them from a client jar first:
+            \\  just extract <client.jar>     (or pass --assets <assets/minecraft dir>)
+            \\
+        , .{});
+        return error.NoAssets;
+    };
+
+    std.debug.print("world:   {s}\nassets:  {s}\n", .{ region_dir, assets });
+
+    const loaded = try world.loadRegions(a, init.io, region_dir);
+    const bounds = world.populatedBounds(loaded);
+    if (bounds.count == 0) {
+        std.debug.print("no populated chunks found.\n", .{});
+        return;
+    }
+
+    // Window = populated extent, centred-and-capped to the radius.
+    var cx0 = bounds.min_cx;
+    var cx1 = bounds.max_cx;
+    var cz0 = bounds.min_cz;
+    var cz1 = bounds.max_cz;
+    const limit = 2 * radius + 1;
+    var capped = false;
+    if (bounds.spanX() > limit) {
+        const c = @divFloor(bounds.min_cx + bounds.max_cx, 2);
+        cx0 = c - radius;
+        cx1 = c + radius;
+        capped = true;
+    }
+    if (bounds.spanZ() > limit) {
+        const c = @divFloor(bounds.min_cz + bounds.max_cz, 2);
+        cz0 = c - radius;
+        cz1 = c + radius;
+        capped = true;
+    }
+
+    std.debug.print("regions: {d} files · {d} populated chunks · extent {d}×{d} chunks\n", .{
+        loaded.len, bounds.count, bounds.spanX(), bounds.spanZ(),
+    });
+    if (capped) std.debug.print(
+        "  large world — rendering a {d}×{d}-chunk window around the centre (use --radius to widen)\n",
+        .{ cx1 - cx0 + 1, cz1 - cz0 + 1 },
+    );
+
+    const total: usize = @intCast((cx1 - cx0 + 1) * (cz1 - cz0 + 1));
+    const root = std.Progress.start(init.io, .{ .root_name = "vantage render" });
+    defer root.end();
+
+    var stats: grid.Stats = .{};
+    const read_node = root.start("reading chunks", total);
+    const g = try world.assembleWindow(a, loaded, cx0, cz0, cx1, cz1, &stats, read_node);
+    read_node.end();
+
+    const mesh_node = root.start("meshing + textures", 0);
+    const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = assets };
+    var builder = try texture.Builder.init(a, init.io, assets);
+    const maps = biome.Colormaps.load(a, init.io, assets);
+    const data_root = dataRootFromAssets(a, assets);
+    var reg = biome.Registry.init(a, init.io, data_root);
+    const m = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg);
+    const arr = try builder.finish();
+    mesh_node.end();
+
+    const write_node = root.start("writing tile", 0);
+    const names = lang.Lang.load(a, init.io, assets);
+    const display = try a.alloc([]const u8, g.biome_names.len);
+    if (display.len > 0) display[0] = "";
+    for (g.biome_names[1..], 1..) |bn, idx| display[idx] = names.biomeName(a, bn);
+    const geo = try tile.serializeTexturedBiome(a, m, display);
+    const tex_blob = try texture.serialize(a, arr);
+    const tex_path = try texArrayPath(a, out_path);
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = geo });
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = tex_path, .data = tex_blob });
+    write_node.end();
+
+    std.debug.print(
+        \\
+        \\chunks:  {d} rendered, {d} empty
+        \\blocks:  {d} states, {d} biomes
+        \\grid:    {d} × {d} × {d} blocks (minY={d})
+        \\mesh:    {d} vertices, {d} triangles
+        \\tile:    {s} ({d} bytes) + texture array ({d} layers)
+        \\
+        \\→ view it:  just serve   then open http://127.0.0.1:8753/
+        \\
+    , .{
+        stats.chunks_loaded,   stats.chunks_missing,
+        stats.distinct_blocks, stats.distinct_biomes,
+        g.sx,                  g.sy,
+        g.sz,                  g.min_y,
+        m.vertex_count,        m.triangleCount(),
+        out_path,              geo.len,
+        arr.layer_count,
+    });
+    if (geo.len > 150 * 1024 * 1024) std.debug.print(
+        "  note: large tile — if it's slow in the browser, render less with --radius {d}\n",
+        .{@max(2, @divFloor(radius, 2))},
+    );
+}
+
+/// Auto-detect an extracted `assets/minecraft` under `~/.cache/vantage/assets/<ver>/`,
+/// preferring the highest-named version. Returns null if none is found.
+fn findAssets(a: std.mem.Allocator, io: std.Io, home: []const u8) !?[]const u8 {
+    if (home.len == 0) return null;
+    const base = try std.fmt.allocPrint(a, "{s}/.cache/vantage/assets", .{home});
+    var dir = std.Io.Dir.cwd().openDir(io, base, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+    var best_path: ?[]const u8 = null;
+    var best_name: []const u8 = "";
+    var it = dir.iterate();
+    while (try it.next(io)) |e| {
+        if (e.kind != .directory) continue;
+        const candidate = try std.fmt.allocPrint(a, "{s}/{s}/assets/minecraft", .{ base, e.name });
+        const bs = try std.fmt.allocPrint(a, "{s}/blockstates", .{candidate});
+        if (!dirExists(io, bs)) continue;
+        if (best_path == null or std.mem.lessThan(u8, best_name, e.name)) {
+            best_path = candidate;
+            best_name = try a.dupe(u8, e.name);
+        }
+    }
+    return best_path;
+}
+
+fn dirExists(io: std.Io, path: []const u8) bool {
+    var d = std.Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+    d.close(io);
+    return true;
+}
+
 /// `foo.vtile` -> `foo.vtexarr`; otherwise append `.vtexarr`.
 fn texArrayPath(a: std.mem.Allocator, out_path: []const u8) ![]u8 {
     const stem = if (std.mem.endsWith(u8, out_path, ".vtile"))
@@ -444,4 +612,5 @@ test {
     _ = texture;
     _ = biome;
     _ = lang;
+    _ = world;
 }

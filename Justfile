@@ -61,6 +61,11 @@ biomes: build
 mesh: build
     {{bin}} meshtex {{region}} web/terrain.vtile {{assets}} {{range}}
 
+# Render a whole world save into the viewer: `just render "~/…/saves/My World"`.
+# Auto-finds the region dir + cached assets. Extra args pass through (e.g. --radius 8).
+render save *args: build
+    {{bin}} render "{{save}}" {{args}}
+
 # Serve the web viewer (Ctrl-C to stop).
 serve:
     @echo "→ http://127.0.0.1:{{port}}/index.html   (press B for the biome layer)"

@@ -286,10 +286,12 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
     var list: std.ArrayList(BakedFace) = .empty;
 
     const parts = resolver.resolveBlock(name, state) catch {
-        // Fallback: a flat-color full cube via a solid texture-array layer.
+        // Fallback: a flat-color full cube via a solid texture-array layer (fluids,
+        // unresolved blocks). Opaque fallbacks occlude so oceans/lava don't emit
+        // every internal face — only the surface and edges.
         const layer: f32 = @floatFromInt(try tex.solidLayer(blocks.lookup(name).color));
         try bakeFullCube(arena, &list, layer);
-        return .{ .faces = try list.toOwnedSlice(arena), .occluder = false };
+        return .{ .faces = try list.toOwnedSlice(arena), .occluder = !isTransparent(name) };
     };
 
     for (parts) |rm| {
@@ -585,7 +587,10 @@ fn isFullCube(parts: []model.ResolvedModel) bool {
 /// alpha-cutout face as overlapping slivers. Their feathery edges still show
 /// because outer faces (against air) are never culled.
 fn isTransparent(name: []const u8) bool {
-    const needles = [_][]const u8{ "glass", "ice", "water", "slime", "honey", "pane", "barrier", "_bars" };
+    // Water occludes (oceans are otherwise a solid block of internal faces); you
+    // see the surface, not the floor — fine for a map. Genuinely see-through
+    // blocks (glass, panes, bars) stay non-occluding.
+    const needles = [_][]const u8{ "glass", "slime", "honey", "pane", "barrier", "_bars" };
     for (needles) |nd| {
         if (std.mem.indexOf(u8, name, nd) != null) return true;
     }

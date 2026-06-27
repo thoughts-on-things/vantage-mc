@@ -56,27 +56,38 @@ Textured render of the beacon 1.21.4 world (stone→deepslate strata, grass, aca
 
 ## Build & run
 
-Requires [Zig](https://ziglang.org) `0.16.0`.
+Requires [Zig](https://ziglang.org) `0.16.0`. A [`Justfile`](./Justfile) wraps the
+common tasks ([`just`](https://just.systems): `brew install just`):
 
 ```sh
-zig build                 # build the `vantage` binary into zig-out/bin
-zig build test            # run unit tests
+just            # list every recipe
+just build      # build the binary into zig-out/bin
+just test       # run unit tests
+just fmt        # format sources   ·   just ci = fmt-check + test + build
 ```
 
 ### Render terrain in the browser
 
-Textured (P2) — needs an extracted `assets/minecraft` dir (Minecraft 26.2+):
+Textured (P2) — needs extracted assets + biome data (Minecraft 26.2+; see
+`just extract <client.jar>` and the note below):
 
 ```sh
-# 1. Mesh a rectangle of chunks (region-local coords 0..31, inclusive) with textures.
+just demo                     # mesh the demo area into web/ and serve the viewer
+# → http://127.0.0.1:8753/index.html
+#   drag to orbit · scroll to zoom · press B for the biome layer · hover to identify
+
+# Or step by step, with an explicit region / area:
+just region=path/to/r.0.0.mca range='0 0 10 15' mesh
+just serve
+```
+
+The raw binary works too, without `just`:
+
+```sh
+zig build
 ./zig-out/bin/vantage meshtex path/to/region/r.0.0.mca web/terrain.vtile \
     ~/.cache/vantage/assets/26.2/assets/minecraft 0 0 10 15
-
-# 2. Serve the viewer and open it.
 ( cd web && python3 -m http.server 8753 )
-# → http://127.0.0.1:8753/index.html   (drag to orbit, scroll to zoom)
-#   Press B (or use the panel, or open #biome) to toggle the biome layer;
-#   click a biome in the legend to isolate it.
 ```
 
 Flat-color (P1, no assets needed): use `mesh` instead of `meshtex` and drop the
@@ -86,7 +97,7 @@ assets argument. The viewer auto-detects the tile version.
 > colormaps, **and the biome definitions (`data/minecraft/worldgen/biome`) and
 > names (`lang/en_us.json`)** — so pointing at a new version's jar "just works"
 > with no code changes. Extraction is currently manual (auto-download is a pending
-> P2 slice); grab the resource pack *and* the biome data pack + language file:
+> P2 slice); `just extract <client.jar>` pulls exactly what's needed, or by hand:
 >
 > ```sh
 > unzip -oq <client>.jar \

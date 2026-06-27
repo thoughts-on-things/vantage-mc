@@ -282,15 +282,34 @@ fn getCached(
     return c;
 }
 
+const FluidTex = struct { path: []const u8, tint: biome.Tint };
+
+/// Fluids carry no geometry in their model (they're rendered specially in-game),
+/// so resolving them yields nothing. Render them as a tinted full cube instead —
+/// water takes the biome water colour, lava its own texture.
+fn fluidTex(name: []const u8) ?FluidTex {
+    const b = model.stripNs(name);
+    if (std.mem.eql(u8, b, "water")) return .{ .path = "block/water_still", .tint = .water };
+    if (std.mem.eql(u8, b, "lava")) return .{ .path = "block/lava_still", .tint = .none };
+    return null;
+}
+
 fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver: model.Resolver, tex: *texture.Builder) !Cached {
     var list: std.ArrayList(BakedFace) = .empty;
 
+    // Fluids: a full cube surface so oceans/rivers/lava show; they occlude so the
+    // interior of a body of water doesn't emit every face.
+    if (fluidTex(name)) |f| {
+        const layer: f32 = @floatFromInt(tex.layerFor(f.path));
+        try bakeFullCube(arena, &list, layer, f.tint);
+        return .{ .faces = try list.toOwnedSlice(arena), .occluder = true };
+    }
+
     const parts = resolver.resolveBlock(name, state) catch {
-        // Fallback: a flat-color full cube via a solid texture-array layer (fluids,
-        // unresolved blocks). Opaque fallbacks occlude so oceans/lava don't emit
-        // every internal face — only the surface and edges.
+        // Fallback: a flat-color full cube via a solid texture-array layer
+        // (unresolved blocks). Opaque fallbacks occlude.
         const layer: f32 = @floatFromInt(try tex.solidLayer(blocks.lookup(name).color));
-        try bakeFullCube(arena, &list, layer);
+        try bakeFullCube(arena, &list, layer, .none);
         return .{ .faces = try list.toOwnedSlice(arena), .occluder = !isTransparent(name) };
     };
 
@@ -353,9 +372,9 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
     };
 }
 
-fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32) !void {
+fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32, tint: biome.Tint) !void {
     for (tex_faces) |tf| {
-        var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = .none, .cull = tf.dir, .ao = true };
+        var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = tint, .cull = tf.dir, .ao = true };
         const n = [3]f32{ @floatFromInt(tf.n[0]), @floatFromInt(tf.n[1]), @floatFromInt(tf.n[2]) };
         for (0..4) |i| {
             const cs = tf.corners[i];

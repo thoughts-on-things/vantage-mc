@@ -345,10 +345,10 @@ function setupBiomeUI(tile, material) {
 
 // Hover-to-identify: raycast the terrain and report the biome under the cursor
 // in a floating chip, mirrored as a highlight on the matching legend row.
-function setupHover(renderer, camera, mesh, tile, biomeUI) {
+function setupHover(renderer, camera, mesh, tile, biomeUI, controls) {
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
-  let cx = 0, cy = 0, dirty = false, inside = false;
+  let cx = 0, cy = 0, dirty = false, inside = false, dragging = false;
   const tip = document.createElement('div');
   tip.id = 'tip';
   document.body.appendChild(tip);
@@ -361,11 +361,14 @@ function setupHover(renderer, camera, mesh, tile, biomeUI) {
     dirty = true; inside = true;
   });
   dom.addEventListener('pointerleave', () => { inside = false; dirty = true; });
+  // Don't raycast the (large) mesh while orbiting/panning — that's the lag.
+  controls.addEventListener('start', () => { dragging = true; hide(); });
+  controls.addEventListener('end', () => { dragging = false; });
 
   function hide() { tip.style.display = 'none'; biomeUI.setMeshHover(-1); }
 
   return function tick() {
-    if (!dirty) return;             // raycast at most once per frame, only on move
+    if (dragging || !dirty) return; // raycast at most once per frame, never mid-drag
     dirty = false;
     if (!inside) return hide();
     raycaster.setFromCamera(ndc, camera);
@@ -448,7 +451,7 @@ async function main() {
   const mesh = new THREE.Mesh(geom, material);
   scene.add(mesh);
 
-  const hoverTick = (tile.hasBiome && biomeUI) ? setupHover(renderer, camera, mesh, tile, biomeUI) : null;
+  const hoverTick = (tile.hasBiome && biomeUI) ? setupHover(renderer, camera, mesh, tile, biomeUI, controls) : null;
 
   const bb = geom.boundingBox;
   const center = new THREE.Vector3(); bb.getCenter(center);

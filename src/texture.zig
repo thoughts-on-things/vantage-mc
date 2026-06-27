@@ -88,6 +88,10 @@ pub const Builder = struct {
         if (w <= 0 or h <= 0) return error.DecodeFailed;
 
         const layer = try normalize(self.arena, data, @intCast(w), @intCast(h));
+        // Render leaves solid rather than as sparse alpha-cutout holes — the
+        // cleaner "map" look, and they occlude anyway. (Cross plants keep their
+        // cutout, which is why this is leaf-specific.)
+        if (std.mem.indexOf(u8, path, "leaves") != null) forceOpaque(layer);
         const idx: u32 = @intCast(self.layers.items.len);
         try self.layers.append(self.arena, layer);
         try self.map.put(path, idx);
@@ -159,6 +163,11 @@ fn normalize(arena: std.mem.Allocator, data: [*]const u8, w: u32, h: u32) ![]u8 
         }
     }
     return out;
+}
+
+fn forceOpaque(layer: []u8) void {
+    var i: usize = 3;
+    while (i < layer.len) : (i += 4) layer[i] = 0xFF;
 }
 
 fn makeMissing(arena: std.mem.Allocator) ![]u8 {

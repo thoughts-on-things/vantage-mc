@@ -310,7 +310,7 @@ fn dataRootFromAssets(a: std.mem.Allocator, assets: []const u8) []const u8 {
 
 /// `vantage render <save-dir>` — the friendly entry point: auto-discover the
 /// world's region directory and the extracted assets, render the populated area
-/// (capped to a window) into web/terrain.vtile, with a live progress bar.
+/// (capped to a window) into web/public/terrain.vtile, with a live progress bar.
 fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 1) return usage();
     const save = args[0];
@@ -327,7 +327,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
             i += 1;
         }
     }
-    const out_path = "web/terrain.vtile";
+    const out_path = "web/public/terrain.vtile";
 
     const region_dir = (try world.findRegionDir(a, init.io, save)) orelse {
         std.debug.print(
@@ -427,7 +427,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         \\mesh:    {d} vertices, {d} triangles ({d} water verts)
         \\tile:    {s} ({d} bytes) + texture array ({d} layers)
         \\
-        \\→ view it:  just serve   then open http://127.0.0.1:8753/
+        \\→ view it:  just serve   then open http://127.0.0.1:8753/   (first run: cd web && npm install)
         \\
     , .{
         stats.chunks_loaded,                                 stats.chunks_missing,

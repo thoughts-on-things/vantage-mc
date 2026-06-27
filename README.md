@@ -73,10 +73,17 @@ region files and the extracted assets, renders the populated area, and shows a
 progress bar:
 
 ```sh
+just web-install   # once: install the viewer's npm deps (Node 18+)
 just render "~/Library/Application Support/minecraft/saves/My World"
-just serve     # → http://127.0.0.1:8753/   ·  press #top for the map view
+just serve         # → http://127.0.0.1:8753/   ·  press #top for the map view
 #   drag to orbit · scroll to zoom · B = biome layer · hover to identify
 ```
+
+The viewer is a real, installable package — **[`vantage-mc`](./web/README.md)** —
+not just a demo. It exposes three layers (a zero-dep tile decoder, a three.js
+renderer, and drop-in React components) so a server-admin web app can embed
+Vantage with `<VantageViewer/>` or wire the renderer into its own three.js scene.
+See [`web/README.md`](./web/README.md).
 
 First time, extract the assets a render needs from a client jar (any 1.18+
 version; schema is stable): `just extract <client.jar>`. The renderer reads the

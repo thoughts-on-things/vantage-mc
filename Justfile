@@ -57,19 +57,23 @@ histo lx='0' lz='0': build
 biomes: build
     {{bin}} biomes {{region}} 0 0 31 31
 
-# Mesh a textured + biome tile into web/ (override the area with `just range='0 0 31 31' mesh`).
+# Mesh a textured + biome tile into web/public/ (override the area with `just range='0 0 31 31' mesh`).
 mesh: build
-    {{bin}} meshtex {{region}} web/terrain.vtile {{assets}} {{range}}
+    {{bin}} meshtex {{region}} web/public/terrain.vtile {{assets}} {{range}}
+
+# Install the web package's dependencies (first-time setup for the viewer).
+web-install:
+    cd web && npm install
 
 # Render a whole world save into the viewer: `just render "~/…/saves/My World"`.
 # Auto-finds the region dir + cached assets. Extra args pass through (e.g. --radius 8).
 render save *args: build
     {{bin}} render "{{save}}" {{args}}
 
-# Serve the web viewer (Ctrl-C to stop).
+# Serve the web viewer with the Vite dev server (Ctrl-C to stop). Needs `just web-install` once.
 serve:
-    @echo "→ http://127.0.0.1:{{port}}/index.html   (press B for the biome layer)"
-    python3 -m http.server {{port}} --directory web
+    @echo "→ http://127.0.0.1:{{port}}/   (press B for the biome layer)"
+    cd web && npm run dev
 
 # Full loop: mesh the demo area, then serve the viewer.
 demo: mesh serve
@@ -84,15 +88,15 @@ extract jar:
     @echo "extracted to {{cache}}"
 
 # Headless viewer screenshot to OUT (PATH e.g. '#biome'): `just shot docs/b.png '#biome'`.
-shot out='shot.png' path='/index.html':
+shot out='shot.png' path='/':
     #!/usr/bin/env bash
     set -euo pipefail
-    python3 -m http.server {{port}} --directory web >/dev/null 2>&1 &
+    cd web && npm run dev >/dev/null 2>&1 &
     pid=$!
     trap 'kill $pid 2>/dev/null || true' EXIT
-    sleep 1
+    for i in $(seq 1 30); do curl -sf -o /dev/null "http://127.0.0.1:{{port}}/" && break; sleep 0.5; done
     "{{chrome}}" --headless=new --disable-gpu --enable-unsafe-swiftshader --hide-scrollbars \
-      --window-size=1280,800 --virtual-time-budget=6000 \
+      --window-size=1280,800 --virtual-time-budget=9000 \
       --screenshot="{{out}}" "http://127.0.0.1:{{port}}{{path}}"
     echo "wrote {{out}}"
 

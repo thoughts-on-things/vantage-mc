@@ -144,8 +144,12 @@ pub fn assemble(
     const min_y = min_sy * 16;
 
     var grid: Grid = .{
-        .sx = sx, .sy = sy, .sz = sz,
-        .min_x = min_x, .min_y = min_y, .min_z = min_z,
+        .sx = sx,
+        .sy = sy,
+        .sz = sz,
+        .min_x = min_x,
+        .min_y = min_y,
+        .min_z = min_z,
         .ids = try arena.alloc(u16, sx * sy * sz),
         .names = undefined,
     };

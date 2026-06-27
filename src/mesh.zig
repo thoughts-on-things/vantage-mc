@@ -444,9 +444,14 @@ test "single solid cell yields 6 culled-free faces" {
     var ids = [_]u16{1};
     var names = [_][]const u8{ "", "minecraft:stone" };
     const g: grid.Grid = .{
-        .sx = 1, .sy = 1, .sz = 1,
-        .min_x = 0, .min_y = 0, .min_z = 0,
-        .ids = &ids, .names = &names,
+        .sx = 1,
+        .sy = 1,
+        .sz = 1,
+        .min_x = 0,
+        .min_y = 0,
+        .min_z = 0,
+        .ids = &ids,
+        .names = &names,
     };
     var mesh = try build(a, g);
     defer {
@@ -465,9 +470,14 @@ test "two adjacent cells cull their shared faces" {
     var ids = [_]u16{ 1, 1 };
     var names = [_][]const u8{ "", "minecraft:stone" };
     const g: grid.Grid = .{
-        .sx = 2, .sy = 1, .sz = 1,
-        .min_x = 0, .min_y = 0, .min_z = 0,
-        .ids = &ids, .names = &names,
+        .sx = 2,
+        .sy = 1,
+        .sz = 1,
+        .min_x = 0,
+        .min_y = 0,
+        .min_z = 0,
+        .ids = &ids,
+        .names = &names,
     };
     var mesh = try build(a, g);
     defer {

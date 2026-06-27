@@ -32,7 +32,7 @@ pub const Dir = enum {
             .{ "north", Dir.north }, .{ "south", Dir.south },
             .{ "east", Dir.east },   .{ "west", Dir.west },
             // tolerate legacy spellings
-            .{ "bottom", Dir.down },  .{ "top", Dir.up },
+            .{ "bottom", Dir.down }, .{ "top", Dir.up },
         };
         inline for (map) |kv| {
             if (std.mem.eql(u8, s, kv[0])) return kv[1];

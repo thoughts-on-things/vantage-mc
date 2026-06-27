@@ -91,7 +91,7 @@ fn runTexinfo(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
         const layer = builder.layerFor(path);
         const center = (layer * texture.TILE * texture.TILE + (texture.TILE / 2) * texture.TILE + texture.TILE / 2) * 4;
         std.debug.print("  layer {d:>3}  {s:<34}  center rgba=({d},{d},{d},{d})\n", .{
-            layer,        path,
+            layer,                  path,
             arr.pixels[center + 0], arr.pixels[center + 1],
             arr.pixels[center + 2], arr.pixels[center + 3],
         });
@@ -119,7 +119,10 @@ fn runResolve(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
                 std.debug.print("     {s:<6} tex={s:<34} uv=[{d:.0},{d:.0},{d:.0},{d:.0}] cull={s:<5} tint={d} rot={d}\n", .{
                     @tagName(f.dir),
                     f.texture,
-                    f.uv[0],     f.uv[1], f.uv[2], f.uv[3],
+                    f.uv[0],
+                    f.uv[1],
+                    f.uv[2],
+                    f.uv[3],
                     if (f.cullface) |c| @tagName(c) else "-",
                     f.tintindex,
                     f.rotation,
@@ -229,18 +232,17 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
         \\texarray:  {s}  ({d} bytes)
         \\
     , .{
-        region_path,         assets,
-        stats.chunks_loaded, stats.chunks_missing,
-        cx0,                 cz0,
-        cx1,                 cz1,
-        stats.distinct_blocks,
-        g.sx,                g.sy,
-        g.sz,                g.min_y,
-        arr.layer_count,     arr.width,
-        arr.height,          m.vertex_count,
-        m.triangleCount(),   out_path,
-        geo.len,             tex_path,
-        tex_blob.len,
+        region_path,           assets,
+        stats.chunks_loaded,   stats.chunks_missing,
+        cx0,                   cz0,
+        cx1,                   cz1,
+        stats.distinct_blocks, g.sx,
+        g.sy,                  g.sz,
+        g.min_y,               arr.layer_count,
+        arr.width,             arr.height,
+        m.vertex_count,        m.triangleCount(),
+        out_path,              geo.len,
+        tex_path,              tex_blob.len,
     });
 }
 

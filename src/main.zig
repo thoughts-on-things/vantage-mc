@@ -54,7 +54,7 @@ fn usage() error{MissingArgument} {
         \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1]
         \\  vantage histo   <region.mca> [localX localZ]
         \\  vantage biomes  <region.mca> [cx0 cz0 cx1 cz1]
-        \\  vantage resolve <assets/minecraft dir> <block-name>
+        \\  vantage resolve <assets/minecraft dir> <block-name> [state e.g. axis=x]
         \\  vantage texinfo <assets/minecraft dir> <block-name...>
         \\
     , .{});
@@ -70,7 +70,7 @@ fn runTexinfo(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     // Track which (texture -> layer) we assign so we can report a sample pixel.
     var samples: std.ArrayList([]const u8) = .empty;
     for (args[1..]) |block| {
-        const parts = resolver.resolveBlock(block) catch |e| {
+        const parts = resolver.resolveBlock(block, "") catch |e| {
             std.debug.print("{s}: resolve failed: {s}\n", .{ block, @errorName(e) });
             continue;
         };
@@ -107,11 +107,12 @@ fn runResolve(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     if (args.len < 2) return usage();
     const root = args[0];
     const block = args[1];
+    const state = if (args.len > 2) args[2] else ""; // e.g. "axis=x"
 
     const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = root };
-    const parts = try resolver.resolveBlock(block);
+    const parts = try resolver.resolveBlock(block, state);
 
-    std.debug.print("block: {s}\nassets: {s}\nparts: {d}\n", .{ block, root, parts.len });
+    std.debug.print("block: {s}\nstate: {s}\nassets: {s}\nparts: {d}\n", .{ block, state, root, parts.len });
     for (parts, 0..) |rm, pi| {
         std.debug.print("\npart[{d}]  rot(x={d},y={d}) uvlock={}  elements={d}\n", .{
             pi, rm.x, rm.y, rm.uvlock, rm.elements.len,

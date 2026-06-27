@@ -30,6 +30,8 @@ pub const Grid = struct {
     ids: []u16,
     /// names[0] = "" (air sentinel); names[id] is the block name for id>=1.
     names: [][]const u8,
+    /// Parallel to `names`: the block-state key for each id ("" if stateless).
+    states: [][]const u8 = &.{},
     /// Biome grid dimensions (= block dims / BIOME_STEP). Zero when no biomes.
     bsx: usize = 0,
     bsy: usize = 0,
@@ -56,6 +58,10 @@ pub const Grid = struct {
 
     pub fn nameOf(self: Grid, id: u16) []const u8 {
         return self.names[id];
+    }
+
+    pub fn stateOf(self: Grid, id: u16) []const u8 {
+        return if (id < self.states.len) self.states[id] else "";
     }
 
     pub fn biomeIndex(self: Grid, bx: usize, by: usize, bz: usize) usize {
@@ -87,6 +93,8 @@ pub const Stats = struct {
 const Interner = struct {
     arena: std.mem.Allocator,
     names: std.ArrayList([]const u8) = .empty,
+    /// Parallel to `names`: the block-state key per id ("" for biomes / stateless).
+    states: std.ArrayList([]const u8) = .empty,
     ids: std.StringHashMap(u16),
     /// When true, air names collapse to id 0 (block grid); when false, id 0 is a
     /// plain "" sentinel and every distinct name gets an id (biome grid).
@@ -95,15 +103,20 @@ const Interner = struct {
     fn init(arena: std.mem.Allocator, skip_air: bool) !Interner {
         var self: Interner = .{ .arena = arena, .ids = std.StringHashMap(u16).init(arena), .skip_air = skip_air };
         try self.names.append(arena, ""); // id 0 = air / no-data sentinel
+        try self.states.append(arena, "");
         return self;
     }
 
-    fn intern(self: *Interner, name: []const u8) !u16 {
+    /// Intern a (name, state) pair. Distinct states of the same block get
+    /// distinct ids so the resolver can pick the right variant per orientation.
+    fn intern(self: *Interner, name: []const u8, state: []const u8) !u16 {
         if (self.skip_air and isAir(name)) return AIR;
-        const gop = try self.ids.getOrPut(name);
+        const key = if (state.len == 0) name else try std.fmt.allocPrint(self.arena, "{s}\x00{s}", .{ name, state });
+        const gop = try self.ids.getOrPut(key);
         if (!gop.found_existing) {
             const id: u16 = @intCast(self.names.items.len);
             try self.names.append(self.arena, name);
+            try self.states.append(self.arena, state);
             gop.value_ptr.* = id;
         }
         return gop.value_ptr.*;
@@ -189,6 +202,7 @@ pub fn assemble(
         .min_z = min_z,
         .ids = try arena.alloc(u16, sx * sy * sz),
         .names = undefined,
+        .states = undefined,
         .bsx = bsx,
         .bsy = bsy,
         .bsz = bsz,
@@ -203,9 +217,9 @@ pub fn assemble(
 
     for (loaded.items) |ch| {
         for (ch.sections) |s| {
-            // Intern this section's palette once.
+            // Intern this section's palette once (by name + state).
             const sec_ids = try arena.alloc(u16, s.names.len);
-            for (s.names, sec_ids) |name, *id| id.* = try interner.intern(name);
+            for (s.names, s.states, sec_ids) |name, state, *id| id.* = try interner.intern(name, state);
 
             const base_x: usize = @intCast(ch.x * 16 - min_x);
             const base_z: usize = @intCast(ch.z * 16 - min_z);
@@ -226,7 +240,7 @@ pub fn assemble(
             // Splat this section's 4×4×4 biome cells into the biome grid.
             if (s.biome_names.len == 0) continue;
             const sec_biome_ids = try arena.alloc(u16, s.biome_names.len);
-            for (s.biome_names, sec_biome_ids) |name, *id| id.* = try biomes.intern(name);
+            for (s.biome_names, sec_biome_ids) |name, *id| id.* = try biomes.intern(name, "");
             const cb_x = base_x / BIOME_STEP;
             const cb_y = base_y / BIOME_STEP;
             const cb_z = base_z / BIOME_STEP;
@@ -245,6 +259,7 @@ pub fn assemble(
     }
 
     grid.names = try interner.names.toOwnedSlice(arena);
+    grid.states = try interner.states.toOwnedSlice(arena);
     grid.biome_names = try biomes.names.toOwnedSlice(arena);
     stats.distinct_blocks = grid.names.len - 1;
     stats.distinct_biomes = grid.biome_names.len - 1;
@@ -270,12 +285,26 @@ test "interner: air is 0, names get stable ids" {
     defer arena_inst.deinit();
     const a = arena_inst.allocator();
     var it = try Interner.init(a, true);
-    try std.testing.expectEqual(AIR, try it.intern("minecraft:air"));
-    const s1 = try it.intern("minecraft:stone");
-    const d1 = try it.intern("minecraft:dirt");
-    try std.testing.expectEqual(s1, try it.intern("minecraft:stone"));
+    try std.testing.expectEqual(AIR, try it.intern("minecraft:air", ""));
+    const s1 = try it.intern("minecraft:stone", "");
+    const d1 = try it.intern("minecraft:dirt", "");
+    try std.testing.expectEqual(s1, try it.intern("minecraft:stone", ""));
     try std.testing.expect(s1 != d1);
     try std.testing.expectEqualStrings("minecraft:stone", it.names.items[s1]);
+}
+
+test "interner: distinct states of one block get distinct ids" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    var it = try Interner.init(a, true);
+    const x = try it.intern("minecraft:oak_log", "axis=x");
+    const y = try it.intern("minecraft:oak_log", "axis=y");
+    try std.testing.expect(x != y);
+    try std.testing.expectEqual(x, try it.intern("minecraft:oak_log", "axis=x"));
+    try std.testing.expectEqualStrings("minecraft:oak_log", it.names.items[x]);
+    try std.testing.expectEqualStrings("axis=x", it.states.items[x]);
+    try std.testing.expectEqualStrings("axis=y", it.states.items[y]);
 }
 
 test "biome interner does not air-filter and assigns ids from 1" {
@@ -283,11 +312,11 @@ test "biome interner does not air-filter and assigns ids from 1" {
     defer arena_inst.deinit();
     const a = arena_inst.allocator();
     var it = try Interner.init(a, false);
-    const p = try it.intern("minecraft:plains");
-    const sv = try it.intern("minecraft:savanna");
+    const p = try it.intern("minecraft:plains", "");
+    const sv = try it.intern("minecraft:savanna", "");
     try std.testing.expectEqual(@as(u16, 1), p);
     try std.testing.expectEqual(@as(u16, 2), sv);
-    try std.testing.expectEqual(p, try it.intern("minecraft:plains"));
+    try std.testing.expectEqual(p, try it.intern("minecraft:plains", ""));
 }
 
 test "biomeAt maps blocks to 4x4x4 cells" {

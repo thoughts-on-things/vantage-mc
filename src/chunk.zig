@@ -25,6 +25,9 @@ pub const Section = struct {
     y: i32,
     /// Palette block names (slices into the NBT arena).
     names: [][]const u8,
+    /// Per-palette-entry normalized block-state key ("axis=x", "facing=north,
+    /// half=bottom", …), sorted by property; "" when the entry has no Properties.
+    states: [][]const u8,
     /// 4096 palette indices in YZX order. For a single-entry palette this is
     /// empty and every block is `names[0]`.
     indices: []u16,
@@ -111,11 +114,16 @@ pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
         if (palette.len == 0) continue;
 
         const names = try arena.alloc([]const u8, palette.len);
-        for (palette, names) |p, *nm| {
+        const states = try arena.alloc([]const u8, palette.len);
+        for (palette, names, states) |p, *nm, *st| {
             nm.* = "minecraft:air";
+            st.* = "";
             if (p == .compound) {
                 if (nbt.get(p.compound, "Name")) |n| {
                     if (n.* == .string) nm.* = n.string;
+                }
+                if (nbt.get(p.compound, "Properties")) |pr| {
+                    if (pr.* == .compound) st.* = try buildStateKey(arena, pr.compound);
                 }
             }
         }
@@ -134,6 +142,7 @@ pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
         try out.append(arena, .{
             .y = sy,
             .names = names,
+            .states = states,
             .indices = indices,
             .biome_names = biomes.names,
             .biome_indices = biomes.indices,
@@ -146,6 +155,27 @@ pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
         .sections = try out.toOwnedSlice(arena),
         .data_version = data_version,
     };
+}
+
+/// Build a normalized state key from a block's `Properties` compound: each
+/// string property as "k=v", sorted by key, joined with ",". Sorting makes the
+/// key canonical so it matches blockstate variant keys (which are sorted too).
+fn buildStateKey(arena: std.mem.Allocator, props: []const nbt.Entry) Error![]const u8 {
+    var pairs: std.ArrayList([]const u8) = .empty;
+    for (props) |e| {
+        const v = switch (e.tag) {
+            .string => |s| s,
+            else => continue,
+        };
+        try pairs.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ e.name, v }));
+    }
+    if (pairs.items.len == 0) return "";
+    std.mem.sort([]const u8, pairs.items, {}, lessThanStr);
+    return std.mem.join(arena, ",", pairs.items);
+}
+
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }
 
 /// Biome sub-compound result for one section.

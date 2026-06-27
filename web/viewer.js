@@ -1,7 +1,10 @@
-// Vantage viewer — loads a `.vtile` (v1 flat-color or v2 textured) and renders
-// it with three.js. v2 also loads a `.vtexarr` texture array and samples it per
-// face with a small WebGL2 sampler2DArray shader (the thin end of the versioned
-// tile contract: the frontend only needs to know the format, not the world).
+// Vantage viewer — loads a `.vtile` (v1 flat-color, v2 textured, or v3 textured
+// + biome) and renders it with three.js. v2/v3 also load a `.vtexarr` texture
+// array sampled per face by a WebGL2 sampler2DArray shader. v3 carries a
+// per-vertex biome id and a biome legend, driving an interactive "biome layer"
+// that recolours the terrain by biome (so borders read at a glance) with a
+// clickable legend — the thin end of the versioned tile contract: the frontend
+// only needs the format, not the world.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -26,6 +29,18 @@ function parseTile(buf) {
   const I = dv.getUint32(12, true);
   let off = 16;
 
+  if (magic === 'VTL3') {
+    const positions = new Float32Array(buf, off, 3 * V); off += 12 * V;
+    const uv = new Float32Array(buf, off, 2 * V); off += 8 * V;
+    const layer = new Float32Array(buf, off, V); off += 4 * V;
+    const colors = new Uint8Array(buf, off, 4 * V); off += 4 * V;
+    const normalsI8 = new Int8Array(buf, off, 4 * V); off += 4 * V;
+    const biome = new Float32Array(buf, off, V); off += 4 * V;
+    const indices = new Uint32Array(buf, off, I); off += 4 * I;
+    const biomeNames = parseLegend(dv, buf, off);
+    return { textured: true, hasBiome: true, V, I, positions, uv, layer, colors, biome,
+      normals: expandNormals(normalsI8, V), indices, biomeNames };
+  }
   if (magic === 'VTL2') {
     const positions = new Float32Array(buf, off, 3 * V); off += 12 * V;
     const uv = new Float32Array(buf, off, 2 * V); off += 8 * V;
@@ -33,16 +48,27 @@ function parseTile(buf) {
     const colors = new Uint8Array(buf, off, 4 * V); off += 4 * V;
     const normalsI8 = new Int8Array(buf, off, 4 * V); off += 4 * V;
     const indices = new Uint32Array(buf, off, I);
-    return { textured: true, V, I, positions, uv, layer, colors, normals: expandNormals(normalsI8, V), indices };
+    return { textured: true, hasBiome: false, V, I, positions, uv, layer, colors, normals: expandNormals(normalsI8, V), indices };
   }
   if (magic === 'VTL1') {
     const positions = new Float32Array(buf, off, 3 * V); off += 12 * V;
     const colors = new Uint8Array(buf, off, 4 * V); off += 4 * V;
     const normalsI8 = new Int8Array(buf, off, 4 * V); off += 4 * V;
     const indices = new Uint32Array(buf, off, I);
-    return { textured: false, V, I, positions, colors, normals: expandNormals(normalsI8, V), indices };
+    return { textured: false, hasBiome: false, V, I, positions, colors, normals: expandNormals(normalsI8, V), indices };
   }
   throw new Error('bad magic: ' + magic);
+}
+
+function parseLegend(dv, buf, off) {
+  const count = dv.getUint32(off, true); off += 4;
+  const dec = new TextDecoder();
+  const names = [];
+  for (let i = 0; i < count; i++) {
+    const len = dv.getUint16(off, true); off += 2;
+    names.push(dec.decode(new Uint8Array(buf, off, len))); off += len;
+  }
+  return names;
 }
 
 function expandNormals(n8, V) {
@@ -66,17 +92,47 @@ function parseTexArray(buf) {
   return { width, height, layers, pixels };
 }
 
+// --- biome categorical palette ------------------------------------------------
+// Distinct, well-separated hues (golden-angle) so adjacent biomes never collide
+// and borders are obvious. Index 0 is the "no data" sentinel -> neutral gray.
+function hsv2rgb(h, s, v) {
+  const i = Math.floor(h * 6), f = h * 6 - i;
+  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+  const m = [[v, t, p], [q, v, p], [p, v, t], [p, q, v], [t, p, v], [v, p, q]][i % 6];
+  return m;
+}
+function biomePalette(n) {
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    if (i === 0) { out[i] = [0.55, 0.55, 0.6]; continue; }
+    const h = ((i - 1) * 0.61803398875) % 1;
+    const sat = 0.55 + 0.12 * ((i * 7) % 3) / 2;   // slight sat/val jitter for separation
+    out[i] = hsv2rgb(h, sat, 0.96);
+  }
+  return out;
+}
+function stripNs(name) {
+  const c = name.indexOf(':');
+  return c >= 0 ? name.slice(c + 1) : name;
+}
+
 const VERT = /* glsl */`
   in float alayer;
   in vec4 atint;
+  in vec3 abcol;
+  in float abiome;
   out vec2 vUv;
   out vec4 vTint;
+  out vec3 vBcol;
   flat out float vLayer;
+  flat out float vBiome;
   out vec3 vN;
   void main() {
     vUv = uv;
     vTint = atint;
+    vBcol = abcol;
     vLayer = alayer;
+    vBiome = abiome;
     vN = normalize(mat3(modelMatrix) * normal);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
@@ -87,17 +143,30 @@ const FRAG = /* glsl */`
   precision highp sampler2DArray;
   uniform sampler2DArray map;
   uniform vec3 lightDir;
+  uniform float uBiomeMix;   // 0 = textured, 1 = biome layer
+  uniform float uHi;         // highlighted biome id, or -1
   in vec2 vUv;
   in vec4 vTint;
+  in vec3 vBcol;
   flat in float vLayer;
+  flat in float vBiome;
   in vec3 vN;
   out vec4 frag;
   void main() {
     vec4 t = texture(map, vec3(vUv, vLayer));
     if (t.a < 0.5) discard;                       // alpha cutout (grass overlay etc.)
+    vec3 texcol = t.rgb * vTint.rgb;
+    float luma = dot(texcol, vec3(0.299, 0.587, 0.114));
+    // Biome view keeps terrain relief by modulating the flat biome colour by luma.
+    vec3 biomecol = vBcol * (0.45 + 0.65 * luma);
+    vec3 base = mix(texcol, biomecol, uBiomeMix);
+    if (uBiomeMix > 0.5 && uHi >= 0.0 && abs(vBiome - uHi) > 0.5) {
+      float g = dot(base, vec3(0.299, 0.587, 0.114));
+      base = mix(base, vec3(g) * 0.55, 0.82);     // fade biomes other than the selected one
+    }
     float ndl = max(dot(normalize(vN), normalize(lightDir)), 0.0);
     float light = 0.45 + 0.55 * ndl;              // ambient + diffuse
-    frag = vec4(t.rgb * vTint.rgb * light, 1.0);
+    frag = vec4(base * light, 1.0);
   }
 `;
 
@@ -115,6 +184,8 @@ function buildTexturedMaterial(texData) {
     uniforms: {
       map: { value: tex },
       lightDir: { value: new THREE.Vector3(0.6, 1.0, 0.35).normalize() },
+      uBiomeMix: { value: 0 },
+      uHi: { value: -1 },
     },
     vertexShader: VERT,
     fragmentShader: FRAG,
@@ -125,6 +196,80 @@ async function fetchBuf(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(r.status + ' ' + r.statusText + ' for ' + url);
   return r.arrayBuffer();
+}
+
+// Build the interactive biome legend and wire the view toggle + highlight.
+function setupBiomeUI(tile, material) {
+  const panel = document.getElementById('panel');
+  const legend = document.getElementById('legend');
+  const toggle = document.getElementById('toggle');
+  panel.style.display = 'flex';
+
+  const palette = biomePalette(tile.biomeNames.length);
+
+  // Per-vertex biome colour attribute from the palette.
+  const bcol = new Float32Array(3 * tile.V);
+  const counts = new Array(tile.biomeNames.length).fill(0);
+  for (let i = 0; i < tile.V; i++) {
+    const id = tile.biome[i] | 0;
+    const c = palette[id] || palette[0];
+    bcol[i * 3 + 0] = c[0]; bcol[i * 3 + 1] = c[1]; bcol[i * 3 + 2] = c[2];
+    counts[id]++;
+  }
+
+  // Biomes actually present (by vertex count), most common first; skip the empty sentinel.
+  const present = [];
+  for (let id = 0; id < tile.biomeNames.length; id++) {
+    if (counts[id] > 0 && tile.biomeNames[id].length > 0) present.push(id);
+  }
+  present.sort((a, b) => counts[b] - counts[a]);
+  const total = present.reduce((s, id) => s + counts[id], 0) || 1;
+
+  // Deep-link: #biome opens straight into the biome layer.
+  let on = /biome/i.test(location.hash);
+  let hi = -1;
+
+  function setMix() {
+    material.uniforms.uBiomeMix.value = on ? 1 : 0;
+    material.uniforms.uHi.value = on ? hi : -1;
+    toggle.textContent = on ? 'on' : 'off';
+    toggle.classList.toggle('on', on);
+    for (const r of legend.children) {
+      const id = +r.dataset.id;
+      r.classList.toggle('sel', on && id === hi);
+      r.classList.toggle('dim', on && hi >= 0 && id !== hi);
+    }
+  }
+  function setOn(v) { on = v; if (!on) hi = -1; setMix(); }
+
+  toggle.addEventListener('click', () => setOn(!on));
+  window.addEventListener('keydown', (e) => { if (e.key === 'b' || e.key === 'B') setOn(!on); });
+
+  for (const id of present) {
+    const c = palette[id];
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.dataset.id = id;
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.style.background = `rgb(${(c[0] * 255) | 0},${(c[1] * 255) | 0},${(c[2] * 255) | 0})`;
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = stripNs(tile.biomeNames[id]);
+    const pct = document.createElement('span');
+    pct.className = 'pct';
+    pct.textContent = Math.round((counts[id] / total) * 100) + '%';
+    row.append(chip, name, pct);
+    row.addEventListener('click', () => {
+      if (!on) setOn(true);
+      hi = (hi === id) ? -1 : id;     // click selected biome again to clear
+      setMix();
+    });
+    legend.appendChild(row);
+  }
+
+  setMix();
+  return bcol;
 }
 
 async function main() {
@@ -167,6 +312,16 @@ async function main() {
     geom.setAttribute('alayer', new THREE.BufferAttribute(tile.layer, 1));
     geom.setAttribute('atint', new THREE.BufferAttribute(tile.colors, 4, true));
     material = buildTexturedMaterial(texData);
+
+    if (tile.hasBiome) {
+      geom.setAttribute('abiome', new THREE.BufferAttribute(tile.biome, 1));
+      const bcol = setupBiomeUI(tile, material);
+      geom.setAttribute('abcol', new THREE.BufferAttribute(bcol, 3));
+    } else {
+      // No biome data: feed neutral defaults so the shared shader still links.
+      geom.setAttribute('abiome', new THREE.BufferAttribute(new Float32Array(tile.V), 1));
+      geom.setAttribute('abcol', new THREE.BufferAttribute(new Float32Array(3 * tile.V), 3));
+    }
   } else {
     geom.setAttribute('color', new THREE.BufferAttribute(tile.colors, 4, true));
     scene.add(new THREE.HemisphereLight(0xbcd7ff, 0x4a4636, 1.0));
@@ -189,11 +344,12 @@ async function main() {
   camera.far = maxDim * 10;
   camera.updateProjectionMatrix();
 
+  const fmt = tile.hasBiome ? 'VTL3 textured + biomes' : (tile.textured ? 'VTL2 textured' : 'VTL1 flat');
   hud.textContent =
-    `vantage · ${tile.textured ? 'VTL2 textured' : 'VTL1 flat'}\n` +
+    `vantage · ${fmt}\n` +
     `${tile.V.toLocaleString()} verts · ${(tile.I / 3).toLocaleString()} tris\n` +
     `extent ${Math.round(size.x)}×${Math.round(size.y)}×${Math.round(size.z)} blocks\n` +
-    `drag: orbit · scroll: zoom`;
+    `drag: orbit · scroll: zoom${tile.hasBiome ? ' · B: biome view' : ''}`;
 
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;

@@ -218,7 +218,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     const m = try mesh.buildTextured(a, g, resolver, &builder, maps);
     const arr = try builder.finish();
 
-    const geo = try tile.serializeTextured(a, m);
+    const geo = try tile.serializeTexturedBiome(a, m, g.biome_names);
     const tex_blob = try texture.serialize(a, arr);
 
     const tex_path = try texArrayPath(a, out_path);

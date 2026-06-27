@@ -117,6 +117,7 @@ pub const Mesh2 = struct {
     uv: std.ArrayList(f32) = .empty, // 2/vert
     layer: std.ArrayList(f32) = .empty, // 1/vert (texture-array layer)
     color: std.ArrayList(u8) = .empty, // 4/vert (tint multiply RGBA)
+    biome: std.ArrayList(f32) = .empty, // 1/vert (grid biome id, for the biome layer)
     indices: std.ArrayList(u32) = .empty,
     vertex_count: u32 = 0,
 
@@ -204,7 +205,7 @@ pub fn buildTextured(
                         }
                     }
                     const rgb = tint_colors[bid * nkind + @intFromEnum(face.tint)];
-                    try emitBaked(arena, &mesh, wx, wy, wz, face, .{ rgb[0], rgb[1], rgb[2], 255 });
+                    try emitBaked(arena, &mesh, wx, wy, wz, face, .{ rgb[0], rgb[1], rgb[2], 255 }, bid);
                 }
             }
         }
@@ -316,14 +317,16 @@ fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer
     }
 }
 
-fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, wx: f32, wy: f32, wz: f32, face: BakedFace, color: [4]u8) !void {
+fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, wx: f32, wy: f32, wz: f32, face: BakedFace, color: [4]u8, bid: usize) !void {
     const base = mesh.vertex_count;
+    const bid_f: f32 = @floatFromInt(bid);
     for (face.verts) |v| {
         try mesh.positions.appendSlice(arena, &.{ wx + v.pos[0], wy + v.pos[1], wz + v.pos[2] });
         try mesh.uv.appendSlice(arena, &.{ v.uv[0], v.uv[1] });
         try mesh.layer.append(arena, face.layer);
         try mesh.color.appendSlice(arena, &color);
         try mesh.normals.appendSlice(arena, &.{ v.n[0], v.n[1], v.n[2], 0 });
+        try mesh.biome.append(arena, bid_f);
     }
     try mesh.indices.appendSlice(arena, &.{ base + 0, base + 1, base + 2, base + 0, base + 2, base + 3 });
     mesh.vertex_count += 4;

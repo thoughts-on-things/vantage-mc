@@ -116,6 +116,10 @@ function stripNs(name) {
   return c >= 0 ? name.slice(c + 1) : name;
 }
 
+// Atmosphere palette — a calm Minecraft-ish daytime. Horizon doubles as fog.
+const SKY_TOP = [0.30, 0.52, 0.84];
+const SKY_HORIZON = [0.72, 0.83, 0.95];
+
 const VERT = /* glsl */`
   in float alayer;
   in vec4 atint;
@@ -127,6 +131,7 @@ const VERT = /* glsl */`
   flat out float vLayer;
   flat out float vBiome;
   out vec3 vN;
+  out float vFog;
   void main() {
     vUv = uv;
     vTint = atint;
@@ -134,7 +139,9 @@ const VERT = /* glsl */`
     vLayer = alayer;
     vBiome = abiome;
     vN = normalize(mat3(modelMatrix) * normal);
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    vFog = -mv.z;                                  // view-space depth for fog
+    gl_Position = projectionMatrix * mv;
   }
 `;
 
@@ -145,17 +152,23 @@ const FRAG = /* glsl */`
   uniform vec3 lightDir;
   uniform float uBiomeMix;   // 0 = textured, 1 = biome layer
   uniform float uHi;         // highlighted biome id, or -1
+  uniform vec3 uFogColor;
+  uniform vec2 uFog;         // (near, far)
   in vec2 vUv;
   in vec4 vTint;
   in vec3 vBcol;
   flat in float vLayer;
   flat in float vBiome;
   in vec3 vN;
+  in float vFog;
   out vec4 frag;
+  const vec3 SKY = vec3(0.62, 0.72, 0.88);        // hemispheric sky ambient
+  const vec3 GND = vec3(0.34, 0.31, 0.27);        // hemispheric ground ambient
+  const vec3 SUN = vec3(1.0, 0.95, 0.84);         // warm key light
   void main() {
     vec4 t = texture(map, vec3(vUv, vLayer));
-    if (t.a < 0.5) discard;                       // alpha cutout (grass overlay etc.)
-    float ao = vTint.a;                           // baked ambient occlusion (colour alpha)
+    if (t.a < 0.5) discard;                        // alpha cutout (grass overlay etc.)
+    float ao = vTint.a;                            // baked ambient occlusion (colour alpha)
     vec3 texcol = t.rgb * vTint.rgb;
     float luma = dot(texcol, vec3(0.299, 0.587, 0.114));
     // Biome view keeps terrain relief by modulating the flat biome colour by luma.
@@ -163,13 +176,48 @@ const FRAG = /* glsl */`
     vec3 base = mix(texcol, biomecol, uBiomeMix);
     if (uBiomeMix > 0.5 && uHi >= 0.0 && abs(vBiome - uHi) > 0.5) {
       float g = dot(base, vec3(0.299, 0.587, 0.114));
-      base = mix(base, vec3(g) * 0.55, 0.82);     // fade biomes other than the selected one
+      base = mix(base, vec3(g) * 0.55, 0.82);      // fade biomes other than the selected one
     }
-    float ndl = max(dot(normalize(vN), normalize(lightDir)), 0.0);
-    float light = 0.45 + 0.55 * ndl;              // ambient + diffuse
-    frag = vec4(base * light * ao, 1.0);
+    vec3 N = normalize(vN);
+    vec3 ambient = mix(GND, SKY, 0.5 + 0.5 * N.y); // sky above, earth below
+    float ndl = max(dot(N, normalize(lightDir)), 0.0);
+    vec3 lit = base * (0.25 + 0.45 * ambient + 0.55 * SUN * ndl) * ao;
+    float f = smoothstep(uFog.x, uFog.y, vFog);    // aerial depth into the horizon
+    frag = vec4(mix(lit, uFogColor, f), 1.0);
   }
 `;
+
+// A camera-locked gradient sky dome (depth-test off, drawn first) so the
+// background reads as sky from any zoom, with the horizon matching the fog.
+function buildSky() {
+  const mat = new THREE.ShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    side: THREE.BackSide,
+    depthWrite: false,
+    depthTest: false,
+    vertexShader: /* glsl */`
+      out vec3 vDir;
+      void main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      uniform vec3 uTop; uniform vec3 uHorizon;
+      in vec3 vDir; out vec4 frag;
+      void main() {
+        float t = smoothstep(-0.08, 0.5, vDir.y);
+        frag = vec4(mix(uHorizon, uTop, t), 1.0);
+      }
+    `,
+    uniforms: {
+      uTop: { value: new THREE.Vector3(...SKY_TOP) },
+      uHorizon: { value: new THREE.Vector3(...SKY_HORIZON) },
+    },
+  });
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(10, 24, 16), mat);
+  sky.renderOrder = -1;
+  sky.frustumCulled = false;
+  return sky;
+}
 
 function buildTexturedMaterial(texData) {
   const tex = new THREE.DataArrayTexture(texData.pixels, texData.width, texData.height, texData.layers);
@@ -184,9 +232,11 @@ function buildTexturedMaterial(texData) {
     glslVersion: THREE.GLSL3,
     uniforms: {
       map: { value: tex },
-      lightDir: { value: new THREE.Vector3(0.6, 1.0, 0.35).normalize() },
+      lightDir: { value: new THREE.Vector3(0.55, 1.0, 0.4).normalize() },
       uBiomeMix: { value: 0 },
       uHi: { value: -1 },
+      uFogColor: { value: new THREE.Vector3(...SKY_HORIZON) },
+      uFog: { value: new THREE.Vector2(1e6, 2e6) },  // set from terrain extent
     },
     vertexShader: VERT,
     fragmentShader: FRAG,
@@ -283,7 +333,9 @@ async function main() {
   app.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x8fb6e8);
+  scene.background = new THREE.Color(SKY_HORIZON[0], SKY_HORIZON[1], SKY_HORIZON[2]);
+  const sky = buildSky();
+  scene.add(sky);
 
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 8000);
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -342,8 +394,13 @@ async function main() {
   const maxDim = Math.max(size.x, size.y, size.z);
   controls.target.copy(center);
   camera.position.set(center.x + maxDim * 0.7, center.y + maxDim * 0.6, center.z + maxDim * 0.7);
-  camera.far = maxDim * 10;
+  camera.far = maxDim * 12;
   camera.updateProjectionMatrix();
+
+  // Fog fades terrain into the horizon over the back half of the extent.
+  if (material.uniforms && material.uniforms.uFog) {
+    material.uniforms.uFog.value.set(maxDim * 0.85, maxDim * 2.4);
+  }
 
   const fmt = tile.hasBiome ? 'VTL3 textured + biomes' : (tile.textured ? 'VTL2 textured' : 'VTL1 flat');
   hud.textContent =
@@ -360,6 +417,7 @@ async function main() {
 
   renderer.setAnimationLoop(() => {
     controls.update();
+    sky.position.copy(camera.position);            // keep the dome centred on the eye
     renderer.render(scene, camera);
   });
 }

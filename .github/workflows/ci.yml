@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch: # allow manual re-runs (e.g. after a billing fix)
+  workflow_dispatch: # allow manual re-runs
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -17,11 +17,14 @@ permissions:
 jobs:
   build-test:
     name: build & test
-    runs-on: ubuntu-latest
-    # Linux-only to keep private-repo Actions minutes cheap (macOS bills ~10x);
-    # the macOS build path is covered by local development.
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    # Skip PRs from forks: they can't access the cache and we don't run untrusted
+    # code on our runners. Pushes and same-repo PRs still run.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.3
 
       # The generator links system zlib via C interop (compress.zig); Linux
       # runners need the dev package for zlib.h.
@@ -29,7 +32,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@v2.2.1
         with:
           version: 0.16.0
 
@@ -41,11 +44,14 @@ jobs:
 
   format:
     name: zig fmt
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.3
       - name: Set up Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@v2.2.1
         with:
           version: 0.16.0
       - name: Check formatting

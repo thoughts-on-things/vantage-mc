@@ -66,29 +66,36 @@ just test       # run unit tests
 just fmt        # format sources   ·   just ci = fmt-check + test + build
 ```
 
-### Render terrain in the browser
+### Render your world
 
-Textured (P2) — needs extracted assets + biome data (Minecraft 26.2+; see
-`just extract <client.jar>` and the note below):
+One command — point it at a save folder (the one with `level.dat`). It finds the
+region files and the extracted assets, renders the populated area, and shows a
+progress bar:
 
 ```sh
-just demo                     # mesh the demo area into web/ and serve the viewer
-# → http://127.0.0.1:8753/index.html
-#   drag to orbit · scroll to zoom · press B for the biome layer · hover to identify
-
-# Or step by step, with an explicit region / area:
-just region=path/to/r.0.0.mca range='0 0 10 15' mesh
-just serve
+just render "~/Library/Application Support/minecraft/saves/My World"
+just serve     # → http://127.0.0.1:8753/   ·  press #top for the map view
+#   drag to orbit · scroll to zoom · B = biome layer · hover to identify
 ```
 
-The raw binary works too, without `just`:
+First time, extract the assets a render needs from a client jar (any 1.18+
+version; schema is stable): `just extract <client.jar>`. The renderer reads the
+world directly and never writes to it.
+
+> Large/dense worlds are rendered as a centred window (`--radius <chunks>` to
+> widen) until greedy meshing + LOD land — full-world streaming is the next perf
+> step. `just render "<save>" --radius 8`.
+
+<details><summary>Lower-level: mesh a single region by hand</summary>
 
 ```sh
-zig build
+just region=path/to/r.0.0.mca range='0 0 10 15' mesh   # one region, a chunk box
+just serve
+# raw binary, no just:
 ./zig-out/bin/vantage meshtex path/to/region/r.0.0.mca web/terrain.vtile \
     ~/.cache/vantage/assets/26.2/assets/minecraft 0 0 10 15
-( cd web && python3 -m http.server 8753 )
 ```
+</details>
 
 Flat-color (P1, no assets needed): use `mesh` instead of `meshtex` and drop the
 assets argument. The viewer auto-detects the tile version.

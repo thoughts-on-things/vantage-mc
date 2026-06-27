@@ -316,6 +316,9 @@ fn bake(arena: std.mem.Allocator, name: []const u8, resolver: model.Resolver, te
                 // AO only on cullface-bearing faces (real exposed block faces);
                 // cross/plant billboards have no cullface and stay full-bright.
                 const ao_on = mf.cullface != null;
+                // Face texture rotation (0/90/180/270) cycles which uv corner each
+                // vertex samples, rotating the texture on the face.
+                const uvsteps: usize = (@as(usize, mf.rotation) / 90) % 4;
                 var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = tint, .cull = cull, .ao = ao_on };
                 for (0..4) |i| {
                     const cs = tf.corners[i];
@@ -325,10 +328,12 @@ fn bake(arena: std.mem.Allocator, name: []const u8, resolver: model.Resolver, te
                         if (cs[2] == 1) hi[2] else lo[2],
                     };
                     var n = [3]f32{ @floatFromInt(tf.n[0]), @floatFromInt(tf.n[1]), @floatFromInt(tf.n[2]) };
+                    if (el.rotation) |er| applyElementRot(&p, &n, er);
                     rotate(&p, &n, rm.x, rm.y);
                     if (ao_on) bf.ao_off[i] = cornerAoOffsets(n, p);
-                    const u: f32 = @floatCast((if (tf.uvsel[i][0] == 1) mf.uv[2] else mf.uv[0]) / 16.0);
-                    const v: f32 = @floatCast((if (tf.uvsel[i][1] == 1) mf.uv[3] else mf.uv[1]) / 16.0);
+                    const uvsel = tf.uvsel[(i + uvsteps) % 4];
+                    const u: f32 = @floatCast((if (uvsel[0] == 1) mf.uv[2] else mf.uv[0]) / 16.0);
+                    const v: f32 = @floatCast((if (uvsel[1] == 1) mf.uv[3] else mf.uv[1]) / 16.0);
                     bf.verts[i] = .{
                         .pos = .{ p[0] + n[0] * nudge, p[1] + n[1] * nudge, p[2] + n[2] * nudge },
                         .uv = .{ u, 1.0 - v },
@@ -464,6 +469,62 @@ fn quantNormal(f: f32) i8 {
     return 0;
 }
 
+/// Apply an element-local `rotation` (arbitrary angle about one axis through
+/// `origin`) to a vertex position and its normal. `rescale` expands the
+/// perpendicular axes by 1/cos(angle) so rotated faces reach the block edges
+/// (the cross/plant models rely on this for their diagonal × shape).
+fn applyElementRot(p: *[3]f32, n: *[3]f32, rot: model.Rotation) void {
+    const ax: u2 = switch (rot.axis) {
+        .x => 0,
+        .y => 1,
+        .z => 2,
+    };
+    const o = [3]f32{
+        @floatCast(rot.origin[0] / 16.0),
+        @floatCast(rot.origin[1] / 16.0),
+        @floatCast(rot.origin[2] / 16.0),
+    };
+    const ang: f32 = @floatCast(rot.angle * std.math.pi / 180.0);
+    const c = @cos(ang);
+    const s = @sin(ang);
+
+    var v = [3]f32{ p[0] - o[0], p[1] - o[1], p[2] - o[2] };
+    rotAxisAngle(&v, ax, c, s);
+    if (rot.rescale and @abs(c) > 1.0e-4) {
+        const sc = 1.0 / @abs(c);
+        if (ax != 0) v[0] *= sc;
+        if (ax != 1) v[1] *= sc;
+        if (ax != 2) v[2] *= sc;
+    }
+    p.* = .{ v[0] + o[0], v[1] + o[1], v[2] + o[2] };
+    rotAxisAngle(n, ax, c, s); // direction only — no translate, no rescale
+}
+
+/// Rotate a vector about axis `ax` (0=x,1=y,2=z) by (cos, sin).
+fn rotAxisAngle(v: *[3]f32, ax: u2, c: f32, s: f32) void {
+    switch (ax) {
+        0 => {
+            const a = v[1] * c - v[2] * s;
+            const b = v[1] * s + v[2] * c;
+            v[1] = a;
+            v[2] = b;
+        },
+        1 => {
+            const a = v[0] * c + v[2] * s;
+            const b = -v[0] * s + v[2] * c;
+            v[0] = a;
+            v[2] = b;
+        },
+        2 => {
+            const a = v[0] * c - v[1] * s;
+            const b = v[0] * s + v[1] * c;
+            v[0] = a;
+            v[1] = b;
+        },
+        3 => unreachable,
+    }
+}
+
 /// Rotate position and normal around the block center (0.5) by the blockstate
 /// variant's x then y rotation (degrees, multiples of 90).
 fn rotate(p: *[3]f32, n: *[3]f32, xdeg: u16, ydeg: u16) void {
@@ -518,12 +579,30 @@ fn isFullCube(parts: []model.ResolvedModel) bool {
     return false;
 }
 
+/// Blocks that should NOT occlude their neighbours' faces (you can see past
+/// them), so adjacent faces still draw. Leaves are deliberately excluded: they
+/// are full cubes and *should* occlude, or a canopy renders every internal
+/// alpha-cutout face as overlapping slivers. Their feathery edges still show
+/// because outer faces (against air) are never culled.
 fn isTransparent(name: []const u8) bool {
-    const needles = [_][]const u8{ "glass", "leaves", "ice", "water", "slime", "honey", "pane", "barrier", "_bars", "tinted" };
+    const needles = [_][]const u8{ "glass", "ice", "water", "slime", "honey", "pane", "barrier", "_bars" };
     for (needles) |nd| {
         if (std.mem.indexOf(u8, name, nd) != null) return true;
     }
     return false;
+}
+
+test "applyElementRot turns the cross plane diagonal (45deg y, rescale)" {
+    // A point on the -x face of the cross plane maps to the block's +z edge.
+    var p = [3]f32{ 0.05, 0.5, 0.5 };
+    var n = [3]f32{ 0, 0, -1 };
+    applyElementRot(&p, &n, .{ .origin = .{ 8, 8, 8 }, .axis = .y, .angle = 45, .rescale = true });
+    try std.testing.expectApproxEqAbs(@as(f32, 0.05), p[0], 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), p[1], 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.95), p[2], 0.01);
+    // The normal rotates with it (now points diagonally), staying unit-ish.
+    const len = @sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 0.01);
 }
 
 test "cornerAoOffsets samples the right in-plane neighbours" {

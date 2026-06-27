@@ -54,10 +54,21 @@ pub const Face = struct {
     tintindex: i32,
 };
 
+/// Element-local rotation (`"rotation"` in the model JSON) — a single rotation
+/// about one axis through `origin` (model 0..16 space). `rescale` expands the
+/// geometry so rotated faces reach the block edges (used by cross/rail models).
+pub const Rotation = struct {
+    origin: [3]f64,
+    axis: enum { x, y, z },
+    angle: f64, // degrees (one of -45,-22.5,0,22.5,45 in vanilla)
+    rescale: bool,
+};
+
 pub const Element = struct {
     from: [3]f64,
     to: [3]f64,
     faces: []Face,
+    rotation: ?Rotation = null,
 };
 
 pub const ResolvedModel = struct {
@@ -213,6 +224,7 @@ pub const Resolver = struct {
                 .from = from,
                 .to = to,
                 .faces = try faces.toOwnedSlice(self.arena),
+                .rotation = readRotation(eo.get("rotation")),
             });
         }
         return elements.toOwnedSlice(self.arena);
@@ -274,6 +286,27 @@ fn asBool(v: ?json.Value, default: bool) bool {
     return switch (val) {
         .bool => |b| b,
         else => default,
+    };
+}
+
+fn readRotation(v: ?json.Value) ?Rotation {
+    const val = v orelse return null;
+    if (val != .object) return null;
+    const o = val.object;
+    const origin = readVec3(o.get("origin")) orelse .{ 8, 8, 8 };
+    const axis: @FieldType(Rotation, "axis") = blk: {
+        const ax = o.get("axis") orelse return null;
+        if (ax != .string) return null;
+        if (std.mem.eql(u8, ax.string, "x")) break :blk .x;
+        if (std.mem.eql(u8, ax.string, "y")) break :blk .y;
+        if (std.mem.eql(u8, ax.string, "z")) break :blk .z;
+        return null;
+    };
+    return .{
+        .origin = origin,
+        .axis = axis,
+        .angle = asF64(o.get("angle"), 0),
+        .rescale = asBool(o.get("rescale"), false),
     };
 }
 

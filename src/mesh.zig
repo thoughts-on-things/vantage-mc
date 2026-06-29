@@ -157,6 +157,12 @@ const BakedFace = struct {
     /// Whether to compute per-vertex ambient occlusion for this face (only full,
     /// cullface-bearing faces — billboards/cross models stay full-bright).
     ao: bool = false,
+    /// Eligible for greedy plane-merging: a full unit-square face on a cube
+    /// boundary, axis-aligned, full-tile UV, with a cullface, from an occluder
+    /// block. Such faces are emitted by the greedy pass (merged into big tiled
+    /// quads); everything else (overlays, sub-cube models, cross/plants) stays
+    /// per-block. Set by `markGreedy` once the block's occluder-ness is known.
+    greedy: bool = false,
     /// Per corner, the three neighbour offsets (side1, side2, corner) sampled in
     /// the face's outward plane for AO. World-space (already rotation-baked).
     ao_off: [4][3][3]i8 = undefined,
@@ -221,6 +227,19 @@ pub fn buildTextured(
     }
     const water_layer: f32 = @floatFromInt(tex.layerFor("block/water_still"));
 
+    // Per-id greedy-face table: which cached face (if any) is the greedy face in
+    // each of the 6 directions. Built once from the populated cache so the greedy
+    // pass can find a cell's mergeable face by a flat lookup.
+    const greedy_faces = try arena.alloc([6]i16, g.names.len);
+    for (greedy_faces, 0..) |*gf, id| {
+        gf.* = .{ -1, -1, -1, -1, -1, -1 };
+        const c = cache[id] orelse continue;
+        for (c.faces, 0..) |f, fi| {
+            if (!f.greedy) continue;
+            if (f.cull) |cd| gf[dirIndex(cd)] = @intCast(fi);
+        }
+    }
+
     // Compute sky + block light and flood-fill it into the grid, so each face can
     // read the light of the cell it faces (see light.zig). This world — like many
     // — saves no light in its region files, so we derive it the way BlueMap does.
@@ -247,6 +266,7 @@ pub fn buildTextured(
         .nkind = nkind,
         .water_layer = water_layer,
         .quality = quality,
+        .greedy_faces = greedy_faces,
     };
     const cpu = std.Thread.getCpuCount() catch 1;
     const n_threads = @max(1, @min(cpu, g.sy));
@@ -269,6 +289,21 @@ pub fn buildTextured(
             try appendMesh(arena, &fluid, &p.fluid);
         }
     }
+
+    // Greedy pass: merge the full-cube occluder faces (which the per-block pass
+    // skipped) into big tiled quads. The 6 directions are independent, so they
+    // run as 6 workers into disjoint meshes, concatenated in direction order.
+    const gp = try arena.alloc(GreedyPartial, 6);
+    const gthreads = try arena.alloc(std.Thread, 6);
+    for (gp, 0..) |*p, di| p.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator), .di = di };
+    for (gp, gthreads) |*p, *t| t.* = try std.Thread.spawn(.{}, greedyWorker, .{ &ctx, p });
+    for (gthreads) |t| t.join();
+    for (gp) |*p| {
+        defer p.arena.deinit();
+        if (p.err) |e| return e;
+        try appendMesh(arena, &mesh, &p.mesh);
+    }
+
     return .{ .solid = mesh, .fluid = fluid, .light_ms = light_ms };
 }
 
@@ -283,6 +318,10 @@ const MeshCtx = struct {
     nkind: usize,
     water_layer: f32,
     quality: LightQuality,
+    /// Per block id, the cached-face index of its greedy face in each of the 6
+    /// directions (see `dirIndex`), or -1. The greedy pass uses this to find a
+    /// cell's mergeable face; the per-block pass skips faces marked `greedy`.
+    greedy_faces: [][6]i16,
 };
 
 /// One thread's slice of the mesh: its own arena (page-backed) and Y range.
@@ -332,6 +371,7 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
                 const yi: isize = @intCast(y);
                 const zi: isize = @intCast(z);
                 for (cb.faces) |face| {
+                    if (face.greedy) continue; // emitted (merged) by the greedy pass
                     if (face.cull) |c| {
                         const off = dirOffset(c);
                         if (ctx.id_occluder[g.at(xi + off[0], yi + off[1], zi + off[2])]) continue;
@@ -380,6 +420,226 @@ fn appendMesh(alloc: std.mem.Allocator, dst: *Mesh2, src: *const Mesh2) !void {
     try dst.biome.appendSlice(alloc, src.biome.items);
     for (src.indices.items) |idx| try dst.indices.append(alloc, idx + base);
     dst.vertex_count += src.vertex_count;
+}
+
+// ---------------------------------------------------------------------------
+// Greedy plane-merging (P3): full-cube occluder faces (marked `greedy` at bake
+// time) are merged into big quads with repeat-wrapped, tiled UV — one quad for a
+// run of identical adjacent faces instead of one per block. The merge key folds
+// in block id, biome and the per-vertex AO + light, so only locally-uniform runs
+// merge; a 1×1 merge is byte-identical to the per-block quad, and lighting
+// gradients simply fragment the run (no visual change, just fewer merges).
+// ---------------------------------------------------------------------------
+
+/// One of the 6 face directions, with its normal axis and the two in-plane axes
+/// the greedy sweep merges across (slice perpendicular to `nax`, merge in u,v).
+const GDir = struct { dir: model.Dir, n: [3]i8, nax: u2, uax: u2, vax: u2 };
+
+const gdirs = [6]GDir{
+    .{ .dir = .east, .n = .{ 1, 0, 0 }, .nax = 0, .uax = 1, .vax = 2 },
+    .{ .dir = .west, .n = .{ -1, 0, 0 }, .nax = 0, .uax = 1, .vax = 2 },
+    .{ .dir = .up, .n = .{ 0, 1, 0 }, .nax = 1, .uax = 0, .vax = 2 },
+    .{ .dir = .down, .n = .{ 0, -1, 0 }, .nax = 1, .uax = 0, .vax = 2 },
+    .{ .dir = .south, .n = .{ 0, 0, 1 }, .nax = 2, .uax = 0, .vax = 1 },
+    .{ .dir = .north, .n = .{ 0, 0, -1 }, .nax = 2, .uax = 0, .vax = 1 },
+};
+
+fn dirIndex(d: model.Dir) usize {
+    return switch (d) {
+        .east => 0,
+        .west => 1,
+        .up => 2,
+        .down => 3,
+        .south => 4,
+        .north => 5,
+    };
+}
+
+/// Merge key for one cell-face: same key ⇒ identical, tileable face. Block id
+/// pins the texture/uv/rotation; biome pins the tint; AO+light pin the shading.
+const GKey = struct { id: u16, biome: u16, ao: [4]u8, light: [4]u8 };
+
+const Rect = struct { u: usize, v: usize, w: usize, h: usize, key: GKey };
+
+/// Classic 2D greedy rectangle cover of a U×V slice: grow a run in u while the
+/// key matches, then grow the whole row-band in v while every cell matches, mark
+/// it used and emit one rectangle. `used` is a caller-owned U*V scratch buffer.
+fn greedyMerge(
+    present: []const bool,
+    keys: []const GKey,
+    used: []bool,
+    U: usize,
+    V: usize,
+    out: *std.ArrayList(Rect),
+    alloc: std.mem.Allocator,
+) !void {
+    @memset(used[0 .. U * V], false);
+    var v: usize = 0;
+    while (v < V) : (v += 1) {
+        var u: usize = 0;
+        while (u < U) {
+            const start = v * U + u;
+            if (!present[start] or used[start]) {
+                u += 1;
+                continue;
+            }
+            const k = keys[start];
+            var w: usize = 1;
+            while (u + w < U) : (w += 1) {
+                const j = v * U + (u + w);
+                if (!present[j] or used[j] or !std.meta.eql(keys[j], k)) break;
+            }
+            var h: usize = 1;
+            outer: while (v + h < V) : (h += 1) {
+                var t: usize = 0;
+                while (t < w) : (t += 1) {
+                    const j = (v + h) * U + (u + t);
+                    if (!present[j] or used[j] or !std.meta.eql(keys[j], k)) break :outer;
+                }
+            }
+            var dv: usize = 0;
+            while (dv < h) : (dv += 1) {
+                var du: usize = 0;
+                while (du < w) : (du += 1) used[(v + dv) * U + (u + du)] = true;
+            }
+            try out.append(alloc, .{ .u = u, .v = v, .w = w, .h = h, .key = k });
+            u += w;
+        }
+    }
+}
+
+/// Mesh one of the 6 greedy directions: for each slice perpendicular to the
+/// direction, fill the (present, key) mask from the grid, greedy-merge it, and
+/// emit the merged quads. Reads only immutable grid/cache state, so the 6
+/// directions run as independent workers into disjoint output meshes.
+fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, di: usize) !void {
+    const g = ctx.g;
+    const gd = gdirs[di];
+    const dims = [3]usize{ g.sx, g.sy, g.sz };
+    const N = dims[gd.nax];
+    const U = dims[gd.uax];
+    const V = dims[gd.vax];
+    if (N == 0 or U == 0 or V == 0) return;
+
+    const present = try alloc.alloc(bool, U * V);
+    const keys = try alloc.alloc(GKey, U * V);
+    const used = try alloc.alloc(bool, U * V);
+    var rects: std.ArrayList(Rect) = .empty;
+    const noff = gd.n;
+
+    var s: usize = 0;
+    while (s < N) : (s += 1) {
+        @memset(present, false);
+        var v: usize = 0;
+        while (v < V) : (v += 1) {
+            var u: usize = 0;
+            while (u < U) : (u += 1) {
+                var cell = [3]usize{ 0, 0, 0 };
+                cell[gd.nax] = s;
+                cell[gd.uax] = u;
+                cell[gd.vax] = v;
+                const x = cell[0];
+                const y = cell[1];
+                const z = cell[2];
+                const id = g.ids[g.index(x, y, z)];
+                if (id == grid.AIR) continue;
+                const fi = ctx.greedy_faces[id][di];
+                if (fi < 0) continue;
+                const xi: isize = @intCast(x);
+                const yi: isize = @intCast(y);
+                const zi: isize = @intCast(z);
+                if (ctx.id_occluder[g.at(xi + noff[0], yi + noff[1], zi + noff[2])]) continue;
+                const face = ctx.cache[id].?.faces[@intCast(fi)];
+                var ao = [4]u8{ 255, 255, 255, 255 };
+                for (0..4) |ci| ao[ci] = cornerAo(g, ctx.id_occluder, x, y, z, face.ao_off[ci]);
+                const flat_l = g.lightAt(xi + noff[0], yi + noff[1], zi + noff[2]);
+                var lights = [4]u8{ flat_l, flat_l, flat_l, flat_l };
+                if (ctx.quality == .smooth) {
+                    const base_n = [3]i8{ face.verts[0].n[0], face.verts[0].n[1], face.verts[0].n[2] };
+                    for (0..4) |ci| lights[ci] = cornerLight(g, ctx.id_occluder, x, y, z, base_n, face.ao_off[ci]);
+                }
+                const idx = v * U + u;
+                present[idx] = true;
+                keys[idx] = .{ .id = id, .biome = g.biomeAt(x, y, z), .ao = ao, .light = lights };
+            }
+        }
+        rects.clearRetainingCapacity();
+        try greedyMerge(present, keys, used, U, V, &rects, alloc);
+        for (rects.items) |r| {
+            var base = [3]usize{ 0, 0, 0 };
+            base[gd.nax] = s;
+            base[gd.uax] = r.u;
+            base[gd.vax] = r.v;
+            try emitGreedyQuad(alloc, mesh, ctx, gd, di, base, r);
+        }
+    }
+}
+
+/// Emit one merged greedy quad. Positions and UV are the unit face scaled across
+/// the merged w×h footprint (UV tiles via repeat-wrap); the per-corner AO/light
+/// come straight from the (uniform) merge key, so at w=h=1 this is byte-identical
+/// to `emitBaked`.
+fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, gd: GDir, di: usize, base: [3]usize, r: Rect) !void {
+    const g = ctx.g;
+    const id = r.key.id;
+    const face = ctx.cache[id].?.faces[@intCast(ctx.greedy_faces[id][di])];
+    const w_f: f32 = @floatFromInt(r.w);
+    const h_f: f32 = @floatFromInt(r.h);
+    const base_world = [3]f32{
+        @as(f32, @floatFromInt(g.min_x)) + @as(f32, @floatFromInt(base[0])),
+        @as(f32, @floatFromInt(g.min_y)) + @as(f32, @floatFromInt(base[1])),
+        @as(f32, @floatFromInt(g.min_z)) + @as(f32, @floatFromInt(base[2])),
+    };
+    const rgb = ctx.tint_colors[@as(usize, r.key.biome) * ctx.nkind + @intFromEnum(face.tint)];
+    const bid_f: f32 = @floatFromInt(r.key.biome);
+
+    // Affine UV basis from the unit face: uv00 at (su,sv)=(0,0); the per-axis
+    // deltas tile across the run (×w along uax, ×h along vax).
+    var uv00 = [2]f32{ 0, 0 };
+    var uv10 = [2]f32{ 0, 0 };
+    var uv01 = [2]f32{ 0, 0 };
+    for (face.verts) |vtx| {
+        const su = vtx.pos[gd.uax];
+        const sv = vtx.pos[gd.vax];
+        if (su == 0 and sv == 0) uv00 = vtx.uv else if (su == 1 and sv == 0) uv10 = vtx.uv else if (su == 0 and sv == 1) uv01 = vtx.uv;
+    }
+    const duv_u = [2]f32{ uv10[0] - uv00[0], uv10[1] - uv00[1] };
+    const duv_v = [2]f32{ uv01[0] - uv00[0], uv01[1] - uv00[1] };
+
+    const vbase = mesh.vertex_count;
+    for (face.verts, 0..) |vtx, ci| {
+        const su = vtx.pos[gd.uax]; // 0 or 1
+        const sv = vtx.pos[gd.vax]; // 0 or 1
+        var pos = base_world;
+        pos[gd.uax] += su * w_f;
+        pos[gd.vax] += sv * h_f;
+        pos[gd.nax] += vtx.pos[gd.nax]; // boundary side (0 or 1)
+        try mesh.positions.appendSlice(alloc, &.{ pos[0], pos[1], pos[2] });
+        try mesh.uv.appendSlice(alloc, &.{
+            uv00[0] + su * w_f * duv_u[0] + sv * h_f * duv_v[0],
+            uv00[1] + su * w_f * duv_u[1] + sv * h_f * duv_v[1],
+        });
+        try mesh.layer.append(alloc, face.layer);
+        try mesh.color.appendSlice(alloc, &.{ rgb[0], rgb[1], rgb[2], r.key.ao[ci] });
+        try mesh.normals.appendSlice(alloc, &.{ vtx.n[0], vtx.n[1], vtx.n[2], @bitCast(r.key.light[ci]) });
+        try mesh.biome.append(alloc, bid_f);
+    }
+    try mesh.indices.appendSlice(alloc, &.{ vbase + 0, vbase + 1, vbase + 2, vbase + 0, vbase + 2, vbase + 3 });
+    mesh.vertex_count += 4;
+}
+
+/// One greedy direction's output: its own page-backed arena and mesh.
+const GreedyPartial = struct {
+    mesh: Mesh2 = .{},
+    arena: std.heap.ArenaAllocator,
+    di: usize,
+    err: ?anyerror = null,
+};
+
+fn greedyWorker(ctx: *const MeshCtx, p: *GreedyPartial) void {
+    meshGreedyDir(ctx, p.arena.allocator(), &p.mesh, p.di) catch |e| {
+        p.err = e;
+    };
 }
 
 fn isWater(name: []const u8) bool {
@@ -566,15 +826,18 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
     if (fluidTex(name)) |f| {
         const layer: f32 = @floatFromInt(tex.layerFor(f.path));
         try bakeFullCube(arena, &list, layer, f.tint);
+        markGreedy(list.items, true);
         return .{ .faces = try list.toOwnedSlice(arena), .occluder = true };
     }
 
     const parts = resolver.resolveBlock(name, state) catch {
         // Fallback: a flat-color full cube via a solid texture-array layer
         // (unresolved blocks). Opaque fallbacks occlude.
+        const occluder = !isTransparent(name);
         const layer: f32 = @floatFromInt(try tex.solidLayer(blocks.lookup(name).color));
         try bakeFullCube(arena, &list, layer, .none);
-        return .{ .faces = try list.toOwnedSlice(arena), .occluder = !isTransparent(name) };
+        markGreedy(list.items, occluder);
+        return .{ .faces = try list.toOwnedSlice(arena), .occluder = occluder };
     };
 
     for (parts) |rm| {
@@ -630,10 +893,52 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
         }
     }
 
+    const occluder = !isTransparent(name) and isFullCube(parts);
+    markGreedy(list.items, occluder);
     return .{
         .faces = try list.toOwnedSlice(arena),
-        .occluder = !isTransparent(name) and isFullCube(parts),
+        .occluder = occluder,
     };
+}
+
+/// Mark which of a block's baked faces may be greedy plane-merged. Only occluder
+/// blocks qualify, and only their full-cube boundary faces (see `isGreedyGeom`);
+/// overlays, sub-cube elements and cross/plant billboards are left per-block.
+fn markGreedy(face_list: []BakedFace, occluder: bool) void {
+    if (!occluder) return;
+    for (face_list) |*f| f.greedy = isGreedyGeom(f.*);
+}
+
+/// True when a baked face is a full unit-square face lying on a cube boundary:
+/// axis-aligned unit normal, every vertex on the 0/1 cube corners, full-tile UV,
+/// and a cullface. Such a face tiles seamlessly, so the greedy pass can merge a
+/// run of them into one big quad with repeat-wrapped UV. Rotated full cubes (logs
+/// on an axis) still pass — a 90° rotation about the block centre maps cube
+/// corners to cube corners — while sub-cube models and nudged overlays do not.
+fn isGreedyGeom(bf: BakedFace) bool {
+    if (bf.cull == null) return false;
+    const n = bf.verts[0].n;
+    const nsum: u32 = @as(u32, @abs(n[0])) + @as(u32, @abs(n[1])) + @as(u32, @abs(n[2]));
+    if (nsum != 1) return false; // exactly one axis-aligned unit normal component
+    var mn = [3]f32{ 1, 1, 1 };
+    var mx = [3]f32{ 0, 0, 0 };
+    for (bf.verts) |v| {
+        if (v.n[0] != n[0] or v.n[1] != n[1] or v.n[2] != n[2]) return false;
+        for (0..3) |a| {
+            const p = v.pos[a];
+            if (p != 0.0 and p != 1.0) return false;
+            mn[a] = @min(mn[a], p);
+            mx[a] = @max(mx[a], p);
+        }
+        if ((v.uv[0] != 0.0 and v.uv[0] != 1.0) or (v.uv[1] != 0.0 and v.uv[1] != 1.0)) return false;
+    }
+    const nax: usize = if (n[0] != 0) 0 else if (n[1] != 0) 1 else 2;
+    for (0..3) |a| {
+        if (a == nax) {
+            if (mn[a] != mx[a]) return false; // single boundary plane
+        } else if (mn[a] != 0.0 or mx[a] != 1.0) return false; // spans the full edge
+    }
+    return true;
 }
 
 fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32, tint: biome.Tint) !void {
@@ -918,6 +1223,53 @@ test "rotateDir matches the geometry/normal rotation convention" {
         rotAxis(&n, .y, 1, false);
         try std.testing.expectEqual(vecToDir(n), rotateDir(d, 90, 90));
     }
+}
+
+test "greedyMerge covers a uniform field with one rectangle" {
+    const a = std.testing.allocator;
+    const U = 3;
+    const V = 2;
+    const k = GKey{ .id = 1, .biome = 0, .ao = .{ 255, 255, 255, 255 }, .light = .{ 240, 240, 240, 240 } };
+    var present = [_]bool{true} ** (U * V);
+    var keys = [_]GKey{k} ** (U * V);
+    var used = [_]bool{false} ** (U * V);
+    var out: std.ArrayList(Rect) = .empty;
+    defer out.deinit(a);
+    try greedyMerge(&present, &keys, &used, U, V, &out, a);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(@as(usize, 3), out.items[0].w);
+    try std.testing.expectEqual(@as(usize, 2), out.items[0].h);
+}
+
+test "greedyMerge splits on differing keys" {
+    const a = std.testing.allocator;
+    const U = 2;
+    const V = 2;
+    const k1 = GKey{ .id = 1, .biome = 0, .ao = .{ 255, 255, 255, 255 }, .light = .{ 240, 240, 240, 240 } };
+    const k2 = GKey{ .id = 2, .biome = 0, .ao = .{ 255, 255, 255, 255 }, .light = .{ 240, 240, 240, 240 } };
+    var present = [_]bool{true} ** 4;
+    var keys = [_]GKey{ k1, k1, k1, k2 }; // row 0 uniform; row 1 splits at (1,1)
+    var used = [_]bool{false} ** 4;
+    var out: std.ArrayList(Rect) = .empty;
+    defer out.deinit(a);
+    try greedyMerge(&present, &keys, &used, U, V, &out, a);
+    try std.testing.expectEqual(@as(usize, 3), out.items.len);
+}
+
+test "greedyMerge skips absent cells" {
+    const a = std.testing.allocator;
+    const U = 2;
+    const V = 1;
+    const k = GKey{ .id = 1, .biome = 0, .ao = .{ 255, 255, 255, 255 }, .light = .{ 240, 240, 240, 240 } };
+    var present = [_]bool{ false, true };
+    var keys = [_]GKey{ k, k };
+    var used = [_]bool{false} ** 2;
+    var out: std.ArrayList(Rect) = .empty;
+    defer out.deinit(a);
+    try greedyMerge(&present, &keys, &used, U, V, &out, a);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(@as(usize, 1), out.items[0].u);
+    try std.testing.expectEqual(@as(usize, 1), out.items[0].w);
 }
 
 test "single solid cell yields 6 culled-free faces" {

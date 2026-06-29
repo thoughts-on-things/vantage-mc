@@ -5,6 +5,7 @@ import {
   encodeVTL1,
   encodeVTL2,
   encodeVTL3,
+  encodeVTL3Geo,
   encodeVTL4,
   encodeVTL5,
   LEGEND,
@@ -83,9 +84,18 @@ describe('parseTile', () => {
 });
 
 describe('summarizeBiomes', () => {
-  it('summarizes present biomes, most common first', () => {
-    const entries = summarizeBiomes(parseTile(encodeVTL3()));
-    expect(entries.map((e) => e.label)).toEqual(['plains', 'savanna']); // plains (2) before savanna (1)
+  it('summarizes present biomes by area, most common first', () => {
+    // A plains triangle of area 2 and a savanna triangle of area 1 → 2/3, 1/3.
+    // (Weighting by area, not vertex count, so greedy-merged quads count fairly.)
+    const tile = parseTile(
+      encodeVTL3Geo(
+        [0, 0, 0, 2, 0, 0, 0, 2, 0, /* savanna */ 0, 0, 0, 2, 0, 0, 0, 1, 0],
+        [1, 1, 1, 2, 2, 2],
+        [0, 1, 2, 3, 4, 5],
+      ),
+    );
+    const entries = summarizeBiomes(tile);
+    expect(entries.map((e) => e.label)).toEqual(['plains', 'savanna']);
     expect(entries[0]!.fraction).toBeCloseTo(2 / 3, 5);
     expect(entries[1]!.fraction).toBeCloseTo(1 / 3, 5);
     // the empty sentinel (id 0) is excluded.

@@ -55,9 +55,9 @@ export interface BiomeEntry {
   /** Display name with the namespace stripped. */
   label: string;
   color: Rgb;
-  /** Vertex count carrying this biome. */
+  /** Exposed surface area (in block² units) carrying this biome. */
   count: number;
-  /** Share of named, present vertices (0..1). */
+  /** Share of named, present surface area (0..1). */
   fraction: number;
 }
 
@@ -65,6 +65,11 @@ export interface BiomeEntry {
  * Summarize the biomes actually present in a tile, most common first. Returns an
  * empty list for tiles without biome data. Pass a `palette` to reuse one already
  * built for rendering; otherwise one is derived from the legend length.
+ *
+ * Biomes are weighted by exposed triangle *area*, not vertex count: greedy
+ * meshing merges a run of identical faces into one big quad with the same 4
+ * vertices, so a vertex tally would under-count flat, mergeable biomes. Area is
+ * mesh-independent — the share is the same whether or not the faces were merged.
  */
 export function summarizeBiomes(tile: DecodedTile, palette?: Rgb[]): BiomeEntry[] {
   const names = tile.biomeNames;
@@ -73,8 +78,24 @@ export function summarizeBiomes(tile: DecodedTile, palette?: Rgb[]): BiomeEntry[
   const pal = palette ?? biomePalette(names.length);
 
   const counts = new Array<number>(names.length).fill(0);
-  for (let i = 0; i < tile.vertexCount; i++) {
-    counts[biome[i]! | 0]!++;
+  const pos = tile.positions;
+  const idx = tile.indices;
+  for (let t = 0; t + 2 < idx.length; t += 3) {
+    const a = idx[t]!;
+    const b = idx[t + 1]!;
+    const c = idx[t + 2]!;
+    // Triangle area via half the cross-product magnitude of two edges. All three
+    // vertices of a face share a biome, so attributing to `a` is exact.
+    const e1x = pos[b * 3]! - pos[a * 3]!;
+    const e1y = pos[b * 3 + 1]! - pos[a * 3 + 1]!;
+    const e1z = pos[b * 3 + 2]! - pos[a * 3 + 2]!;
+    const e2x = pos[c * 3]! - pos[a * 3]!;
+    const e2y = pos[c * 3 + 1]! - pos[a * 3 + 1]!;
+    const e2z = pos[c * 3 + 2]! - pos[a * 3 + 2]!;
+    const crx = e1y * e2z - e1z * e2y;
+    const cry = e1z * e2x - e1x * e2z;
+    const crz = e1x * e2y - e1y * e2x;
+    counts[biome[a]! | 0]! += 0.5 * Math.hypot(crx, cry, crz);
   }
 
   const present: BiomeEntry[] = [];

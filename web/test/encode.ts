@@ -136,6 +136,26 @@ export function encodeVTL3(): ArrayBuffer {
   return w.buffer();
 }
 
+/** A VTL3 tile from explicit positions + per-vertex biome ids (real faces are
+ *  biome-uniform), for exercising the area-weighted biome summary. */
+export function encodeVTL3Geo(positions: number[], biome: number[], indices: number[]): ArrayBuffer {
+  const V = biome.length;
+  const s: SectionInput = {
+    positions,
+    uv: Array.from({ length: 2 * V }, () => 0),
+    layer: Array.from({ length: V }, () => 0),
+    colors: Array.from({ length: 4 * V }, () => 255),
+    normals: Array.from({ length: 4 * V }, () => 0),
+    biome,
+    indices,
+  };
+  const w = new Writer();
+  w.magic('VTL3').u32(3);
+  writeSection(w, s);
+  writeLegend(w, LEGEND);
+  return w.buffer();
+}
+
 export function encodeVTL4(): ArrayBuffer {
   const w = new Writer();
   w.magic('VTL4').u32(4);

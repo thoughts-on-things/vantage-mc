@@ -53,9 +53,9 @@ pub fn main(init: std.process.Init) !void {
 fn usage() error{MissingArgument} {
     std.debug.print(
         \\usage:
-        \\  vantage render  <world-save-dir> [--assets <dir>] [--radius <chunks>] [--light flat|smooth]
+        \\  vantage render  <world-save-dir> [--assets <dir>] [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off]
         \\  vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
-        \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1] [--light flat|smooth]
+        \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1] [--light flat|smooth] [--biome-blend on|off]
         \\  vantage histo   <region.mca> [localX localZ]
         \\  vantage biomes  <region.mca> [cx0 cz0 cx1 cz1]
         \\  vantage resolve <assets/minecraft dir> <block-name> [state e.g. axis=x]
@@ -76,6 +76,19 @@ fn parseLightQuality(args: []const []const u8) mesh.LightQuality {
         if (std.mem.eql(u8, args[i + 1], "smooth")) return .smooth;
     }
     return .smooth;
+}
+
+/// Scan args for `--biome-blend on|off` (default `on`). When on, biome tint
+/// colours (grass/foliage/water) are bilinearly blended across biome borders for
+/// smooth vanilla-style gradients; off steps hard at each biome cell.
+fn parseBiomeBlend(args: []const []const u8) bool {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--biome-blend")) continue;
+        if (std.mem.eql(u8, args[i + 1], "off")) return false;
+        if (std.mem.eql(u8, args[i + 1], "on")) return true;
+    }
+    return true;
 }
 
 fn runTexinfo(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
@@ -236,7 +249,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
-    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, parseLightQuality(args), null);
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, parseLightQuality(args), parseBiomeBlend(args), null);
     const arr = try builder.finish();
 
     // Resolve human-readable biome names from the language file for the legend.
@@ -331,6 +344,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var radius: i32 = 6; // default window half-size in chunks (kept browser-loadable
     // until greedy meshing/LOD land; --radius widens it)
     const quality = parseLightQuality(args);
+    const blend_biomes = parseBiomeBlend(args);
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--assets") and i + 1 < args.len) {
@@ -418,7 +432,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
     // buildTextured reports its own "computing light" + "meshing geometry" phases.
-    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, quality, root);
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, quality, blend_biomes, root);
     const t_mesh = std.Io.Timestamp.now(init.io, .awake);
     const tex_node = root.start("building textures", 0);
     const arr = try builder.finish();

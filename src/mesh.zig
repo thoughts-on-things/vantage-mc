@@ -198,6 +198,7 @@ pub fn buildTextured(
     maps: biome.Colormaps,
     reg: *biome.Registry,
     quality: LightQuality,
+    blend_biomes: bool,
     progress: ?std.Progress.Node,
 ) !Built {
     var mesh: Mesh2 = .{}; // opaque terrain
@@ -266,6 +267,7 @@ pub fn buildTextured(
         .nkind = nkind,
         .water_layer = water_layer,
         .quality = quality,
+        .blend_biomes = blend_biomes,
         .greedy_faces = greedy_faces,
     };
     const cpu = std.Thread.getCpuCount() catch 1;
@@ -318,6 +320,9 @@ const MeshCtx = struct {
     nkind: usize,
     water_layer: f32,
     quality: LightQuality,
+    /// Blend biome tint colours across borders (vanilla-style grass/foliage/water
+    /// gradients) rather than stepping per biome cell. See `blendedTint`.
+    blend_biomes: bool,
     /// Per block id, the cached-face index of its greedy face in each of the 6
     /// directions (see `dirIndex`), or -1. The greedy pass uses this to find a
     /// cell's mergeable face; the per-block pass skips faces marked `greedy`.
@@ -361,8 +366,7 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
                 // Pure water: transparent pass only (no block model). Boundary
                 // faces, surface lip, depth — see emitFluid.
                 if (ctx.is_water[id]) {
-                    const rgb = ctx.tint_colors[bid * ctx.nkind + @intFromEnum(biome.Tint.water)];
-                    try emitFluid(alloc, fluid, g, ctx.id_occluder, ctx.waterish, ctx.water_layer, x, y, z, wx, wy, wz, rgb, bid);
+                    try emitFluid(alloc, fluid, ctx, x, y, z, wx, wy, wz, bid);
                     continue;
                 }
 
@@ -393,15 +397,14 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
                         const base = [3]i8{ face.verts[0].n[0], face.verts[0].n[1], face.verts[0].n[2] };
                         for (0..4) |ci| lights[ci] = cornerLight(g, ctx.id_occluder, x, y, z, base, face.ao_off[ci]);
                     }
-                    try emitBaked(alloc, mesh, wx, wy, wz, face, rgb, ao, lights, bid);
+                    try emitBaked(alloc, mesh, ctx, wx, wy, wz, face, rgb, ao, lights, bid);
                 }
 
                 // Waterlogged block (seagrass, kelp, waterlogged stair/…): it just
                 // rendered its model into the opaque mesh; now lay continuous water
                 // over its cell so it sits *in* the water instead of in a shell.
                 if (ctx.waterish[id]) {
-                    const rgb = ctx.tint_colors[bid * ctx.nkind + @intFromEnum(biome.Tint.water)];
-                    try emitFluid(alloc, fluid, g, ctx.id_occluder, ctx.waterish, ctx.water_layer, x, y, z, wx, wy, wz, rgb, bid);
+                    try emitFluid(alloc, fluid, ctx, x, y, z, wx, wy, wz, bid);
                 }
             }
         }
@@ -592,6 +595,10 @@ fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, g
     };
     const rgb = ctx.tint_colors[@as(usize, r.key.biome) * ctx.nkind + @intFromEnum(face.tint)];
     const bid_f: f32 = @floatFromInt(r.key.biome);
+    const blend = ctx.blend_biomes and isBlendable(face.tint);
+    const min_xf: f32 = @floatFromInt(g.min_x);
+    const min_yf: f32 = @floatFromInt(g.min_y);
+    const min_zf: f32 = @floatFromInt(g.min_z);
 
     // Affine UV basis from the unit face: uv00 at (su,sv)=(0,0); the per-axis
     // deltas tile across the run (×w along uax, ×h along vax).
@@ -620,7 +627,8 @@ fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, g
             uv00[1] + su * w_f * duv_u[1] + sv * h_f * duv_v[1],
         });
         try mesh.layer.append(alloc, face.layer);
-        try mesh.color.appendSlice(alloc, &.{ rgb[0], rgb[1], rgb[2], r.key.ao[ci] });
+        const col = if (blend) blendedTint(ctx, face.tint, pos[0] - min_xf, pos[1] - min_yf, pos[2] - min_zf) else rgb;
+        try mesh.color.appendSlice(alloc, &.{ col[0], col[1], col[2], r.key.ao[ci] });
         try mesh.normals.appendSlice(alloc, &.{ vtx.n[0], vtx.n[1], vtx.n[2], @bitCast(r.key.light[ci]) });
         try mesh.biome.append(alloc, bid_f);
     }
@@ -668,19 +676,24 @@ fn isWaterlogged(name: []const u8, state: []const u8) bool {
 fn emitFluid(
     arena: std.mem.Allocator,
     mesh: *Mesh2,
-    g: grid.Grid,
-    id_occluder: []const bool,
-    waterish: []const bool,
-    layer: f32,
+    ctx: *const MeshCtx,
     x: usize,
     y: usize,
     z: usize,
     wx: f32,
     wy: f32,
     wz: f32,
-    rgb: [3]u8,
     bid: usize,
 ) !void {
+    const g = ctx.g;
+    const id_occluder = ctx.id_occluder;
+    const waterish = ctx.waterish;
+    const layer = ctx.water_layer;
+    const blend = ctx.blend_biomes;
+    const base_rgb = ctx.tint_colors[bid * ctx.nkind + @intFromEnum(biome.Tint.water)];
+    const min_xf: f32 = @floatFromInt(g.min_x);
+    const min_yf: f32 = @floatFromInt(g.min_y);
+    const min_zf: f32 = @floatFromInt(g.min_z);
     const xi: isize = @intCast(x);
     const yi: isize = @intCast(y);
     const zi: isize = @intCast(z);
@@ -702,14 +715,14 @@ fn emitFluid(
         for (0..4) |i| {
             const cs = tf.corners[i];
             const py: f32 = if (cs[1] == 1) top else 0.0;
-            try mesh.positions.appendSlice(arena, &.{
-                wx + @as(f32, @floatFromInt(cs[0])),
-                wy + py,
-                wz + @as(f32, @floatFromInt(cs[2])),
-            });
+            const px = wx + @as(f32, @floatFromInt(cs[0]));
+            const pyw = wy + py;
+            const pz = wz + @as(f32, @floatFromInt(cs[2]));
+            try mesh.positions.appendSlice(arena, &.{ px, pyw, pz });
             try mesh.uv.appendSlice(arena, &.{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(1 - tf.uvsel[i][1]) });
             try mesh.layer.append(arena, layer);
-            try mesh.color.appendSlice(arena, &.{ rgb[0], rgb[1], rgb[2], depth });
+            const col = if (blend) blendedTint(ctx, .water, px - min_xf, pyw - min_yf, pz - min_zf) else base_rgb;
+            try mesh.color.appendSlice(arena, &.{ col[0], col[1], col[2], depth });
             try mesh.normals.appendSlice(arena, &.{ tf.n[0], tf.n[1], tf.n[2], lp });
             try mesh.biome.append(arena, bid_f);
         }
@@ -776,6 +789,62 @@ fn occ(g: grid.Grid, id_occluder: []const bool, x: usize, y: usize, z: usize, o:
 
 /// `[biome_id][tint_kind] -> RGB` flat table. Index 0 covers the no-data biome
 /// (resolves to plains-like defaults), so a missing biome never indexes OOB.
+/// Tints that vary by biome and so should blend across borders. The rest
+/// (spruce/birch/lily leaf colours, `none`) are constants — no blending needed.
+fn isBlendable(t: biome.Tint) bool {
+    return switch (t) {
+        .grass, .foliage, .water => true,
+        else => false,
+    };
+}
+
+/// One biome cell's precomputed tint colour for `kind`, clamping the cell coords
+/// to the grid edge so a border blend extrapolates the edge biome rather than
+/// reading biome 0 (the "" sentinel) past the world edge.
+fn cellTint(ctx: *const MeshCtx, bx: i32, by: usize, bz: i32, kind: usize) [3]u8 {
+    const g = ctx.g;
+    const cx: usize = @intCast(std.math.clamp(bx, 0, @as(i32, @intCast(g.bsx - 1))));
+    const cz: usize = @intCast(std.math.clamp(bz, 0, @as(i32, @intCast(g.bsz - 1))));
+    const id = g.biome_ids[g.biomeIndex(cx, by, cz)];
+    return ctx.tint_colors[@as(usize, id) * ctx.nkind + kind];
+}
+
+/// Biome tint for a blendable `kind`, bilinearly interpolated across the
+/// quarter-resolution biome grid in X/Z so colours ramp smoothly over biome
+/// borders (matching vanilla's grass/foliage/water blend) instead of stepping at
+/// each 4-block biome cell. `lx`,`ly`,`lz` are world-LOCAL coords (use the vertex
+/// corner); Y picks the nearest biome layer (vanilla blends horizontally only).
+/// Because two faces meeting at an edge sample the same field there, per-block and
+/// merged greedy quads stay seamless. Blends in sRGB byte space, as vanilla does.
+fn blendedTint(ctx: *const MeshCtx, kind: biome.Tint, lx: f32, ly: f32, lz: f32) [3]u8 {
+    const g = ctx.g;
+    const k = @intFromEnum(kind);
+    if (g.biome_ids.len == 0 or g.bsx == 0 or g.bsy == 0 or g.bsz == 0)
+        return ctx.tint_colors[k]; // biome 0 fallback
+    // Biome cells are 4 blocks wide with centres at block 2,6,10,… so a corner at
+    // block p maps to cell coordinate p/4 − 0.5; bilinear over the 4 nearest cells.
+    const fx = lx * 0.25 - 0.5;
+    const fz = lz * 0.25 - 0.5;
+    const x0f = @floor(fx);
+    const z0f = @floor(fz);
+    const tx = fx - x0f;
+    const tz = fz - z0f;
+    const x0: i32 = @intFromFloat(x0f);
+    const z0: i32 = @intFromFloat(z0f);
+    const by: usize = @intCast(std.math.clamp(@as(i32, @intFromFloat(@floor(ly * 0.25))), 0, @as(i32, @intCast(g.bsy - 1))));
+    const c00 = cellTint(ctx, x0, by, z0, k);
+    const c10 = cellTint(ctx, x0 + 1, by, z0, k);
+    const c01 = cellTint(ctx, x0, by, z0 + 1, k);
+    const c11 = cellTint(ctx, x0 + 1, by, z0 + 1, k);
+    var out: [3]u8 = undefined;
+    inline for (0..3) |i| {
+        const top = @as(f32, @floatFromInt(c00[i])) * (1 - tx) + @as(f32, @floatFromInt(c10[i])) * tx;
+        const bot = @as(f32, @floatFromInt(c01[i])) * (1 - tx) + @as(f32, @floatFromInt(c11[i])) * tx;
+        out[i] = @intFromFloat(@round(std.math.clamp(top * (1 - tz) + bot * tz, 0, 255)));
+    }
+    return out;
+}
+
 fn buildTintTable(arena: std.mem.Allocator, g: grid.Grid, maps: biome.Colormaps, reg: *biome.Registry) ![][3]u8 {
     const nkind = @as(usize, biome.Tint.count);
     const nbiome = @max(1, g.biome_names.len);
@@ -989,14 +1058,19 @@ fn addv(a: [3]i8, b: [3]i8) [3]i8 {
 /// `rgb` is the face's biome tint (shared by all 4 verts); `ao` and `light` are
 /// per-vertex — AO brightness in the colour's alpha, packed sky/block light in
 /// the normal's spare 4th byte (equal across verts for flat-quality faces).
-fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, wx: f32, wy: f32, wz: f32, face: BakedFace, rgb: [3]u8, ao: [4]u8, light: [4]u8, bid: usize) !void {
+fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, wx: f32, wy: f32, wz: f32, face: BakedFace, rgb: [3]u8, ao: [4]u8, light: [4]u8, bid: usize) !void {
     const base = mesh.vertex_count;
     const bid_f: f32 = @floatFromInt(bid);
+    const blend = ctx.blend_biomes and isBlendable(face.tint);
+    const ox = wx - @as(f32, @floatFromInt(ctx.g.min_x));
+    const oy = wy - @as(f32, @floatFromInt(ctx.g.min_y));
+    const oz = wz - @as(f32, @floatFromInt(ctx.g.min_z));
     for (face.verts, 0..) |v, i| {
+        const col = if (blend) blendedTint(ctx, face.tint, ox + v.pos[0], oy + v.pos[1], oz + v.pos[2]) else rgb;
         try mesh.positions.appendSlice(arena, &.{ wx + v.pos[0], wy + v.pos[1], wz + v.pos[2] });
         try mesh.uv.appendSlice(arena, &.{ v.uv[0], v.uv[1] });
         try mesh.layer.append(arena, face.layer);
-        try mesh.color.appendSlice(arena, &.{ rgb[0], rgb[1], rgb[2], ao[i] });
+        try mesh.color.appendSlice(arena, &.{ col[0], col[1], col[2], ao[i] });
         try mesh.normals.appendSlice(arena, &.{ v.n[0], v.n[1], v.n[2], @bitCast(light[i]) });
         try mesh.biome.append(arena, bid_f);
     }
@@ -1321,4 +1395,52 @@ test "two adjacent cells cull their shared faces" {
     }
     // 12 faces total minus the 2 shared interior faces = 10 quads.
     try std.testing.expectEqual(@as(u32, 10), mesh.quadCount());
+}
+
+test "blendedTint ramps linearly between two biome cells" {
+    const a = std.testing.allocator;
+    const nkind = @as(usize, biome.Tint.count);
+    const gk = @intFromEnum(biome.Tint.grass);
+    // Two biome cells in X (bsx=2): cell 0 -> biome id 1 (black), cell 1 -> id 2 (red).
+    var biome_ids = [_]u16{ 1, 2 };
+    // tint_colors rows for biome ids 0,1,2; only the grass column matters here.
+    const tint = try a.alloc([3]u8, 3 * nkind);
+    defer a.free(tint);
+    @memset(tint, .{ 0, 0, 0 });
+    tint[1 * nkind + gk] = .{ 0, 0, 0 };
+    tint[2 * nkind + gk] = .{ 100, 0, 0 };
+    const g: grid.Grid = .{
+        .sx = 8,
+        .sy = 4,
+        .sz = 4,
+        .min_x = 0,
+        .min_y = 0,
+        .min_z = 0,
+        .ids = &.{},
+        .names = &.{},
+        .bsx = 2,
+        .bsy = 1,
+        .bsz = 1,
+        .biome_ids = &biome_ids,
+    };
+    const ctx: MeshCtx = .{
+        .g = g,
+        .cache = &.{},
+        .id_occluder = &.{},
+        .is_water = &.{},
+        .waterish = &.{},
+        .tint_colors = tint,
+        .nkind = nkind,
+        .water_layer = 0,
+        .quality = .flat,
+        .blend_biomes = true,
+        .greedy_faces = &.{},
+    };
+    // Cell centres sit at block 2 and 6; the midpoint (block 4) is the 50% blend.
+    try std.testing.expectEqual(@as(u8, 0), blendedTint(&ctx, .grass, 2, 0, 0)[0]);
+    try std.testing.expectEqual(@as(u8, 100), blendedTint(&ctx, .grass, 6, 0, 0)[0]);
+    try std.testing.expectEqual(@as(u8, 50), blendedTint(&ctx, .grass, 4, 0, 0)[0]);
+    // Past the edge the nearest cell is held (no bleed to biome 0/black beyond).
+    try std.testing.expectEqual(@as(u8, 0), blendedTint(&ctx, .grass, 0, 0, 0)[0]);
+    try std.testing.expectEqual(@as(u8, 100), blendedTint(&ctx, .grass, 8, 0, 0)[0]);
 }

@@ -656,11 +656,12 @@ export class VantageViewer {
     this.controls.update();
     this.sky.position.copy(this.camera.position); // keep the dome centred on the eye
 
-    // Ease the textured<->biome crossfade.
+    // Ease the textured<->biome crossfade, and advance the water-animation clock.
     if (this.shader) {
       this.mixCurrent += (this.mixTarget - this.mixCurrent) * 0.2;
       if (Math.abs(this.mixCurrent - this.mixTarget) < 0.0015) this.mixCurrent = this.mixTarget;
       this.shader.uniforms['uBiomeMix']!.value = this.mixCurrent;
+      this.shader.uniforms['uTime']!.value = now * 0.001; // seconds
     }
 
     this.pickHover();

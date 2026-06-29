@@ -21,6 +21,7 @@ const VERT = /* glsl */ `
   flat out float vLayer;
   flat out float vBiome;
   out vec3 vN;
+  out vec3 vWorld;                                 // world-space position (waves, view dir)
   out float vFog;
   out float vSky;                                  // saved sky light, 0..1
   out float vBlk;                                  // saved block light, 0..1
@@ -34,6 +35,7 @@ const VERT = /* glsl */ `
     vSky = sky / 15.0;
     vBlk = (alight - sky * 16.0) / 15.0;
     vN = normalize(mat3(modelMatrix) * normal);
+    vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     vFog = -mv.z;                                  // view-space depth for fog
     gl_Position = projectionMatrix * mv;
@@ -59,12 +61,15 @@ const FRAG = /* glsl */ `
   uniform float uSaturation; // colour saturation (1 = neutral)
   uniform float uContrast;   // colour contrast around mid grey (1 = neutral)
   uniform float uFogDensity; // atmospheric haze amount (1 = full, 0 = clear)
+  uniform float uTime;       // seconds, for animated water
+  uniform float uWaterAnim;  // water wave amplitude (0 = flat/vanilla, 1 = lively)
   in vec2 vUv;
   in vec4 vTint;
   in vec3 vBcol;
   flat in float vLayer;
   flat in float vBiome;
   in vec3 vN;
+  in vec3 vWorld;
   in float vFog;
   in float vSky;
   in float vBlk;
@@ -113,18 +118,44 @@ const FRAG = /* glsl */ `
     vec3 ambient = mix(GND, SKY, 0.5 + 0.5 * N.y); // sky above, earth below
     float ndl = max(dot(N, normalize(lightDir)), 0.0);
 
-    // Water pass: a mostly-flat biome-coloured surface (only a faint ripple from
-    // the texture, so it doesn't read as noise). Depth (colour alpha, 0..1) drives
-    // *opacity* — shallow water is clear so the seabed shows, deep water turns to
-    // solid blue. That accumulation reads as real depth without per-block shading.
+    // Water pass: a biome-coloured surface whose normal is perturbed by a couple of
+    // scrolling sine ripples (uTime) — moving sun glint + a fresnel sky sheen, the
+    // way BlueMap's web water animates, with no flipbook frames. Depth (colour alpha,
+    // 0..1) drives *opacity* — shallow water is clear so the seabed shows, deep water
+    // turns solid blue. That accumulation reads as real depth without per-block shading.
     if (uWater > 0.5) {
-      float ripple = dot(t.rgb, vec3(0.299, 0.587, 0.114));
-      vec3 wcol = toLinear(vTint.rgb) * (0.82 + 0.20 * ripple);
       float depth = vTint.a;
+      vec3 wcol = toLinear(vTint.rgb);
       wcol = mix(wcol, wcol * vec3(0.55, 0.66, 0.85), depth);   // deep water cools + deepens
-      vec3 wlit = grade(wcol * (0.55 + 0.40 * ambient + 0.45 * SUN * ndl) * lightAmt * lightCol * uExposure);
+
+      // Animate only the up-facing surface; the vertical wall faces stay flat.
+      float up = smoothstep(0.5, 0.9, vN.y);
+      vec2 wp = vWorld.xz;
+      float tt = uTime;
+      // Travelling wave height (sum of crossing sines) → both a moving light/dark
+      // band you can see straight down, and (via its slope) a perturbed normal for
+      // the grazing-angle sun glint.
+      float wave = sin(wp.x * 0.55 + tt * 1.4) + sin(wp.y * 0.62 - tt * 1.1)
+                 + 0.6 * sin((wp.x + wp.y) * 0.40 + tt * 2.0);
+      float dwx = 0.55 * cos(wp.x * 0.55 + tt * 1.4) + 0.24 * cos((wp.x + wp.y) * 0.40 + tt * 2.0);
+      float dwz = 0.62 * cos(wp.y * 0.62 - tt * 1.1) + 0.24 * cos((wp.x + wp.y) * 0.40 + tt * 2.0);
+      float amp = 0.22 * up * uWaterAnim;
+      vec3 Nw = normalize(vec3(-dwx * amp, 1.0, -dwz * amp));
+
+      vec3 Ldir = normalize(lightDir);
+      vec3 Vd = normalize(cameraPosition - vWorld);
+      vec3 Hd = normalize(Ldir + Vd);
+      float ndl2 = max(dot(Nw, Ldir), 0.0);
+      float spec = pow(max(dot(Nw, Hd), 0.0), 80.0) * up * uWaterAnim;  // moving glint
+      float fres = pow(1.0 - max(dot(Nw, Vd), 0.0), 4.0) * up;          // grazing sky sheen
+
+      vec3 wlit = wcol * (0.55 + 0.40 * ambient + 0.45 * SUN * ndl2);
+      wlit *= 1.0 + 0.08 * wave * up * uWaterAnim;              // moving brightness bands (visible top-down)
+      wlit += SUN * spec * 0.6;                                 // sun specular highlight
+      wlit = mix(wlit, SKY, fres * 0.22);                       // fresnel brightens the rim
+      wlit = grade(wlit * lightAmt * lightCol * uExposure);
       float wf = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity;
-      float wa = mix(0.35, 0.88, depth);                        // shallow clear -> deep opaque
+      float wa = mix(0.35, 0.90, depth);                        // shallow clear -> deep opaque
       frag = vec4(mix(wlit, fogCol, wf), wa);
       return;
     }
@@ -180,6 +211,8 @@ export function createTerrainMaterial(texData: DecodedTextureArray): THREE.Shade
       uSaturation: { value: 1.0 }, // colour saturation (1 = neutral)
       uContrast: { value: 1.0 },   // colour contrast (1 = neutral)
       uFogDensity: { value: 1.0 }, // atmospheric haze amount (1 = full)
+      uTime: { value: 0.0 },       // seconds, driven each frame for water animation
+      uWaterAnim: { value: 1.0 },  // water wave amplitude (0 = flat, 1 = lively)
     },
     vertexShader: VERT,
     fragmentShader: FRAG,

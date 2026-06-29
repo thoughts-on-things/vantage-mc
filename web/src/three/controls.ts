@@ -238,7 +238,7 @@ export class MapControls {
     this.applyDynamicDistance();
     this.applyGoal(d);
     this.applyBounds();
-    this.applyHeight();
+    this.applyHeight(d);
 
     this.updateCamera();
     const changed = this.changeKey() !== before;
@@ -364,14 +364,16 @@ export class MapControls {
 
   /** Ride the terrain: glide the pivot Y toward the surface beneath it when
    *  zoomed in, relaxing to `floorY` once far out (where pitch is near top-down
-   *  and pivot height is irrelevant). */
-  private applyHeight(): void {
+   *  and pivot height is irrelevant). Gently — a soft, frame-rate-normalized
+   *  follow so panning over uneven ground reads as a smooth glide, not a bob. */
+  private applyHeight(dt: number): void {
     if (!this.heightAt) return;
     const h = this.heightAt(this.position.x, this.position.z);
     const surface = (h === null ? this.floorY : h) + 3;
     const t = Math.min(this.distance / 500, 1);
     const targetY = surface * (1 - t) + this.floorY * t;
-    this.position.y = softSet(this.position.y, targetY, 0.2);
+    const k = clamp(0.1 * (dt / 16.666), 0, 1);
+    this.position.y = softSet(this.position.y, targetY, k);
   }
 
   // --- keyboard integration --------------------------------------------------

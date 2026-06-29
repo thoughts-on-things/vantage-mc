@@ -169,6 +169,26 @@ export const CSS = `
 }
 .vtg-coords b { color: var(--vtg-dim); font-weight: 600; margin-right: 1px; }
 
+/* --- centre reticle (navigation reference) -------------------------------- */
+.vtg-reticle {
+  position: absolute; left: 50%; top: 50%; width: 30px; height: 30px;
+  transform: translate(-50%, -50%); pointer-events: none; z-index: 4;
+}
+.vtg-ret-ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 1.5px solid rgba(180, 205, 240, 0.28); transform: scale(0.62);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28);
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+.vtg-ret-dot {
+  position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px;
+  border-radius: 50%; background: rgba(238, 244, 255, 0.85);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 6px rgba(0, 0, 0, 0.55);
+  transition: background 0.2s ease;
+}
+.vtg-reticle-on .vtg-ret-ring { border-color: rgba(143, 182, 232, 0.85); transform: scale(1); }
+.vtg-reticle-on .vtg-ret-dot { background: #fff; }
+
 @keyframes vtg-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .vtg-nav { animation-name: vtg-rise-x; }
 @keyframes vtg-rise-x { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }

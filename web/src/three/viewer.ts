@@ -123,7 +123,9 @@ export const DISPLAY_PRESETS: Record<RenderMode, Required<DisplaySettings>> = {
   vanilla: VANILLA_DISPLAY,
 };
 
-const DEFAULT_DISPLAY: Required<DisplaySettings> = { ...CINEMATIC_DISPLAY };
+// Ship the flat, colour-accurate vanilla/BlueMap look by default; the cinematic
+// filmic grade is one toggle away in the fidelity panel.
+const DEFAULT_DISPLAY: Required<DisplaySettings> = { ...VANILLA_DISPLAY };
 
 /** Above this vertex count GTAO's per-frame geometry re-render is too costly, so
  *  it auto-disables (the user can still force it via the dial if they accept the
@@ -198,18 +200,35 @@ function resolveContainer(container: HTMLElement | string): HTMLElement {
   return el;
 }
 
-/** A nearest-column terrain-height lookup over the tile's surface map, for the
- *  controls' terrain-riding pivot. Returns `null` outside the map or on empty
- *  columns so the controls can relax toward the floor. */
+/** A *smoothed* terrain-height lookup over the tile's surface map, for the
+ *  controls' terrain-riding pivot. Averages a small window so the pivot rides the
+ *  mean surface instead of bobbing block-to-block over forest canopy (the surface
+ *  map records treetop height) — the difference between a smooth pan and a jittery
+ *  one. Returns `null` outside the map / on all-empty windows so the controls can
+ *  relax toward the floor. */
 function makeHeightSampler(surface: SurfaceMap | undefined): HeightSampler | null {
   if (!surface) return null;
   const { width, depth, originX, originZ, height } = surface;
+  const R = 4; // window radius in blocks (low-passes canopy noise)
   return (x: number, z: number): number | null => {
     const cx = Math.floor(x - originX);
     const cz = Math.floor(z - originZ);
-    if (cx < 0 || cz < 0 || cx >= width || cz >= depth) return null;
-    const h = height[cz * width + cx]!;
-    return h < 1 ? null : h; // <1 = empty-column sentinel
+    let sum = 0;
+    let n = 0;
+    for (let dz = -R; dz <= R; dz += 2) {
+      const zz = cz + dz;
+      if (zz < 0 || zz >= depth) continue;
+      const row = zz * width;
+      for (let dx = -R; dx <= R; dx += 2) {
+        const xx = cx + dx;
+        if (xx < 0 || xx >= width) continue;
+        const h = height[row + xx]!;
+        if (h < 1) continue; // empty-column sentinel
+        sum += h;
+        n++;
+      }
+    }
+    return n === 0 ? null : sum / n;
   };
 }
 
@@ -465,11 +484,11 @@ export class VantageViewer {
       const land = this.landTarget(center, size);
       const surfaceY = this.bounds.max.y - size.y * 0.18;
       pivot.set(land.x, surfaceY, land.z);
-      // A steep 3/4 aerial: close enough that clear terrain (not fogged distance)
-      // fills the view, tilted ~34° off top-down, looking from the south-east.
+      // A gentle aerial: mostly map-like, tilted just ~24° off top-down to read
+      // relief without an awkward near-horizon lean, looking from the south-east.
       distance = land.span * 0.62;
       rotation = -Math.PI / 4;
-      angle = 0.6;
+      angle = 0.42;
     }
     // Start the pivot on the actual surface beneath it so there's no settle on
     // load; the controls keep it riding the terrain from here.

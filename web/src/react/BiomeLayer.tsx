@@ -97,7 +97,9 @@ export function BiomeLayer({
     if (biomeLayerEnabled) viewer.setHighlightedBiome(committed);
   };
 
-  const hovered = hoveredBiome != null ? byId.get(hoveredBiome) : undefined;
+  // Only identify on hover while the biome layer is active — off, the tooltip is
+  // noise over the textured map.
+  const hovered = biomeLayerEnabled && hoveredBiome != null ? byId.get(hoveredBiome) : undefined;
 
   return (
     <>

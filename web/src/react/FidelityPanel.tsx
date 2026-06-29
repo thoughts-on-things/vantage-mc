@@ -6,7 +6,7 @@
 import { useEffect, useState } from 'react';
 import { useVantage } from './context.js';
 import { Panel } from './Panel.js';
-import { CINEMATIC_DISPLAY, DISPLAY_PRESETS } from '../three/index.js';
+import { DISPLAY_PRESETS, VANILLA_DISPLAY } from '../three/index.js';
 import type { DisplaySettings, RenderMode } from '../three/index.js';
 
 export interface FidelityPanelProps {
@@ -44,7 +44,7 @@ const KNOBS: Knob[] = [
   { key: 'renderScale', label: 'render scale', min: 0.5, max: 2, step: 0.25, suffix: '×' },
 ];
 
-const DEFAULTS: Required<DisplaySettings> = CINEMATIC_DISPLAY;
+const DEFAULTS: Required<DisplaySettings> = VANILLA_DISPLAY;
 
 const MODES: { id: RenderMode; label: string }[] = [
   { id: 'vanilla', label: 'vanilla' },
@@ -54,7 +54,7 @@ const MODES: { id: RenderMode; label: string }[] = [
 export function FidelityPanel({ title = 'fidelity', defaultCollapsed = true, className }: FidelityPanelProps) {
   const { viewer } = useVantage();
   const [display, setDisplay] = useState<Required<DisplaySettings>>(DEFAULTS);
-  const [mode, setMode] = useState<RenderMode>('cinematic');
+  const [mode, setMode] = useState<RenderMode>('vanilla');
 
   // Seed the sliders from the engine's current settings once it exists.
   useEffect(() => {

@@ -12,6 +12,7 @@ export { BiomeLayer, type BiomeLayerProps } from './BiomeLayer.js';
 export { LightPanel, type LightPanelProps } from './LightPanel.js';
 export { FidelityPanel, type FidelityPanelProps } from './FidelityPanel.js';
 export { MapNav, type MapNavProps } from './MapNav.js';
+export { Reticle, type ReticleProps } from './Reticle.js';
 export { useVantage, type VantageContextValue, type VantageStatus } from './context.js';
 export { injectStyles, CSS } from './styles.js';
 

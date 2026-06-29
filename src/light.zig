@@ -35,7 +35,7 @@ pub fn compute(arena: std.mem.Allocator, g: grid.Grid, occluder: []const bool, e
 
     var queue: std.ArrayList(u32) = .empty;
 
-    // --- Sky pass: seed every cell open to the top of the grid, then flood. ---
+    // --- Sky pass. Pass 1: mark every cell open to the top (column walk). ---
     var z: usize = 0;
     while (z < g.sz) : (z += 1) {
         var x: usize = 0;
@@ -46,10 +46,14 @@ pub fn compute(arena: std.mem.Allocator, g: grid.Grid, occluder: []const bool, e
                 const idx = g.index(x, y, z);
                 if (occluder[g.ids[idx]]) break; // first opaque from the top closes the column
                 sky[idx] = MAX;
-                try queue.append(arena, @intCast(idx));
             }
         }
     }
+    // Pass 2: seed only the *frontier* — open cells bordering a non-open cell (the
+    // lit shoreline). Interior open cells are already MAX with all-MAX neighbours,
+    // so seeding them only adds redundant pops; skipping them keeps the BFS queue
+    // tiny. Identical result to seeding every open cell, far less work.
+    try seedFrontier(arena, g, sky, &queue);
     try flood(arena, g, occluder, sky, &queue);
 
     // --- Block pass: seed every emitter, then flood. Skipped wholesale when no
@@ -73,6 +77,40 @@ pub fn compute(arena: std.mem.Allocator, g: grid.Grid, occluder: []const bool, e
     }
 
     for (g.light, sky, blk) |*out, s, b| out.* = (s << 4) | b;
+}
+
+/// Enqueue the sky frontier: every open-to-sky cell (`sky == MAX`) that has at
+/// least one in-bounds neighbour which is *not* open (an occluder or a shaded
+/// cell below a roof). Those are the only cells that need to propagate light
+/// inward; interior open cells are surrounded by MAX and would just pop no-ops.
+fn seedFrontier(arena: std.mem.Allocator, g: grid.Grid, sky: []const u8, queue: *std.ArrayList(u32)) !void {
+    const n = g.sx * g.sy * g.sz;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (sky[i] != MAX) continue;
+        const x = i % g.sx;
+        const rem = i / g.sx;
+        const zc = rem % g.sz;
+        const yc = rem / g.sz;
+        var frontier = false;
+        inline for (.{
+            .{ -1, 0, 0 }, .{ 1, 0, 0 },
+            .{ 0, -1, 0 }, .{ 0, 1, 0 },
+            .{ 0, 0, -1 }, .{ 0, 0, 1 },
+        }) |d| {
+            if (!frontier) {
+                const nx = @as(isize, @intCast(x)) + d[0];
+                const ny = @as(isize, @intCast(yc)) + d[1];
+                const nz = @as(isize, @intCast(zc)) + d[2];
+                if (nx >= 0 and ny >= 0 and nz >= 0 and
+                    nx < g.sx and ny < g.sy and nz < g.sz)
+                {
+                    if (sky[g.index(@intCast(nx), @intCast(ny), @intCast(nz))] != MAX) frontier = true;
+                }
+            }
+        }
+        if (frontier) try queue.append(arena, @intCast(i));
+    }
 }
 
 /// Breadth-first light spread from a seeded frontier. Each popped cell pushes its

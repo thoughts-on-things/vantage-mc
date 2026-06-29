@@ -68,13 +68,20 @@ export interface DisplaySettings {
   bloomThreshold?: number;
   /** ACES tone-mapping exposure (cinematic tone curve). 1 = neutral. Default `1`. */
   toneExposure?: number;
+  /** Tone-mapping curve. `'agx'` = filmic (cinematic); `'none'` = flat linear→sRGB
+   *  for vanilla/BlueMap-accurate colours. Default `'agx'`. */
+  tonemap?: 'agx' | 'none';
 }
 
-const DEFAULT_DISPLAY: Required<DisplaySettings> = {
+/** A named look. `'cinematic'` = the filmic default (AgX + GTAO + bloom);
+ *  `'vanilla'` = flat, colour-accurate, matching vanilla Minecraft / BlueMap. */
+export type RenderMode = 'cinematic' | 'vanilla';
+
+/** The cinematic preset (shipped default): AgX tone map, GTAO contact shadows,
+ *  subtle bloom. AgX desaturates (esp. greens) so saturation + a touch of
+ *  contrast are pushed up to compensate. */
+export const CINEMATIC_DISPLAY: Required<DisplaySettings> = {
   sharpness: 0,
-  // AgX tone mapping desaturates (esp. greens), so the cinematic default pushes
-  // saturation + a touch of contrast back up; dial these down toward 1.0 for a
-  // flatter, more neutral look.
   ao: 1,
   saturation: 1.35,
   contrast: 1.06,
@@ -85,7 +92,34 @@ const DEFAULT_DISPLAY: Required<DisplaySettings> = {
   bloom: 0.35,
   bloomThreshold: 0.8,
   toneExposure: 1.05,
+  tonemap: 'agx',
 };
+
+/** The vanilla/BlueMap preset: no tone curve, no GTAO, no bloom, neutral grade —
+ *  clean flat-lit colours that read like the game / a BlueMap render. Turning off
+ *  GTAO also removes its per-frame noise (the foliage shimmer while moving). */
+export const VANILLA_DISPLAY: Required<DisplaySettings> = {
+  sharpness: 0,
+  ao: 1,
+  saturation: 1,
+  contrast: 1,
+  fog: 1,
+  renderScale: 1,
+  gtao: 0,
+  aoRadius: 2.5,
+  bloom: 0,
+  bloomThreshold: 0.8,
+  toneExposure: 1,
+  tonemap: 'none',
+};
+
+/** Presets keyed by mode, for the UI mode toggle. */
+export const DISPLAY_PRESETS: Record<RenderMode, Required<DisplaySettings>> = {
+  cinematic: CINEMATIC_DISPLAY,
+  vanilla: VANILLA_DISPLAY,
+};
+
+const DEFAULT_DISPLAY: Required<DisplaySettings> = { ...CINEMATIC_DISPLAY };
 
 /** Above this vertex count GTAO's per-frame geometry re-render is too costly, so
  *  it auto-disables (the user can still force it via the dial if they accept the
@@ -533,6 +567,9 @@ export class VantageViewer {
       this.bloomPass.strength = d.bloom;
       this.bloomPass.threshold = d.bloomThreshold;
     }
+    // Vanilla/BlueMap mode renders flat (linear→sRGB only); cinematic applies the
+    // AgX filmic curve. OutputPass reads renderer.toneMapping each frame.
+    this.renderer.toneMapping = d.tonemap === 'none' ? THREE.NoToneMapping : THREE.AgXToneMapping;
     this.renderer.toneMappingExposure = d.toneExposure;
 
     if (!this.shader) return;

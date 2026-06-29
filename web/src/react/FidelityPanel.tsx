@@ -5,7 +5,8 @@
 
 import { useEffect, useState } from 'react';
 import { useVantage } from './context.js';
-import type { DisplaySettings } from '../three/index.js';
+import { CINEMATIC_DISPLAY, DISPLAY_PRESETS } from '../three/index.js';
+import type { DisplaySettings, RenderMode } from '../three/index.js';
 
 export interface FidelityPanelProps {
   /** Panel heading. Default `'fidelity'`. */
@@ -13,8 +14,12 @@ export interface FidelityPanelProps {
   className?: string;
 }
 
+/** The numeric (slider-driven) display keys — excludes the `tonemap` enum, which
+ *  the mode toggle sets, not a slider. */
+type NumKey = Exclude<keyof DisplaySettings, 'tonemap'>;
+
 interface Knob {
-  key: keyof DisplaySettings;
+  key: NumKey;
   label: string;
   min: number;
   max: number;
@@ -36,23 +41,17 @@ const KNOBS: Knob[] = [
   { key: 'renderScale', label: 'render scale', min: 0.5, max: 2, step: 0.25, suffix: '×' },
 ];
 
-const DEFAULTS: Required<DisplaySettings> = {
-  sharpness: 0,
-  ao: 1,
-  saturation: 1.35,
-  contrast: 1.06,
-  fog: 1,
-  renderScale: 1,
-  gtao: 1,
-  aoRadius: 2.5,
-  bloom: 0.35,
-  bloomThreshold: 0.8,
-  toneExposure: 1.05,
-};
+const DEFAULTS: Required<DisplaySettings> = CINEMATIC_DISPLAY;
+
+const MODES: { id: RenderMode; label: string }[] = [
+  { id: 'vanilla', label: 'vanilla' },
+  { id: 'cinematic', label: 'fidelity' },
+];
 
 export function FidelityPanel({ title = 'fidelity', className }: FidelityPanelProps) {
   const { viewer } = useVantage();
   const [display, setDisplay] = useState<Required<DisplaySettings>>(DEFAULTS);
+  const [mode, setMode] = useState<RenderMode>('cinematic');
 
   // Seed the sliders from the engine's current settings once it exists.
   useEffect(() => {
@@ -61,9 +60,18 @@ export function FidelityPanel({ title = 'fidelity', className }: FidelityPanelPr
 
   if (!viewer) return null;
 
-  const update = (key: keyof DisplaySettings, value: number) => {
+  const update = (key: NumKey, value: number) => {
     setDisplay((p) => ({ ...p, [key]: value }));
     viewer.setDisplay({ [key]: value });
+  };
+
+  // Switching mode applies the whole preset (tone curve, GTAO, bloom, grade) and
+  // reseeds the sliders so they reflect the new look; tweak from there.
+  const applyMode = (m: RenderMode) => {
+    setMode(m);
+    const preset = DISPLAY_PRESETS[m];
+    setDisplay(preset);
+    viewer.setDisplay(preset);
   };
 
   return (
@@ -75,6 +83,18 @@ export function FidelityPanel({ title = 'fidelity', className }: FidelityPanelPr
         <span className="vtg-sw">
           ◆ <b>{title}</b>
         </span>
+        <div className="vtg-seg" role="group" aria-label="render mode">
+          {MODES.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              className={mode === m.id ? 'vtg-seg-on' : ''}
+              onClick={() => applyMode(m.id)}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
       </header>
       <div className="vtg-sliders">
         {KNOBS.map((k) => (

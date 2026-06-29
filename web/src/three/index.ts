@@ -21,6 +21,10 @@ export {
   type ViewMode,
   type LightSettings,
   type DisplaySettings,
+  type RenderMode,
+  CINEMATIC_DISPLAY,
+  VANILLA_DISPLAY,
+  DISPLAY_PRESETS,
 } from './viewer.js';
 
 // Re-export the core decoder so `vantage-mc/three` (and the main entry) are

@@ -22,6 +22,10 @@ export type {
   ViewMode,
   LightSettings,
   DisplaySettings,
+  RenderMode,
   BiomeEntry,
   DecodedTile,
 } from '../three/index.js';
+
+// Display presets (mode toggle) — value exports, separate from the type block.
+export { CINEMATIC_DISPLAY, VANILLA_DISPLAY, DISPLAY_PRESETS } from '../three/index.js';

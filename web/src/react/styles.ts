@@ -59,6 +59,15 @@ export const CSS = `
 .vtg-name { overflow: hidden; text-overflow: ellipsis; }
 .vtg-pct { margin-left: auto; color: #6f86ab; font-size: 11px; font-variant-numeric: tabular-nums; }
 
+.vtg-seg { margin-left: auto; display: flex; gap: 2px; padding: 2px; border-radius: 999px; background: rgba(40, 60, 90, 0.4); border: 1px solid rgba(132, 170, 230, 0.28); }
+.vtg-seg button {
+  font: 10px ui-monospace, monospace; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 999px; border: none; background: transparent; color: #8ba6cd;
+  cursor: pointer; transition: background 0.16s, color 0.16s;
+}
+.vtg-seg button:hover { color: #d8e6fc; }
+.vtg-seg button.vtg-seg-on { background: #5b9bff; color: #07101f; font-weight: 600; }
+
 .vtg-sliders { padding: 11px 13px 13px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(132,170,230,0.3) transparent; }
 .vtg-slider { display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
 .vtg-slider-row { display: flex; justify-content: space-between; color: #8ba6cd; font-size: 11px; }

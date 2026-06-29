@@ -205,26 +205,25 @@ function resolveContainer(container: HTMLElement | string): HTMLElement {
   return el;
 }
 
-/** A *smoothed* terrain-height lookup over the tile's surface map, for the
- *  controls' terrain-riding pivot. Averages a small window so the pivot rides the
- *  mean surface instead of bobbing block-to-block over forest canopy (the surface
- *  map records treetop height) — the difference between a smooth pan and a jittery
- *  one. Returns `null` outside the map / on all-empty windows so the controls can
- *  relax toward the floor. */
+/** A lightly-smoothed terrain-height lookup over the tile's surface map, for the
+ *  controls' terrain-riding pivot. A small 5×5 box (radius 2) takes the edge off
+ *  block-to-block canopy noise without lifting the pivot off the surface at
+ *  forest/water borders; the controls' temporal follow does the rest. Returns
+ *  `null` outside the map / on all-empty windows. */
 function makeHeightSampler(surface: SurfaceMap | undefined): HeightSampler | null {
   if (!surface) return null;
   const { width, depth, originX, originZ, height } = surface;
-  const R = 4; // window radius in blocks (low-passes canopy noise)
+  const R = 2; // window radius in blocks
   return (x: number, z: number): number | null => {
     const cx = Math.floor(x - originX);
     const cz = Math.floor(z - originZ);
     let sum = 0;
     let n = 0;
-    for (let dz = -R; dz <= R; dz += 2) {
+    for (let dz = -R; dz <= R; dz++) {
       const zz = cz + dz;
       if (zz < 0 || zz >= depth) continue;
       const row = zz * width;
-      for (let dx = -R; dx <= R; dx += 2) {
+      for (let dx = -R; dx <= R; dx++) {
         const xx = cx + dx;
         if (xx < 0 || xx >= width) continue;
         const h = height[row + xx]!;

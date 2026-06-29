@@ -102,6 +102,12 @@ export class MapControls {
   // dt smoothing (BlueMap clamps spikes and EMAs the frame time).
   private avgDt = 16;
 
+  // Terrain-follow state (BlueMap's MapHeightControls), temporally smoothed: the
+  // surface height under the pivot, and the surface height under the camera (for
+  // the min-camera-height clearance term).
+  private targetHeight = 0;
+  private cameraHeight = 0;
+
   // An optional eased target (compass "reset north", zoom buttons, home), drained
   // each frame and cleared on any fresh user input.
   private goal: { position?: THREE.Vector3; distance?: number; rotation?: number; angle?: number } | null = null;
@@ -204,6 +210,9 @@ export class MapControls {
     this.rotation = state.rotation;
     this.angle = clamp(state.angle, 0, this.maxAngleForDistance(this.distance));
     if (state.floorY !== undefined) this.floorY = state.floorY;
+    // Seed the terrain-follow so the framing doesn't settle on the first frames.
+    this.targetHeight = this.position.y;
+    this.cameraHeight = this.position.y;
     this.panBuf.set(0, 0);
     this.rotBuf = this.angleBuf = this.zoomBuf = 0;
     this.updateCamera();
@@ -369,18 +378,45 @@ export class MapControls {
     else if (this.rotation < -Math.PI) this.rotation += 2 * Math.PI;
   }
 
-  /** Ride the terrain: glide the pivot Y toward the surface beneath it when
-   *  zoomed in, relaxing to `floorY` once far out (where pitch is near top-down
-   *  and pivot height is irrelevant). Gently — a soft, frame-rate-normalized
-   *  follow so panning over uneven ground reads as a smooth glide, not a bob. */
+  /** Keep the orbit pivot on the terrain surface so the view rotates and tilts
+   *  about the ground under the screen centre — modelled on BlueMap's
+   *  MapHeightControls, adapted to our (small, finite) world.
+   *
+   *  The pivot Y rides the single-column surface height + 3, temporally smoothed
+   *  (so panning over uneven ground glides, doesn't bob). A `minCameraHeight`
+   *  term lifts the pivot just enough that the orbiting camera clears the terrain
+   *  it hovers over at steep tilt (no dipping below ground / staring into the
+   *  void). BlueMap also relaxes the pivot toward y=0 by `distance/500`; we drop
+   *  that — calibrated for 1500-block default zoom on huge worlds, at our zoom
+   *  range it sank the pivot well below the surface right where you tilt. Riding
+   *  the surface is harmless zoomed out, where the view is forced near top-down
+   *  (insensitive to pivot Y). */
   private applyHeight(dt: number): void {
     if (!this.heightAt) return;
-    const h = this.heightAt(this.position.x, this.position.z);
-    const surface = (h === null ? this.floorY : h) + 3;
-    const t = Math.min(this.distance / 500, 1);
-    const targetY = surface * (1 - t) + this.floorY * t;
-    const k = clamp(0.1 * (dt / 16.666), 0, 1);
-    this.position.y = softSet(this.position.y, targetY, k);
+
+    // Pivot's terrain target: single surface column + 3, eased (stiffness 0.15).
+    const ts = clamp(0.15 * (dt / 16.666), 0, 1);
+    const hp = this.heightAt(this.position.x, this.position.z);
+    const targetTerrain = (hp === null ? this.floorY : hp) + 3;
+    this.targetHeight += (targetTerrain - this.targetHeight) * ts;
+    if (Math.abs(targetTerrain - this.targetHeight) < 0.01) this.targetHeight = targetTerrain;
+
+    let suggested = this.targetHeight;
+
+    // Camera clearance: only meaningful where a real tilt is allowed. Keep the
+    // camera ~1 above the terrain under it by raising the pivot if needed.
+    const maxAngle = this.maxAngleForDistance(this.distance);
+    if (maxAngle >= 0.1) {
+      const cs = clamp(0.2 * (dt / 16.666), 0, 1);
+      const hc = this.heightAt(this.camera.position.x, this.camera.position.z);
+      const cameraTerrain = hc === null ? this.floorY : hc;
+      this.cameraHeight += (cameraTerrain - this.cameraHeight) * cs;
+      const maxAngleHeight = Math.cos(maxAngle) * this.distance; // pivot→camera rise at max tilt
+      const minCameraHeight = this.cameraHeight - maxAngleHeight + 1;
+      suggested = Math.max(suggested, minCameraHeight);
+    }
+
+    this.position.y = suggested;
   }
 
   // --- keyboard integration --------------------------------------------------

@@ -4,11 +4,14 @@
 
 import { useEffect, useState } from 'react';
 import { useVantage } from './context.js';
+import { Panel } from './Panel.js';
 import type { LightSettings } from '../three/index.js';
 
 export interface LightPanelProps {
   /** Panel heading. Default `'lighting'`. */
   title?: string;
+  /** Start collapsed to the header. Default `true`. */
+  defaultCollapsed?: boolean;
   className?: string;
 }
 
@@ -26,7 +29,7 @@ const KNOBS: Knob[] = [
   { key: 'exposure', label: 'exposure', min: 0.4, max: 2, step: 0.01 },
 ];
 
-export function LightPanel({ title = 'lighting', className }: LightPanelProps) {
+export function LightPanel({ title = 'lighting', defaultCollapsed = true, className }: LightPanelProps) {
   const { viewer } = useVantage();
   const [light, setLight] = useState<Required<LightSettings>>({ ambient: 0.12, daylight: 1, exposure: 1 });
 
@@ -43,15 +46,13 @@ export function LightPanel({ title = 'lighting', className }: LightPanelProps) {
   };
 
   return (
-    <div
-      className={className ? `vtg-panel vtg-glass ${className}` : 'vtg-panel vtg-glass'}
-      style={{ top: 'auto', right: 'auto', bottom: 14, left: 14, width: 210 }}
+    <Panel
+      icon="☀"
+      title={title}
+      defaultCollapsed={defaultCollapsed}
+      className={className}
+      style={{ top: 'auto', right: 'auto', bottom: 16, left: 16, width: 214 }}
     >
-      <header>
-        <span className="vtg-sw">
-          ☀ <b>{title}</b>
-        </span>
-      </header>
       <div className="vtg-sliders">
         {KNOBS.map((k) => (
           <label key={k.key} className="vtg-slider">
@@ -70,6 +71,6 @@ export function LightPanel({ title = 'lighting', className }: LightPanelProps) {
           </label>
         ))}
       </div>
-    </div>
+    </Panel>
   );
 }

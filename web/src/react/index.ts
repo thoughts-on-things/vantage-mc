@@ -7,9 +7,11 @@
 // Or reach the engine with `useVantage()` / the ref for custom UI.
 
 export { VantageViewer, type VantageViewerProps } from './VantageViewer.js';
+export { Panel, type PanelProps } from './Panel.js';
 export { BiomeLayer, type BiomeLayerProps } from './BiomeLayer.js';
 export { LightPanel, type LightPanelProps } from './LightPanel.js';
 export { FidelityPanel, type FidelityPanelProps } from './FidelityPanel.js';
+export { MapNav, type MapNavProps } from './MapNav.js';
 export { useVantage, type VantageContextValue, type VantageStatus } from './context.js';
 export { injectStyles, CSS } from './styles.js';
 

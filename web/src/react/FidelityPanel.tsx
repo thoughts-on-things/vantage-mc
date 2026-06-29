@@ -5,12 +5,15 @@
 
 import { useEffect, useState } from 'react';
 import { useVantage } from './context.js';
+import { Panel } from './Panel.js';
 import { CINEMATIC_DISPLAY, DISPLAY_PRESETS } from '../three/index.js';
 import type { DisplaySettings, RenderMode } from '../three/index.js';
 
 export interface FidelityPanelProps {
   /** Panel heading. Default `'fidelity'`. */
   title?: string;
+  /** Start collapsed to the header. Default `true` (10 dials shouldn't dominate). */
+  defaultCollapsed?: boolean;
   className?: string;
 }
 
@@ -48,7 +51,7 @@ const MODES: { id: RenderMode; label: string }[] = [
   { id: 'cinematic', label: 'fidelity' },
 ];
 
-export function FidelityPanel({ title = 'fidelity', className }: FidelityPanelProps) {
+export function FidelityPanel({ title = 'fidelity', defaultCollapsed = true, className }: FidelityPanelProps) {
   const { viewer } = useVantage();
   const [display, setDisplay] = useState<Required<DisplaySettings>>(DEFAULTS);
   const [mode, setMode] = useState<RenderMode>('cinematic');
@@ -75,28 +78,21 @@ export function FidelityPanel({ title = 'fidelity', className }: FidelityPanelPr
   };
 
   return (
-    <div
-      className={className ? `vtg-panel vtg-glass ${className}` : 'vtg-panel vtg-glass'}
-      style={{ top: 'auto', right: 14, bottom: 14, width: 226 }}
+    <Panel
+      icon="◆"
+      title={title}
+      defaultCollapsed={defaultCollapsed}
+      className={className}
+      style={{ top: 'auto', right: 16, bottom: 16, width: 234 }}
     >
-      <header>
-        <span className="vtg-sw">
-          ◆ <b>{title}</b>
-        </span>
-        <div className="vtg-seg" role="group" aria-label="render mode">
+      <div className="vtg-sliders">
+        <div className="vtg-seg vtg-seg-full" role="group" aria-label="render mode">
           {MODES.map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              className={mode === m.id ? 'vtg-seg-on' : ''}
-              onClick={() => applyMode(m.id)}
-            >
+            <button key={m.id} type="button" className={mode === m.id ? 'vtg-seg-on' : ''} onClick={() => applyMode(m.id)}>
               {m.label}
             </button>
           ))}
         </div>
-      </header>
-      <div className="vtg-sliders">
         {KNOBS.map((k) => (
           <label key={k.key} className="vtg-slider">
             <span className="vtg-slider-row">
@@ -117,6 +113,6 @@ export function FidelityPanel({ title = 'fidelity', className }: FidelityPanelPr
           </label>
         ))}
       </div>
-    </div>
+    </Panel>
   );
 }

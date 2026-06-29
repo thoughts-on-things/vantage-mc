@@ -5,6 +5,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useVantage } from './context.js';
+import { Panel } from './Panel.js';
 import { cssRgb } from './styles.js';
 
 export interface BiomeLayerProps {
@@ -14,6 +15,8 @@ export interface BiomeLayerProps {
   hover?: boolean;
   /** Open into the biome layer as soon as a tile loads. Default `false`. */
   defaultEnabled?: boolean;
+  /** Start the legend panel collapsed to its header. Default `false`. */
+  defaultCollapsed?: boolean;
   /** Key that toggles the layer. Default `'b'`; pass `null` to disable. */
   toggleKey?: string | null;
   /** Panel heading. Default `'biomes'`. */
@@ -30,6 +33,7 @@ export function BiomeLayer({
   legend = true,
   hover = true,
   defaultEnabled = false,
+  defaultCollapsed = false,
   toggleKey = 'b',
   title = 'biomes',
   className,
@@ -98,11 +102,12 @@ export function BiomeLayer({
   return (
     <>
       {legend && (
-        <div className={className ? `vtg-panel vtg-glass ${className}` : 'vtg-panel vtg-glass'}>
-          <header>
-            <span className="vtg-sw">
-              ▦ <b>{title}</b>
-            </span>
+        <Panel
+          icon="▦"
+          title={title}
+          defaultCollapsed={defaultCollapsed}
+          className={className}
+          headerExtra={
             <button
               type="button"
               className={biomeLayerEnabled ? 'vtg-toggle vtg-on' : 'vtg-toggle'}
@@ -111,7 +116,8 @@ export function BiomeLayer({
             >
               {biomeLayerEnabled ? 'on' : 'off'}
             </button>
-          </header>
+          }
+        >
           <div className="vtg-legend">
             {biomes.map((b) => {
               const sel = biomeLayerEnabled && committed === b.id;
@@ -132,7 +138,7 @@ export function BiomeLayer({
               );
             })}
           </div>
-        </div>
+        </Panel>
       )}
 
       {hover && (

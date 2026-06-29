@@ -6,42 +6,47 @@
 
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BiomeLayer, FidelityPanel, LightPanel, useVantage, VantageViewer } from '../src/react/index.js';
+import { BiomeLayer, FidelityPanel, LightPanel, MapNav, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
 const biomeOpen = /biome/i.test(location.hash);
 
-/** A small HUD overlay showing the loaded tile's stats — a custom child that
- *  reads the shared engine state via useVantage(). */
+/** A small HUD overlay showing the loaded tile's stats + the control legend — a
+ *  custom child that reads the shared engine state via useVantage(). */
 function Hud() {
   const { info } = useVantage();
   if (!info) return null;
   const tris = Math.round(info.triangleCount).toLocaleString();
   const verts = info.vertexCount.toLocaleString();
   const dims = `${Math.round(info.size.x)}×${Math.round(info.size.y)}×${Math.round(info.size.z)}`;
+  const mono = 'ui-monospace, SFMono-Regular, Menlo, monospace';
   return (
     <div
       style={{
         position: 'absolute',
-        top: 14,
-        left: 14,
-        padding: '11px 14px',
-        font: '12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace',
-        color: '#d8e6fc',
+        top: 16,
+        left: 16,
+        padding: '12px 15px',
+        font: '12px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+        color: '#e6eefb',
         pointerEvents: 'none',
-        textShadow: '0 1px 2px rgba(0,0,0,0.5)',
+        maxWidth: 320,
       }}
       className="vtg-glass"
     >
-      <div style={{ fontWeight: 600, color: '#eef4ff' }}>
-        vantage · <b style={{ color: '#5b9bff' }}>{info.magic}</b>
+      <div style={{ fontWeight: 700, letterSpacing: '0.04em', color: '#eef4ff' }}>
+        vantage <b style={{ color: '#5b9bff', font: `600 11px ${mono}`, marginLeft: 2 }}>{info.magic}</b>
       </div>
-      <div style={{ color: '#8ba6cd', marginTop: 4 }}>
-        {verts} verts · {tris} tris · {dims} blocks
+      <div style={{ color: '#93a9cc', marginTop: 4, font: `11px ${mono}`, fontVariantNumeric: 'tabular-nums' }}>
+        {verts} verts · {tris} tris · {dims}
       </div>
-      <div style={{ color: '#6f86ab', marginTop: 7, fontSize: 11 }}>
-        drag / <b>WASD</b> pan · right-drag rotate · <b>Q/E</b> up/down · scroll zoom · <b>B</b> biomes
+      <div style={{ color: '#6f86ab', marginTop: 8, fontSize: 11, lineHeight: 1.6 }}>
+        <b style={{ color: '#93a9cc' }}>drag</b> pan · <b style={{ color: '#93a9cc' }}>right-drag</b> orbit ·{' '}
+        <b style={{ color: '#93a9cc' }}>scroll</b> zoom
+        <br />
+        <b style={{ color: '#93a9cc' }}>WASD</b> move · <b style={{ color: '#93a9cc' }}>Q/E</b> turn ·{' '}
+        <b style={{ color: '#93a9cc' }}>R/F</b> tilt · <b style={{ color: '#93a9cc' }}>B</b> biomes
       </div>
     </div>
   );
@@ -58,6 +63,7 @@ function App() {
       <BiomeLayer legend hover defaultEnabled={biomeOpen} />
       <LightPanel />
       <FidelityPanel />
+      <MapNav />
     </VantageViewer>
   );
 }

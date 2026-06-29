@@ -112,6 +112,10 @@ export class MapControls {
   // dt smoothing (BlueMap clamps spikes and EMAs the frame time).
   private avgDt = 16;
 
+  // An optional eased target (compass "reset north", zoom buttons, home), drained
+  // each frame and cleared on any fresh user input.
+  private goal: { position?: THREE.Vector3; distance?: number; rotation?: number; angle?: number } | null = null;
+
   private readonly listeners: Record<string, Set<Listener>> = {
     start: new Set(),
     end: new Set(),
@@ -185,6 +189,23 @@ export class MapControls {
     return this.panning || this.orbiting;
   }
 
+  /** Smoothly zoom by `steps` notches (positive = in, negative = out) — the same
+   *  unit as a wheel notch, so the zoom buttons match scrolling. */
+  zoom(steps: number): void {
+    this.zoomBuf -= steps; // +zoomBuf = zoom out, so invert for an "in is positive" API
+    this.dynamicDistance = false;
+    this.goal = null;
+  }
+
+  /** Ease the view toward a partial target state (rotation/angle/distance/pivot),
+   *  e.g. compass→north or a home re-frame. Cancelled by any drag, key, or wheel. */
+  animateTo(goal: { position?: THREE.Vector3; distance?: number; rotation?: number; angle?: number }): void {
+    this.goal = {
+      ...goal,
+      position: goal.position ? goal.position.clone() : undefined,
+    };
+  }
+
   /** Jump the view to an explicit state and stop all motion (used for framing).
    *  `angle`/`distance` are clamped to the legal tilt envelope. */
   setView(state: { position: THREE.Vector3; distance: number; rotation: number; angle: number; floorY?: number }): void {
@@ -215,6 +236,7 @@ export class MapControls {
     this.applyAngle(d);
     this.applyZoom(d);
     this.applyDynamicDistance();
+    this.applyGoal(d);
     this.applyBounds();
     this.applyHeight();
 
@@ -302,6 +324,35 @@ export class MapControls {
     this.angle = softMax(this.angle, maxAngleForDistance(target), 0.8);
   }
 
+  /** Ease toward an animation goal (frame-rate-normalized), clearing it once the
+   *  view has settled close enough. */
+  private applyGoal(dt: number): void {
+    if (!this.goal) return;
+    const k = clamp(0.12 * (dt / 16.666), 0, 1);
+    const g = this.goal;
+    let done = true;
+    if (g.rotation !== undefined) {
+      let dr = g.rotation - this.rotation;
+      if (dr > Math.PI) dr -= 2 * Math.PI;
+      else if (dr < -Math.PI) dr += 2 * Math.PI;
+      this.rotation += dr * k;
+      if (Math.abs(dr) > 0.003) done = false;
+    }
+    if (g.angle !== undefined) {
+      this.angle += (g.angle - this.angle) * k;
+      if (Math.abs(g.angle - this.angle) > 0.003) done = false;
+    }
+    if (g.distance !== undefined) {
+      this.distance += (g.distance - this.distance) * k;
+      if (Math.abs(g.distance - this.distance) > this.distance * 0.004) done = false;
+    }
+    if (g.position) {
+      this.position.lerp(g.position, k);
+      if (this.position.distanceToSquared(g.position) > 0.04) done = false;
+    }
+    if (done) this.goal = null;
+  }
+
   private applyBounds(): void {
     this.distance = softClamp(this.distance, this.minDistance, this.maxDistance, 0.8);
     this.angle = softClamp(this.angle, 0, HALF_PI, 0.8);
@@ -331,6 +382,7 @@ export class MapControls {
    *  feel identical to a drag — no separate code path. */
   private feedKeys(dt: number): void {
     if (this.keys.size === 0) return;
+    this.goal = null; // user is driving
     const k = this.keys;
     const fr = dt / 16.666; // frame-rate normalizer
     const boost = k.has('shift') ? 2.4 : 1;
@@ -378,6 +430,7 @@ export class MapControls {
 
   private pointerDown(e: PointerEvent): void {
     if (!this.enabled) return;
+    this.goal = null; // user took over
     const p = this.localXY(e);
     this.pointers.set(e.pointerId, p);
     this.downPos.copy(p);
@@ -491,6 +544,7 @@ export class MapControls {
     else if (e.deltaMode === 2) delta *= 100; // pages
     this.zoomBuf += delta * 0.01; // +deltaY (scroll down) → zoom out
     this.dynamicDistance = false; // explicit distance request
+    this.goal = null;
   }
 
   // --- keyboard input --------------------------------------------------------

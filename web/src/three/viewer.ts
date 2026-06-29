@@ -266,6 +266,8 @@ export class VantageViewer {
 
   // Last-frame timestamp, for frame-rate-independent control inertia.
   private lastFrameMs = 0;
+  // The framing the current tile loaded into, so the UI can re-home to it.
+  private framedState: { position: THREE.Vector3; distance: number; rotation: number; angle: number; floorY: number } | null = null;
 
   constructor(container: HTMLElement | string, options: VantageViewerOptions = {}) {
     this.container = resolveContainer(container);
@@ -474,6 +476,7 @@ export class VantageViewer {
     const h = this.controls.heightAt?.(pivot.x, pivot.z);
     if (h != null) pivot.y = h + 3;
     this.controls.setView({ position: pivot, distance, rotation, angle, floorY: pivot.y });
+    this.framedState = { position: pivot.clone(), distance, rotation, angle, floorY: pivot.y };
 
     this.camera.far = maxDim * 12;
     this.camera.updateProjectionMatrix();
@@ -598,6 +601,25 @@ export class VantageViewer {
     this.shader.uniforms['uSaturation']!.value = d.saturation;
     this.shader.uniforms['uContrast']!.value = d.contrast;
     this.shader.uniforms['uFogDensity']!.value = d.fog;
+  }
+
+  // --- camera / navigation ---------------------------------------------------
+
+  /** Smoothly zoom by `steps` wheel-notches (positive = in). Drives the same
+   *  inertial zoom as the wheel, so on-screen buttons feel identical. */
+  zoomBy(steps: number): void {
+    this.controls.zoom(steps);
+  }
+
+  /** Smoothly rotate the view back to north (and level any tilt-only request is
+   *  left intact). For the compass click. */
+  resetNorth(): void {
+    this.controls.animateTo({ rotation: 0 });
+  }
+
+  /** Smoothly return to the framing the tile loaded into (the home button). */
+  resetView(): void {
+    if (this.framedState) this.controls.animateTo(this.framedState);
   }
 
   // --- events ---------------------------------------------------------------

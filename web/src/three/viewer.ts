@@ -86,7 +86,10 @@ export const CINEMATIC_DISPLAY: Required<DisplaySettings> = {
   saturation: 1.35,
   contrast: 1.06,
   fog: 1,
-  renderScale: 1,
+  // 1.5× supersampling (BlueMap's `superSampling` lever) — the real fix for the
+  // high-frequency foliage shimmer in motion, at ~2.25× fragment cost. Vanilla
+  // keeps 1× for speed; both are dial-adjustable.
+  renderScale: 1.5,
   gtao: 1,
   aoRadius: 2.5,
   bloom: 0.35,
@@ -701,7 +704,6 @@ export class VantageViewer {
       this.mixCurrent += (this.mixTarget - this.mixCurrent) * 0.2;
       if (Math.abs(this.mixCurrent - this.mixTarget) < 0.0015) this.mixCurrent = this.mixTarget;
       this.shader.uniforms['uBiomeMix']!.value = this.mixCurrent;
-      this.shader.uniforms['uTime']!.value = now * 0.001; // seconds
     }
 
     this.pickHover();

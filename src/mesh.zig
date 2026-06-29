@@ -220,10 +220,14 @@ pub fn buildTextured(
     const id_occluder = try arena.alloc(bool, g.names.len);
     const is_water = try arena.alloc(bool, g.names.len); // pure water (no block model)
     const waterish = try arena.alloc(bool, g.names.len); // water OR waterlogged
-    for (id_occluder, is_water, waterish, 0..) |*o, *w, *wi, id| {
+    // Fluid level per id for the water-surface heights: pure water reads its
+    // blockstate `level`; waterlogged blocks count as a source (0); the rest -1.
+    const water_level = try arena.alloc(i16, g.names.len);
+    for (id_occluder, is_water, waterish, water_level, 0..) |*o, *w, *wi, *lvl, id| {
         const nm = g.nameOf(@intCast(id));
         w.* = id != 0 and isWater(nm);
         wi.* = id != 0 and (w.* or isWaterlogged(nm, g.stateOf(@intCast(id))));
+        lvl.* = if (w.*) @intCast(parseLevel(g.stateOf(@intCast(id)))) else if (wi.*) 0 else -1;
         o.* = if (id == 0) false else (try getCached(arena, g, resolver, tex, cache, @intCast(id))).occluder;
     }
     const water_layer: f32 = @floatFromInt(tex.layerFor("block/water_still"));
@@ -268,6 +272,7 @@ pub fn buildTextured(
         .water_layer = water_layer,
         .quality = quality,
         .blend_biomes = blend_biomes,
+        .water_level = water_level,
         .greedy_faces = greedy_faces,
     };
     const cpu = std.Thread.getCpuCount() catch 1;
@@ -323,6 +328,11 @@ const MeshCtx = struct {
     /// Blend biome tint colours across borders (vanilla-style grass/foliage/water
     /// gradients) rather than stepping per biome cell. See `blendedTint`.
     blend_biomes: bool,
+    /// Per block id, the fluid level for the watery surface algorithm: 0 = source
+    /// (or waterlogged), 1..7 = flowing (decreasing height), >=8 = falling/full,
+    /// -1 = not a fluid surface. Drives the real Minecraft water heights so flowing
+    /// water slopes into waves (see `liquidCornerHeight`).
+    water_level: []const i16,
     /// Per block id, the cached-face index of its greedy face in each of the 6
     /// directions (see `dirIndex`), or -1. The greedy pass uses this to find a
     /// cell's mergeable face; the per-block pass skips faces marked `greedy`.
@@ -666,13 +676,73 @@ fn isWaterlogged(name: []const u8, state: []const u8) bool {
     return false;
 }
 
+/// Parse the `level=N` fluid level out of a blockstate key (default 0 = source).
+fn parseLevel(state: []const u8) u8 {
+    const i = std.mem.indexOf(u8, state, "level=") orelse return 0;
+    var j = i + "level=".len;
+    var v: u8 = 0;
+    while (j < state.len and state[j] >= '0' and state[j] <= '9') : (j += 1) v = v *% 10 +% (state[j] - '0');
+    return v;
+}
+
+/// Fluid "own" surface height (0..1) for a level, matching Minecraft/BlueMap:
+/// source (0) → 14/16, flowing 1..7 → (14 − level·1.9)/16, falling (≥8) → full.
+fn liquidBaseHeight(level: i16) f32 {
+    if (level >= 8) return 1.0;
+    return (14.0 - @as(f32, @floatFromInt(level)) * 1.9) / 16.0;
+}
+
+/// One top corner's surface height (0..1) for the water cell at (x,y,z), averaged
+/// over the 2×2 of cells meeting at the corner (`xo`,`zo` ∈ {−1,0}). Mirrors
+/// BlueMap's LiquidModelRenderer: a same-liquid block directly above any of the
+/// 2×2 forces a full corner; a source neighbour pins it to 14/16; otherwise it is
+/// the average base height, with air cells counting as 0 (pulling the corner down)
+/// and solid cells ignored. Deterministic per world corner, so adjacent cells
+/// agree on the shared height → watertight.
+fn liquidCornerHeight(ctx: *const MeshCtx, x: isize, y: isize, z: isize, xo: isize, zo: isize) f32 {
+    const g = ctx.g;
+    var ix = xo;
+    while (ix <= xo + 1) : (ix += 1) {
+        var iz = zo;
+        while (iz <= zo + 1) : (iz += 1) {
+            if (ctx.waterish[g.at(x + ix, y + 1, z + iz)]) return 1.0;
+        }
+    }
+    var sum: f32 = 0;
+    var count: f32 = 0;
+    ix = xo;
+    while (ix <= xo + 1) : (ix += 1) {
+        var iz = zo;
+        while (iz <= zo + 1) : (iz += 1) {
+            const id = g.at(x + ix, y, z + iz);
+            if (ctx.waterish[id]) {
+                const lvl = ctx.water_level[id];
+                if (lvl == 0) return 14.0 / 16.0; // a source corner is fixed at 14/16
+                sum += liquidBaseHeight(lvl);
+                count += 1;
+            } else if (id == grid.AIR) {
+                count += 1; // air contributes 0 height, lowering the average
+            }
+        }
+    }
+    if (sum == 0 or count == 0) return 3.0 / 16.0; // BlueMap's "shouldn't happen" fallback
+    return sum / count;
+}
+
+/// Quantize a unit-normal component to i8 (−127..127); finer than `quantNormal`
+/// (which snaps to cube axes) so the sloped water surface keeps its tilt.
+fn quantSlope(f: f32) i8 {
+    return @intFromFloat(std.math.clamp(@round(f * 127.0), -127.0, 127.0));
+}
+
 /// Emit a water cell's boundary faces into the transparent `mesh`. A face draws
 /// only when its neighbour is neither opaque (would hide it) nor waterish (water
 /// or waterlogged — merged), so an ocean interior is empty and only the surface
-/// sheet + exposed edges cost geometry. Cells open to sky get the classic 14/16
-/// surface lip. A 0..1 depth factor (cells below, capped) rides in the colour
-/// alpha; the shader turns it into opacity so shallow water is clear and deep
-/// water reads as solid blue — smooth accumulation, not hard per-block shading.
+/// sheet + exposed edges cost geometry. The top surface uses real Minecraft fluid
+/// corner heights (see `liquidCornerHeight`), so flowing water slopes into waves;
+/// the up face's normal carries that slope so the ridges catch light. A 0..1 depth
+/// factor (cells below, capped) rides in the colour alpha; the shader turns it into
+/// opacity so shallow water is clear and deep water reads as solid blue.
 fn emitFluid(
     arena: std.mem.Allocator,
     mesh: *Mesh2,
@@ -697,9 +767,28 @@ fn emitFluid(
     const xi: isize = @intCast(x);
     const yi: isize = @intCast(y);
     const zi: isize = @intCast(z);
-    // Lowered surface when open to sky above (the classic lip); a covered or
-    // submerged cell fills full height so columns join seamlessly.
-    const top: f32 = if (g.at(xi, yi + 1, zi) == grid.AIR) 14.0 / 16.0 else 1.0;
+    // Per-corner surface heights (real Minecraft fluid levels). A falling cell
+    // (level ≥ 8) or a source with same liquid directly above fills full height;
+    // otherwise each top corner averages the fluid around it (see
+    // `liquidCornerHeight`). `cornerH[cx][cz]` indexes the local (x,z) corner.
+    const self_level = ctx.water_level[g.at(xi, yi, zi)];
+    const full_top = self_level >= 8 or (self_level == 0 and waterish[g.at(xi, yi + 1, zi)]);
+    var cornerH: [2][2]f32 = .{ .{ 1, 1 }, .{ 1, 1 } };
+    if (!full_top) {
+        inline for (0..2) |cx| {
+            inline for (0..2) |cz| {
+                const xo: isize = if (cx == 0) -1 else 0;
+                const zo: isize = if (cz == 0) -1 else 0;
+                cornerH[cx][cz] = liquidCornerHeight(ctx, xi, yi, zi, xo, zo);
+            }
+        }
+    }
+    // Surface (up-face) normal from the corner-height gradient, so wave ridges
+    // shade; the side/bottom faces keep their axis normals.
+    const dhdx = ((cornerH[1][0] + cornerH[1][1]) - (cornerH[0][0] + cornerH[0][1])) * 0.5;
+    const dhdz = ((cornerH[0][1] + cornerH[1][1]) - (cornerH[0][0] + cornerH[1][0])) * 0.5;
+    const inv = 1.0 / @sqrt(dhdx * dhdx + dhdz * dhdz + 1.0);
+    const up_n = [3]i8{ quantSlope(-dhdx * inv), quantSlope(inv), quantSlope(-dhdz * inv) };
     // Depth: count waterish cells directly below (capped) -> 0..1 in the alpha.
     var below: u32 = 0;
     var yy: isize = yi - 1;
@@ -711,10 +800,11 @@ fn emitFluid(
         const nb = g.at(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2]);
         if (id_occluder[nb] or waterish[nb]) continue; // hidden by solid / merged with water
         const lp: i8 = @bitCast(g.lightAt(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2]));
+        const is_up = tf.n[1] > 0;
         const base = mesh.vertex_count;
         for (0..4) |i| {
             const cs = tf.corners[i];
-            const py: f32 = if (cs[1] == 1) top else 0.0;
+            const py: f32 = if (cs[1] == 1) cornerH[@as(usize, cs[0])][@as(usize, cs[2])] else 0.0;
             const px = wx + @as(f32, @floatFromInt(cs[0]));
             const pyw = wy + py;
             const pz = wz + @as(f32, @floatFromInt(cs[2]));
@@ -723,7 +813,8 @@ fn emitFluid(
             try mesh.layer.append(arena, layer);
             const col = if (blend) blendedTint(ctx, .water, px - min_xf, pyw - min_yf, pz - min_zf) else base_rgb;
             try mesh.color.appendSlice(arena, &.{ col[0], col[1], col[2], depth });
-            try mesh.normals.appendSlice(arena, &.{ tf.n[0], tf.n[1], tf.n[2], lp });
+            const nrm: [3]i8 = if (is_up) up_n else .{ tf.n[0], tf.n[1], tf.n[2] };
+            try mesh.normals.appendSlice(arena, &.{ nrm[0], nrm[1], nrm[2], lp });
             try mesh.biome.append(arena, bid_f);
         }
         try mesh.indices.appendSlice(arena, &.{ base, base + 1, base + 2, base, base + 2, base + 3 });
@@ -1461,6 +1552,7 @@ test "blendedTint ramps linearly between two biome cells" {
         .water_layer = 0,
         .quality = .flat,
         .blend_biomes = true,
+        .water_level = &.{},
         .greedy_faces = &.{},
     };
     // Cell centres sit at block 2 and 6; the midpoint (block 4) is the 50% blend.
@@ -1470,4 +1562,16 @@ test "blendedTint ramps linearly between two biome cells" {
     // Past the edge the nearest cell is held (no bleed to biome 0/black beyond).
     try std.testing.expectEqual(@as(u8, 0), blendedTint(&ctx, .grass, 0, 0, 0)[0]);
     try std.testing.expectEqual(@as(u8, 100), blendedTint(&ctx, .grass, 8, 0, 0)[0]);
+}
+
+test "fluid level parsing and base height" {
+    try std.testing.expectEqual(@as(u8, 0), parseLevel(""));
+    try std.testing.expectEqual(@as(u8, 0), parseLevel("waterlogged=true"));
+    try std.testing.expectEqual(@as(u8, 3), parseLevel("level=3"));
+    try std.testing.expectEqual(@as(u8, 8), parseLevel("level=8,foo=bar"));
+    // Source renders at 14/16; falling/full at 1.0; flowing steps down.
+    try std.testing.expectApproxEqAbs(@as(f32, 14.0 / 16.0), liquidBaseHeight(0), 1e-6);
+    try std.testing.expectEqual(@as(f32, 1.0), liquidBaseHeight(8));
+    try std.testing.expectApproxEqAbs(@as(f32, (14.0 - 7.0 * 1.9) / 16.0), liquidBaseHeight(7), 1e-6);
+    try std.testing.expect(liquidBaseHeight(1) < liquidBaseHeight(0)); // flowing sits below source
 }

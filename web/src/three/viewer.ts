@@ -34,6 +34,35 @@ export interface LightSettings {
 
 const DEFAULT_LIGHT: Required<LightSettings> = { ambient: 0.12, daylight: 1, exposure: 1 };
 
+/** Live, render-time display fidelity — sharpness, colour grade, haze, and render
+ *  scale. All neutral by default (the shipped look); tune without re-baking. */
+export interface DisplaySettings {
+  /** Texture mip LOD bias. 0 = smooth (anti-shimmer), higher = crisper distant
+   *  texels at the cost of some shimmer. Default `0`. */
+  sharpness?: number;
+  /** Baked ambient-occlusion darkening scale. 1 = as-baked, 0 = off, >1 = deeper
+   *  contact shadows / more block definition. Default `1`. */
+  ao?: number;
+  /** Colour saturation (1 = neutral, 0 = greyscale, >1 = punchier). Default `1`. */
+  saturation?: number;
+  /** Colour contrast around mid grey (1 = neutral). Default `1`. */
+  contrast?: number;
+  /** Atmospheric haze amount (1 = full, 0 = clear distance). Default `1`. */
+  fog?: number;
+  /** Super-/sub-sampling factor on devicePixelRatio (1 = native; 2 = 2× SSAA for
+   *  extra crispness; <1 = faster/softer). Capped by `maxPixelRatio`. Default `1`. */
+  renderScale?: number;
+}
+
+const DEFAULT_DISPLAY: Required<DisplaySettings> = {
+  sharpness: 0,
+  ao: 1,
+  saturation: 1,
+  contrast: 1,
+  fog: 1,
+  renderScale: 1,
+};
+
 export interface VantageViewerOptions {
   /** Initial camera framing. Default `'orbit'`. */
   view?: ViewMode;
@@ -43,6 +72,8 @@ export interface VantageViewerOptions {
   maxPixelRatio?: number;
   /** Initial lighting appearance (live-tunable later via {@link VantageViewer.setLight}). */
   light?: LightSettings;
+  /** Initial display fidelity (live-tunable later via {@link VantageViewer.setDisplay}). */
+  display?: DisplaySettings;
 }
 
 /** A tile source: a URL to fetch, a raw buffer, or already-decoded data. */
@@ -127,6 +158,8 @@ export class VantageViewer {
 
   // Live lighting appearance (applied to the shader on load and on change).
   private light: Required<LightSettings> = { ...DEFAULT_LIGHT };
+  // Live display fidelity (shader uniforms + render scale).
+  private display: Required<DisplaySettings> = { ...DEFAULT_DISPLAY };
 
   // Hover picking.
   private readonly raycaster = new THREE.Raycaster();
@@ -143,11 +176,13 @@ export class VantageViewer {
       antialias: options.antialias ?? true,
       maxPixelRatio: options.maxPixelRatio ?? 2,
       light: options.light ?? {},
+      display: options.display ?? {},
     };
     if (options.light) this.light = { ...this.light, ...options.light };
+    if (options.display) this.display = { ...this.display, ...options.display };
 
     this.renderer = new THREE.WebGLRenderer({ antialias: this.options.antialias });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, this.options.maxPixelRatio));
+    this.renderer.setPixelRatio(this.targetPixelRatio());
     // Output shader colours directly (textures are already sRGB pixel art).
     this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     this.container.appendChild(this.renderer.domElement);
@@ -214,6 +249,7 @@ export class VantageViewer {
     this.frameCamera(view);
     this.applyBiomeUniforms();
     this.applyLight();
+    this.applyDisplay();
 
     const size = new THREE.Vector3();
     this.bounds.getSize(size);
@@ -312,6 +348,41 @@ export class VantageViewer {
     this.shader.uniforms['uAmbient']!.value = this.light.ambient;
     this.shader.uniforms['uDay']!.value = this.light.daylight;
     this.shader.uniforms['uExposure']!.value = this.light.exposure;
+  }
+
+  // --- display fidelity ------------------------------------------------------
+
+  /** The current live display fidelity (sharpness, colour grade, fog, scale). */
+  get displaySettings(): Required<DisplaySettings> {
+    return { ...this.display };
+  }
+
+  /** Update the live display fidelity (merges with current; immediate, no
+   *  re-bake). `renderScale` resizes the framebuffer; the rest are shader uniforms. */
+  setDisplay(settings: DisplaySettings): void {
+    const scaleChanged = settings.renderScale !== undefined && settings.renderScale !== this.display.renderScale;
+    this.display = { ...this.display, ...settings };
+    this.applyDisplay();
+    if (scaleChanged) {
+      this.renderer.setPixelRatio(this.targetPixelRatio());
+      this.resize();
+    }
+  }
+
+  /** devicePixelRatio × renderScale, capped by maxPixelRatio (and a hard 4 so a
+   *  fat-fingered scale can't allocate a giant framebuffer). */
+  private targetPixelRatio(): number {
+    const want = window.devicePixelRatio * this.display.renderScale;
+    return Math.min(want, this.options.maxPixelRatio * Math.max(1, this.display.renderScale), 4);
+  }
+
+  private applyDisplay(): void {
+    if (!this.shader) return;
+    this.shader.uniforms['uSharpness']!.value = this.display.sharpness;
+    this.shader.uniforms['uAoStrength']!.value = this.display.ao;
+    this.shader.uniforms['uSaturation']!.value = this.display.saturation;
+    this.shader.uniforms['uContrast']!.value = this.display.contrast;
+    this.shader.uniforms['uFogDensity']!.value = this.display.fog;
   }
 
   // --- events ---------------------------------------------------------------

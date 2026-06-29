@@ -7,6 +7,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import {
   VantageViewer as Engine,
   type BiomeEntry,
+  type DisplaySettings,
   type LightSettings,
   type TextureSource,
   type TileInfo,
@@ -30,6 +31,9 @@ export interface VantageViewerProps {
   /** Live lighting appearance (ambient floor, daylight, exposure). Applied on
    *  change without re-baking — drive it from a slider for a day/night control. */
   light?: LightSettings;
+  /** Live display fidelity (sharpness, AO, saturation, contrast, fog, render
+   *  scale). Applied on change without re-baking — drive it from sliders. */
+  display?: DisplaySettings;
   className?: string;
   style?: CSSProperties;
   /** Called once a tile has loaded and been framed. */
@@ -72,6 +76,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     antialias = true,
     maxPixelRatio = 2,
     light,
+    display,
     className,
     style,
     onLoad,
@@ -99,7 +104,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     injectStyles();
     const el = canvasRef.current;
     if (!el) return;
-    const v = new Engine(el, { antialias, maxPixelRatio, view, light });
+    const v = new Engine(el, { antialias, maxPixelRatio, view, light, display });
     engineRef.current = v;
     setEngine(v);
 
@@ -145,6 +150,11 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
   useEffect(() => {
     if (engine && light) engine.setLight(light);
   }, [engine, light?.ambient, light?.daylight, light?.exposure]);
+
+  // Apply live display-fidelity changes (no remount, no re-load).
+  useEffect(() => {
+    if (engine && display) engine.setDisplay(display);
+  }, [engine, display?.sharpness, display?.ao, display?.saturation, display?.contrast, display?.fog, display?.renderScale]);
 
   const ctx = useMemo<VantageContextValue>(
     () => ({

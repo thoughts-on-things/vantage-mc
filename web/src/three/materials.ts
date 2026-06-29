@@ -54,6 +54,11 @@ const FRAG = /* glsl */ `
   uniform float uDay;        // daylight 0..1 (scales sky light; 1 = noon)
   uniform float uAmbient;    // brightness floor at zero light (map readability)
   uniform float uExposure;   // overall brightness/tone multiplier (1 = neutral)
+  uniform float uSharpness;  // texture mip LOD bias (>0 = crisper distance, more shimmer)
+  uniform float uAoStrength; // baked AO darkening scale (1 = as-baked, 0 = off)
+  uniform float uSaturation; // colour saturation (1 = neutral)
+  uniform float uContrast;   // colour contrast around mid grey (1 = neutral)
+  uniform float uFogDensity; // atmospheric haze amount (1 = full, 0 = clear)
   in vec2 vUv;
   in vec4 vTint;
   in vec3 vBcol;
@@ -80,10 +85,19 @@ const FRAG = /* glsl */ `
     col = mix(vec3(1.0), TORCH, 0.6 * clamp(vBlk - sky, 0.0, 1.0));
   }
 
+  // Final colour grade: saturation then contrast around mid grey. Cheap pop/clarity
+  // controls so the look is tunable without re-baking. Neutral at (1, 1).
+  vec3 grade(vec3 c) {
+    float l = dot(c, vec3(0.299, 0.587, 0.114));
+    c = mix(vec3(l), c, uSaturation);
+    c = (c - 0.5) * uContrast + 0.5;
+    return max(c, vec3(0.0));
+  }
+
   void main() {
     float lightAmt; vec3 lightCol;
     bakedLight(lightAmt, lightCol);
-    vec4 t = texture(map, vec3(vUv, vLayer));
+    vec4 t = texture(map, vec3(vUv, vLayer), -uSharpness); // negative bias = sharper
     if (t.a < 0.5) discard;                        // alpha cutout (grass overlay etc.)
     vec3 N = normalize(vN);
     vec3 ambient = mix(GND, SKY, 0.5 + 0.5 * N.y); // sky above, earth below
@@ -98,14 +112,14 @@ const FRAG = /* glsl */ `
       vec3 wcol = vTint.rgb * (0.82 + 0.20 * ripple);
       float depth = vTint.a;
       wcol = mix(wcol, wcol * vec3(0.55, 0.66, 0.85), depth);   // deep water cools + deepens
-      vec3 wlit = wcol * (0.55 + 0.40 * ambient + 0.45 * SUN * ndl) * lightAmt * lightCol * uExposure;
-      float wf = smoothstep(uFog.x, uFog.y, vFog);
+      vec3 wlit = grade(wcol * (0.55 + 0.40 * ambient + 0.45 * SUN * ndl) * lightAmt * lightCol * uExposure);
+      float wf = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity;
       float wa = mix(0.35, 0.88, depth);                        // shallow clear -> deep opaque
       frag = vec4(mix(wlit, uFogColor, wf), wa);
       return;
     }
 
-    float ao = vTint.a;                            // baked ambient occlusion (colour alpha)
+    float ao = 1.0 - (1.0 - vTint.a) * uAoStrength; // baked AO (colour alpha), strength-scaled
     vec3 texcol = t.rgb * vTint.rgb;
     float luma = dot(texcol, vec3(0.299, 0.587, 0.114));
     // Biome view keeps terrain relief by modulating the flat biome colour by luma.
@@ -115,8 +129,8 @@ const FRAG = /* glsl */ `
       float g = dot(base, vec3(0.299, 0.587, 0.114));
       base = mix(base, vec3(g) * 0.55, 0.82);      // fade biomes other than the selected one
     }
-    vec3 lit = base * (0.25 + 0.45 * ambient + 0.55 * SUN * ndl) * ao * lightAmt * lightCol * uExposure;
-    float f = smoothstep(uFog.x, uFog.y, vFog);    // aerial depth into the horizon
+    vec3 lit = grade(base * (0.25 + 0.45 * ambient + 0.55 * SUN * ndl) * ao * lightAmt * lightCol * uExposure);
+    float f = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity; // aerial depth into the horizon
     frag = vec4(mix(lit, uFogColor, f), uAlpha);
   }
 `;
@@ -151,6 +165,11 @@ export function createTerrainMaterial(texData: DecodedTextureArray): THREE.Shade
       uDay: { value: 1.0 },        // noon; a day/night control can drive this
       uAmbient: { value: 0.12 },   // caves stay readable rather than pure black
       uExposure: { value: 1.0 },   // overall brightness/tone (live-tunable)
+      uSharpness: { value: 0.0 },  // texture mip LOD bias (0 = smooth, >0 = crisper)
+      uAoStrength: { value: 1.0 }, // baked AO darkening scale (1 = as-baked)
+      uSaturation: { value: 1.0 }, // colour saturation (1 = neutral)
+      uContrast: { value: 1.0 },   // colour contrast (1 = neutral)
+      uFogDensity: { value: 1.0 }, // atmospheric haze amount (1 = full)
     },
     vertexShader: VERT,
     fragmentShader: FRAG,

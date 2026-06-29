@@ -20,6 +20,7 @@ export {
   type TileInfo,
   type ViewMode,
   type LightSettings,
+  type DisplaySettings,
 } from './viewer.js';
 
 // Re-export the core decoder so `vantage-mc/three` (and the main entry) are

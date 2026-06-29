@@ -6,7 +6,7 @@
 
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BiomeLayer, LightPanel, useVantage, VantageViewer } from '../src/react/index.js';
+import { BiomeLayer, FidelityPanel, LightPanel, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
@@ -53,6 +53,7 @@ function App() {
       <Hud />
       <BiomeLayer legend hover defaultEnabled={biomeOpen} />
       <LightPanel />
+      <FidelityPanel />
     </VantageViewer>
   );
 }

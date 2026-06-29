@@ -173,7 +173,7 @@ const AO_LUT = [4]u8{ 130, 178, 218, 255 };
 /// A built tile: the opaque terrain mesh plus a separate transparent fluid mesh
 /// (water). They are meshed together but drawn in two passes — the fluid mesh
 /// blends over the already-drawn opaque one, so the seabed shows through.
-pub const Built = struct { solid: Mesh2 = .{}, fluid: Mesh2 = .{} };
+pub const Built = struct { solid: Mesh2 = .{}, fluid: Mesh2 = .{}, light_ms: i64 = 0 };
 
 /// Baked-light quality. `flat` lights each face by the single cell it faces (hard
 /// per-face steps). `smooth` averages the four cells around each vertex (the AO
@@ -226,15 +226,88 @@ pub fn buildTextured(
     // — saves no light in its region files, so we derive it the way BlueMap does.
     const emission = try arena.alloc(u8, g.names.len);
     for (emission, 0..) |*e, id| e.* = if (id == 0) 0 else lighting.emissionOf(g.nameOf(@intCast(id)));
+    const t_light0 = std.Io.Timestamp.now(resolver.io, .awake);
     const light_node: ?std.Progress.Node = if (progress) |p| p.start("computing light", 0) else null;
     try lighting.compute(arena, g, id_occluder, emission);
     if (light_node) |n| n.end();
+    const light_ms = t_light0.durationTo(std.Io.Timestamp.now(resolver.io, .awake)).toMilliseconds();
 
-    const mesh_node: ?std.Progress.Node = if (progress) |p| p.start("meshing geometry", g.sy) else null;
+    // Mesh the geometry. Each cell's work reads only the (immutable) grid and the
+    // pre-baked per-id caches, so we split the Y range across threads and append
+    // the partials in Y order — byte-identical to a single-threaded pass.
+    const mesh_node: ?std.Progress.Node = if (progress) |p| p.start("meshing geometry", 0) else null;
     defer if (mesh_node) |n| n.end();
-    var y: usize = 0;
-    while (y < g.sy) : (y += 1) {
-        if (mesh_node) |n| n.completeOne();
+    const ctx: MeshCtx = .{
+        .g = g,
+        .cache = cache,
+        .id_occluder = id_occluder,
+        .is_water = is_water,
+        .waterish = waterish,
+        .tint_colors = tint_colors,
+        .nkind = nkind,
+        .water_layer = water_layer,
+        .quality = quality,
+    };
+    const cpu = std.Thread.getCpuCount() catch 1;
+    const n_threads = @max(1, @min(cpu, g.sy));
+    if (n_threads <= 1) {
+        try meshRange(&ctx, 0, g.sy, arena, &mesh, &fluid);
+    } else {
+        const partials = try arena.alloc(Partial, n_threads);
+        const threads = try arena.alloc(std.Thread, n_threads);
+        const slab = (g.sy + n_threads - 1) / n_threads;
+        for (partials, 0..) |*p, i| {
+            const y0 = @min(g.sy, i * slab);
+            p.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator), .y0 = y0, .y1 = @min(g.sy, y0 + slab) };
+        }
+        for (partials, threads) |*p, *t| t.* = try std.Thread.spawn(.{}, meshWorker, .{ &ctx, p });
+        for (threads) |t| t.join();
+        for (partials) |*p| {
+            defer p.arena.deinit();
+            if (p.err) |e| return e;
+            try appendMesh(arena, &mesh, &p.solid);
+            try appendMesh(arena, &fluid, &p.fluid);
+        }
+    }
+    return .{ .solid = mesh, .fluid = fluid, .light_ms = light_ms };
+}
+
+/// Immutable, shareable context for the per-cell mesh pass (read by every thread).
+const MeshCtx = struct {
+    g: grid.Grid,
+    cache: []?Cached,
+    id_occluder: []const bool,
+    is_water: []const bool,
+    waterish: []const bool,
+    tint_colors: [][3]u8,
+    nkind: usize,
+    water_layer: f32,
+    quality: LightQuality,
+};
+
+/// One thread's slice of the mesh: its own arena (page-backed) and Y range.
+const Partial = struct {
+    solid: Mesh2 = .{},
+    fluid: Mesh2 = .{},
+    arena: std.heap.ArenaAllocator,
+    y0: usize,
+    y1: usize,
+    err: ?anyerror = null,
+};
+
+fn meshWorker(ctx: *const MeshCtx, p: *Partial) void {
+    meshRange(ctx, p.y0, p.y1, p.arena.allocator(), &p.solid, &p.fluid) catch |e| {
+        p.err = e;
+    };
+}
+
+/// Mesh the Y range [y0, y1) into `mesh` (opaque) and `fluid` (water), in y,z,x
+/// order so threaded partials concatenate byte-identically. All grid/cache reads
+/// are immutable; only the two output meshes (per-thread) are written.
+fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator, mesh: *Mesh2, fluid: *Mesh2) !void {
+    const g = ctx.g;
+    var y = y0;
+    while (y < y1) : (y += 1) {
         var z: usize = 0;
         while (z < g.sz) : (z += 1) {
             var x: usize = 0;
@@ -248,25 +321,25 @@ pub fn buildTextured(
 
                 // Pure water: transparent pass only (no block model). Boundary
                 // faces, surface lip, depth — see emitFluid.
-                if (is_water[id]) {
-                    const rgb = tint_colors[bid * nkind + @intFromEnum(biome.Tint.water)];
-                    try emitFluid(arena, &fluid, g, id_occluder, waterish, water_layer, x, y, z, wx, wy, wz, rgb, bid);
+                if (ctx.is_water[id]) {
+                    const rgb = ctx.tint_colors[bid * ctx.nkind + @intFromEnum(biome.Tint.water)];
+                    try emitFluid(alloc, fluid, g, ctx.id_occluder, ctx.waterish, ctx.water_layer, x, y, z, wx, wy, wz, rgb, bid);
                     continue;
                 }
 
-                const cb = cache[id].?; // populated by the occluder pre-pass
+                const cb = ctx.cache[id].?; // populated by the occluder pre-pass
                 const xi: isize = @intCast(x);
                 const yi: isize = @intCast(y);
                 const zi: isize = @intCast(z);
                 for (cb.faces) |face| {
                     if (face.cull) |c| {
                         const off = dirOffset(c);
-                        if (id_occluder[g.at(xi + off[0], yi + off[1], zi + off[2])]) continue;
+                        if (ctx.id_occluder[g.at(xi + off[0], yi + off[1], zi + off[2])]) continue;
                     }
-                    const rgb = tint_colors[bid * nkind + @intFromEnum(face.tint)];
+                    const rgb = ctx.tint_colors[bid * ctx.nkind + @intFromEnum(face.tint)];
                     var ao = [4]u8{ 255, 255, 255, 255 };
                     if (face.ao) {
-                        for (0..4) |ci| ao[ci] = cornerAo(g, id_occluder, x, y, z, face.ao_off[ci]);
+                        for (0..4) |ci| ao[ci] = cornerAo(g, ctx.id_occluder, x, y, z, face.ao_off[ci]);
                     }
                     // A face is lit by the cell it faces (the air the cullface
                     // looks into); billboards with no cullface read their own cell.
@@ -276,24 +349,37 @@ pub fn buildTextured(
                     // Smooth lighting: average each vertex's neighbourhood (same
                     // cells as AO). Only full, cullface-bearing faces have the AO
                     // offsets; billboards stay flat-lit.
-                    if (quality == .smooth and face.ao) {
+                    if (ctx.quality == .smooth and face.ao) {
                         const base = [3]i8{ face.verts[0].n[0], face.verts[0].n[1], face.verts[0].n[2] };
-                        for (0..4) |ci| lights[ci] = cornerLight(g, id_occluder, x, y, z, base, face.ao_off[ci]);
+                        for (0..4) |ci| lights[ci] = cornerLight(g, ctx.id_occluder, x, y, z, base, face.ao_off[ci]);
                     }
-                    try emitBaked(arena, &mesh, wx, wy, wz, face, rgb, ao, lights, bid);
+                    try emitBaked(alloc, mesh, wx, wy, wz, face, rgb, ao, lights, bid);
                 }
 
                 // Waterlogged block (seagrass, kelp, waterlogged stair/…): it just
                 // rendered its model into the opaque mesh; now lay continuous water
                 // over its cell so it sits *in* the water instead of in a shell.
-                if (waterish[id]) {
-                    const rgb = tint_colors[bid * nkind + @intFromEnum(biome.Tint.water)];
-                    try emitFluid(arena, &fluid, g, id_occluder, waterish, water_layer, x, y, z, wx, wy, wz, rgb, bid);
+                if (ctx.waterish[id]) {
+                    const rgb = ctx.tint_colors[bid * ctx.nkind + @intFromEnum(biome.Tint.water)];
+                    try emitFluid(alloc, fluid, g, ctx.id_occluder, ctx.waterish, ctx.water_layer, x, y, z, wx, wy, wz, rgb, bid);
                 }
             }
         }
     }
-    return .{ .solid = mesh, .fluid = fluid };
+}
+
+/// Append `src`'s vertex streams to `dst`, offsetting indices by `dst`'s current
+/// vertex count — concatenates a thread's partial mesh into the combined one.
+fn appendMesh(alloc: std.mem.Allocator, dst: *Mesh2, src: *const Mesh2) !void {
+    const base = dst.vertex_count;
+    try dst.positions.appendSlice(alloc, src.positions.items);
+    try dst.uv.appendSlice(alloc, src.uv.items);
+    try dst.layer.appendSlice(alloc, src.layer.items);
+    try dst.color.appendSlice(alloc, src.color.items);
+    try dst.normals.appendSlice(alloc, src.normals.items);
+    try dst.biome.appendSlice(alloc, src.biome.items);
+    for (src.indices.items) |idx| try dst.indices.append(alloc, idx + base);
+    dst.vertex_count += src.vertex_count;
 }
 
 fn isWater(name: []const u8) bool {

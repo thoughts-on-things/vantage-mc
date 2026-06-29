@@ -406,9 +406,11 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     defer root.end();
 
     var stats: grid.Stats = .{};
+    const t0 = std.Io.Timestamp.now(init.io, .awake);
     const read_node = root.start("reading chunks", total);
     const g = try world.assembleWindow(a, loaded, cx0, cz0, cx1, cz1, &stats, read_node);
     read_node.end();
+    const t_read = std.Io.Timestamp.now(init.io, .awake);
 
     const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = assets };
     var builder = try texture.Builder.init(a, init.io, assets);
@@ -417,9 +419,11 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var reg = biome.Registry.init(a, init.io, data_root);
     // buildTextured reports its own "computing light" + "meshing geometry" phases.
     const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, quality, root);
+    const t_mesh = std.Io.Timestamp.now(init.io, .awake);
     const tex_node = root.start("building textures", 0);
     const arr = try builder.finish();
     tex_node.end();
+    const t_tex = std.Io.Timestamp.now(init.io, .awake);
 
     const write_node = root.start("writing tile", 0);
     const names = lang.Lang.load(a, init.io, assets);
@@ -429,10 +433,12 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     const surface = try grid.buildSurface(a, g);
     const geo = try tile.serializeWithSurface(a, built.solid, built.fluid, surface, display);
     const tex_blob = try texture.serialize(a, arr);
+    const t_ser = std.Io.Timestamp.now(init.io, .awake);
     const tex_path = try texArrayPath(a, out_path);
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = geo });
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = tex_path, .data = tex_blob });
     write_node.end();
+    const t_write = std.Io.Timestamp.now(init.io, .awake);
 
     std.debug.print(
         \\
@@ -452,6 +458,14 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         built.solid.vertex_count + built.fluid.vertex_count, built.solid.triangleCount() + built.fluid.triangleCount(),
         built.fluid.vertex_count,                            out_path,
         geo.len,                                             arr.layer_count,
+    });
+    std.debug.print("timings: read {d}ms · light {d}ms · geometry {d}ms · textures {d}ms · serialize {d}ms · write {d}ms\n", .{
+        t0.durationTo(t_read).toMilliseconds(),
+        built.light_ms,
+        t_read.durationTo(t_mesh).toMilliseconds() - built.light_ms,
+        t_mesh.durationTo(t_tex).toMilliseconds(),
+        t_tex.durationTo(t_ser).toMilliseconds(),
+        t_ser.durationTo(t_write).toMilliseconds(),
     });
     if (geo.len > 150 * 1024 * 1024) std.debug.print(
         "  note: large tile — if it's slow in the browser, render less with --radius {d}\n",

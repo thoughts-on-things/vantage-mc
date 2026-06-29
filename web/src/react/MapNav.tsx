@@ -1,16 +1,20 @@
 // <MapNav> — the floating navigation cluster: a compass that tracks the camera
-// heading (click to face north), zoom in/out buttons (the same inertial zoom as
-// the wheel), a home button that re-frames the tile, and a live readout of the
-// world coordinate the view is centred on. It reads the engine's controls every
-// frame and writes the DOM directly (needle transform, coordinate text), so it
-// never triggers a React re-render while you fly around.
+// heading (click to face north), a 2D/3D toggle that levels or restores the tilt,
+// zoom in/out buttons (the same inertial zoom as the wheel), a home button that
+// re-frames the tile, and a live readout of the world coordinate the view is
+// centred on. It reads the engine's controls every frame and writes the DOM
+// directly (needle transform, tilt label, coordinate text), so it never triggers
+// a React re-render while you fly around.
 
 import { useEffect, useRef } from 'react';
 import { useVantage } from './context.js';
+import { DEFAULT_ORBIT_ANGLE } from '../three/index.js';
 
 export interface MapNavProps {
   /** Show the compass. Default `true`. */
   compass?: boolean;
+  /** Show the 2D/3D tilt toggle. Default `true`. */
+  tilt?: boolean;
   /** Show the zoom in/out buttons. Default `true`. */
   zoom?: boolean;
   /** Show the home (re-frame) button. Default `true`. */
@@ -19,6 +23,9 @@ export interface MapNavProps {
   coords?: boolean;
   className?: string;
 }
+
+/** Above this pitch (radians) the view counts as tilted ("3D"). */
+const TILT_THRESHOLD = 0.12;
 
 const Icon = {
   minus: (
@@ -40,18 +47,20 @@ const Icon = {
   ),
 };
 
-export function MapNav({ compass = true, zoom = true, home = true, coords = true, className }: MapNavProps) {
+export function MapNav({ compass = true, tilt = true, zoom = true, home = true, coords = true, className }: MapNavProps) {
   const { viewer } = useVantage();
   const needleRef = useRef<SVGGElement>(null);
   const coordRef = useRef<HTMLSpanElement>(null);
+  const tiltRef = useRef<HTMLButtonElement>(null);
 
-  // Drive the compass needle + coordinate text from the live camera each frame,
-  // imperatively — no React state, no re-render churn while navigating.
+  // Drive the compass needle, tilt label, and coordinate text from the live
+  // camera each frame — imperatively, no React state, no re-render churn.
   useEffect(() => {
     if (!viewer) return;
     let raf = 0;
     let lastDeg = NaN;
     let lastTxt = '';
+    let last3d: boolean | null = null;
     const tick = () => {
       const c = viewer.controls;
       const deg = (c.rotation * 180) / Math.PI;
@@ -66,6 +75,15 @@ export function MapNav({ compass = true, zoom = true, home = true, coords = true
           lastTxt = txt;
         }
       }
+      if (tiltRef.current) {
+        const is3d = c.angle > TILT_THRESHOLD;
+        if (is3d !== last3d) {
+          tiltRef.current.textContent = is3d ? '3D' : '2D';
+          tiltRef.current.classList.toggle('vtg-on', is3d);
+          tiltRef.current.title = is3d ? 'Level to top-down (2D)' : 'Tilt to 3D';
+          last3d = is3d;
+        }
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -74,16 +92,13 @@ export function MapNav({ compass = true, zoom = true, home = true, coords = true
 
   if (!viewer) return null;
 
+  // Toggle between a flat top-down map and the default aerial tilt.
+  const toggleTilt = () => viewer.setTilt(viewer.tilt > TILT_THRESHOLD ? 0 : DEFAULT_ORBIT_ANGLE);
+
   return (
     <div className={className ? `vtg-nav vtg-glass ${className}` : 'vtg-nav vtg-glass'} role="group" aria-label="map navigation">
       {compass && (
-        <button
-          type="button"
-          className="vtg-compass"
-          title="Face north"
-          aria-label="Face north"
-          onClick={() => viewer.resetNorth()}
-        >
+        <button type="button" className="vtg-compass" title="Face north" aria-label="Face north" onClick={() => viewer.resetNorth()}>
           <svg viewBox="-16 -16 32 32" aria-hidden="true">
             <circle cx="0" cy="0" r="14.5" fill="none" stroke="rgba(140,178,238,0.18)" strokeWidth="1" />
             <g ref={needleRef}>
@@ -92,6 +107,12 @@ export function MapNav({ compass = true, zoom = true, home = true, coords = true
               <text className="vtg-cn" x="0" y="-11.5" textAnchor="middle">N</text>
             </g>
           </svg>
+        </button>
+      )}
+
+      {tilt && (
+        <button ref={tiltRef} type="button" className="vtg-navbtn vtg-navbtn-text" title="Tilt to 3D" aria-label="Toggle tilt" onClick={toggleTilt}>
+          3D
         </button>
       )}
 

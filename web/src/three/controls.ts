@@ -52,16 +52,6 @@ function softSet(v: number, target: number, k: number): number {
   return softClamp(v, target, target, k);
 }
 
-/** Max tilt (radians from top-down) allowed at a given dolly distance: full tilt
- *  when close, forced top-down (0) once far out. The signature BlueMap curve. */
-function maxAngleForDistance(distance: number): number {
-  return clamp((1 - Math.pow(Math.max(distance - 5, 0.001) * 0.0005, 0.5)) * HALF_PI, 0, HALF_PI);
-}
-/** Inverse: the farthest distance at which `angle` is still a legal tilt. */
-function maxDistanceForAngle(angle: number): number {
-  return Math.pow(-(angle * HALF_PI_DIV) + 1, 2) * 2000 + 5;
-}
-
 export class MapControls {
   readonly camera: THREE.PerspectiveCamera;
   readonly domElement: HTMLElement;
@@ -212,7 +202,7 @@ export class MapControls {
     this.position.copy(state.position);
     this.distance = clamp(state.distance, this.minDistance, this.maxDistance);
     this.rotation = state.rotation;
-    this.angle = clamp(state.angle, 0, maxAngleForDistance(this.distance));
+    this.angle = clamp(state.angle, 0, this.maxAngleForDistance(this.distance));
     if (state.floorY !== undefined) this.floorY = state.floorY;
     this.panBuf.set(0, 0);
     this.rotBuf = this.angleBuf = this.zoomBuf = 0;
@@ -268,6 +258,23 @@ export class MapControls {
     return clamp(stiffness / (16.666 / dt), 0, 1);
   }
 
+  /** Max tilt (radians from top-down) allowed at a dolly distance — BlueMap's
+   *  curve, but scaled to *this* world's zoom range: full tilt up close, eased to
+   *  a flat top-down exactly at `maxDistance`. (BlueMap hardcodes the flatten
+   *  point at ~2005 blocks, which our smaller windows never reach, so zooming out
+   *  could never level the view — the scaling fixes that.) */
+  private maxAngleForDistance(distance: number): number {
+    const span = Math.max(this.maxDistance - this.minDistance, 1);
+    const t = clamp((distance - this.minDistance) / span, 0, 1);
+    return clamp((1 - Math.sqrt(t)) * HALF_PI, 0, HALF_PI);
+  }
+
+  /** Inverse: the farthest distance at which `angle` is still a legal tilt. */
+  private maxDistanceForAngle(angle: number): number {
+    const t = Math.pow(clamp(1 - angle * HALF_PI_DIV, 0, 1), 2);
+    return this.minDistance + t * (this.maxDistance - this.minDistance);
+  }
+
   // --- motion application (drains the buffers) -------------------------------
 
   private applyPan(dt: number): void {
@@ -308,7 +315,7 @@ export class MapControls {
     if (this.zoomBuf === 0) return;
     const s = this.smoothing(0.2, dt);
     this.distance *= Math.pow(1.5, this.zoomBuf * s); // speed 1, multiplicative
-    this.angle = Math.min(this.angle, maxAngleForDistance(this.distance));
+    this.angle = Math.min(this.angle, this.maxAngleForDistance(this.distance));
     this.zoomBuf *= 1 - s;
     if (Math.abs(this.zoomBuf) < 1e-4) this.zoomBuf = 0;
   }
@@ -318,10 +325,10 @@ export class MapControls {
    *  dolly+pitch. A wheel event cancels it (you asked for a specific distance). */
   private applyDynamicDistance(): void {
     if (!this.orbiting || !this.dynamicDistance) return;
-    let target = Math.min(this.startDistance, maxDistanceForAngle(this.angle));
+    let target = Math.min(this.startDistance, this.maxDistanceForAngle(this.angle));
     target = Math.max(target, this.minDistance);
     this.distance = softSet(this.distance, target, 0.4);
-    this.angle = softMax(this.angle, maxAngleForDistance(target), 0.8);
+    this.angle = softMax(this.angle, this.maxAngleForDistance(target), 0.8);
   }
 
   /** Ease toward an animation goal (frame-rate-normalized), clearing it once the
@@ -356,7 +363,7 @@ export class MapControls {
   private applyBounds(): void {
     this.distance = softClamp(this.distance, this.minDistance, this.maxDistance, 0.8);
     this.angle = softClamp(this.angle, 0, HALF_PI, 0.8);
-    this.angle = softMax(this.angle, maxAngleForDistance(this.distance), 0.8);
+    this.angle = softMax(this.angle, this.maxAngleForDistance(this.distance), 0.8);
     // wrap azimuth to [-π, π]
     if (this.rotation > Math.PI) this.rotation -= 2 * Math.PI;
     else if (this.rotation < -Math.PI) this.rotation += 2 * Math.PI;
@@ -414,8 +421,13 @@ export class MapControls {
     rv.applyAxisAngle(axis, HALF_PI - this.angle);
     rv.multiplyScalar(this.distance);
     this.camera.position.copy(this.position).sub(rv);
-    this.camera.up.set(0, 1, 0);
-    this.camera.lookAt(this.position);
+    // Orient by explicit yaw (azimuth) + pitch rather than lookAt(up=+Y). Roll is
+    // always 0 so the horizon stays level, and — unlike lookAt — this stays
+    // well-defined looking straight down (angle 0), where up would be parallel to
+    // the view direction. So a clean top-down works and azimuth still spins the
+    // map when flat. yaw = −rotation puts bearing 0 at −Z; pitch = angle − π/2
+    // tips from horizon (0) to straight down (−π/2).
+    this.camera.rotation.set(this.angle - HALF_PI, -this.rotation, 0, 'YXZ');
   }
 
   /** A cheap scalar that changes iff the view changed (skips redundant emits). */

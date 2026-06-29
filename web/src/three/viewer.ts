@@ -127,6 +127,11 @@ export const DISPLAY_PRESETS: Record<RenderMode, Required<DisplaySettings>> = {
 // filmic grade is one toggle away in the fidelity panel.
 const DEFAULT_DISPLAY: Required<DisplaySettings> = { ...VANILLA_DISPLAY };
 
+/** The pitch (radians off top-down) the orbit view loads at and the "3D" tilt
+ *  toggle returns to — a gentle aerial that reads relief without leaning toward
+ *  the horizon. `0` = straight top-down (the "2D" toggle). */
+export const DEFAULT_ORBIT_ANGLE = 0.42;
+
 /** Above this vertex count GTAO's per-frame geometry re-render is too costly, so
  *  it auto-disables (the user can still force it via the dial if they accept the
  *  cost — see `applyDisplay`). */
@@ -488,7 +493,7 @@ export class VantageViewer {
       // relief without an awkward near-horizon lean, looking from the south-east.
       distance = land.span * 0.62;
       rotation = -Math.PI / 4;
-      angle = 0.42;
+      angle = DEFAULT_ORBIT_ANGLE;
     }
     // Start the pivot on the actual surface beneath it so there's no settle on
     // load; the controls keep it riding the terrain from here.
@@ -630,10 +635,21 @@ export class VantageViewer {
     this.controls.zoom(steps);
   }
 
-  /** Smoothly rotate the view back to north (and level any tilt-only request is
-   *  left intact). For the compass click. */
+  /** Smoothly rotate the view back to north, keeping the current tilt and
+   *  position. For the compass click. */
   resetNorth(): void {
     this.controls.animateTo({ rotation: 0 });
+  }
+
+  /** Smoothly set the pitch (radians off top-down): `0` = top-down map ("2D"),
+   *  {@link DEFAULT_ORBIT_ANGLE} = the gentle aerial ("3D"). The tilt control. */
+  setTilt(angle: number): void {
+    this.controls.animateTo({ angle });
+  }
+
+  /** The current pitch in radians (0 = top-down), for a tilt toggle's state. */
+  get tilt(): number {
+    return this.controls.angle;
   }
 
   /** Smoothly return to the framing the tile loaded into (the home button). */

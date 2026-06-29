@@ -31,4 +31,4 @@ export type {
 } from '../three/index.js';
 
 // Display presets (mode toggle) — value exports, separate from the type block.
-export { CINEMATIC_DISPLAY, VANILLA_DISPLAY, DISPLAY_PRESETS } from '../three/index.js';
+export { CINEMATIC_DISPLAY, VANILLA_DISPLAY, DISPLAY_PRESETS, DEFAULT_ORBIT_ANGLE } from '../three/index.js';

@@ -26,6 +26,7 @@ export {
   CINEMATIC_DISPLAY,
   VANILLA_DISPLAY,
   DISPLAY_PRESETS,
+  DEFAULT_ORBIT_ANGLE,
 } from './viewer.js';
 
 // Re-export the core decoder so `vantage-mc/three` (and the main entry) are

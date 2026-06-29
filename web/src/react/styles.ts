@@ -148,6 +148,9 @@ export const CSS = `
 .vtg-navbtn:hover { background: rgba(132, 170, 230, 0.14); color: var(--vtg-text); border-color: var(--vtg-line); }
 .vtg-navbtn:active { background: rgba(91, 155, 255, 0.26); }
 .vtg-navbtn svg { width: 16px; height: 16px; display: block; }
+.vtg-navbtn-text { width: auto; min-width: 30px; padding: 0 8px; font: 700 11px var(--vtg-mono); letter-spacing: 0.03em; }
+.vtg-navbtn.vtg-on { background: var(--vtg-accent); border-color: var(--vtg-accent); color: #07101f; }
+.vtg-navbtn.vtg-on:hover { background: var(--vtg-accent); color: #07101f; }
 .vtg-nav-sep { width: 1px; align-self: stretch; margin: 4px 2px; background: var(--vtg-line); }
 
 .vtg-compass {

@@ -59,6 +59,25 @@ export const CSS = `
 .vtg-name { overflow: hidden; text-overflow: ellipsis; }
 .vtg-pct { margin-left: auto; color: #6f86ab; font-size: 11px; font-variant-numeric: tabular-nums; }
 
+.vtg-sliders { padding: 11px 13px 13px; display: flex; flex-direction: column; gap: 12px; }
+.vtg-slider { display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
+.vtg-slider-row { display: flex; justify-content: space-between; color: #8ba6cd; font-size: 11px; }
+.vtg-slider-row b { color: #d8e6fc; font-weight: 600; font-variant-numeric: tabular-nums; }
+.vtg-slider input[type=range] {
+  -webkit-appearance: none; appearance: none; width: 100%; height: 4px; border-radius: 2px;
+  background: rgba(132, 170, 230, 0.25); outline: none; cursor: pointer;
+}
+.vtg-slider input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%;
+  background: #5b9bff; cursor: pointer; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+  transition: transform 0.12s;
+}
+.vtg-slider input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.15); }
+.vtg-slider input[type=range]::-moz-range-thumb {
+  width: 14px; height: 14px; border: none; border-radius: 50%; background: #5b9bff;
+  cursor: pointer; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
 .vtg-tip {
   position: fixed; display: flex; align-items: center; gap: 8px;
   padding: 6px 10px; pointer-events: none; z-index: 10;

@@ -8,6 +8,7 @@
 
 export { VantageViewer, type VantageViewerProps } from './VantageViewer.js';
 export { BiomeLayer, type BiomeLayerProps } from './BiomeLayer.js';
+export { LightPanel, type LightPanelProps } from './LightPanel.js';
 export { useVantage, type VantageContextValue, type VantageStatus } from './context.js';
 export { injectStyles, CSS } from './styles.js';
 

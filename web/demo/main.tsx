@@ -6,7 +6,7 @@
 
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BiomeLayer, useVantage, VantageViewer } from '../src/react/index.js';
+import { BiomeLayer, LightPanel, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
@@ -41,7 +41,7 @@ function Hud() {
         {verts} verts · {tris} tris · {dims} blocks
       </div>
       <div style={{ color: '#6f86ab', marginTop: 7, fontSize: 11 }}>
-        drag orbit · scroll zoom · <b>B</b> biomes · hover to identify
+        drag pan · right-drag rotate · scroll zoom · <b>B</b> biomes · hover to identify
       </div>
     </div>
   );
@@ -52,6 +52,7 @@ function App() {
     <VantageViewer tile="/terrain.vtile" textures="/terrain.vtexarr" view={view}>
       <Hud />
       <BiomeLayer legend hover defaultEnabled={biomeOpen} />
+      <LightPanel />
     </VantageViewer>
   );
 }

@@ -4,7 +4,7 @@
 // and emits events. The React components are thin wrappers over this.
 
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { MapControls } from 'three/examples/jsm/controls/MapControls.js';
 import {
   parseTextureArray,
   parseTile,
@@ -104,7 +104,7 @@ export class VantageViewer {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene: THREE.Scene;
   readonly camera: THREE.PerspectiveCamera;
-  readonly controls: OrbitControls;
+  readonly controls: MapControls;
 
   private readonly container: HTMLElement;
   private readonly options: Required<VantageViewerOptions>;
@@ -158,8 +158,16 @@ export class VantageViewer {
     this.scene.add(this.sky);
 
     this.camera = new THREE.PerspectiveCamera(60, 1, 0.5, 8000);
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    // Map-style navigation (à la BlueMap): left-drag pans across the ground,
+    // right-drag rotates/tilts, wheel zooms toward the cursor. Damping gives it
+    // weight; the polar clamp keeps the camera above the horizon.
+    this.controls = new MapControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.08;
+    this.controls.zoomToCursor = true;
+    this.controls.screenSpacePanning = false; // pan parallel to the ground plane
+    this.controls.maxPolarAngle = Math.PI * 0.495; // don't dip below the horizon
+    this.controls.minDistance = 2;
 
     this.bindInput();
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -224,6 +232,7 @@ export class VantageViewer {
     this.bounds.getCenter(center);
     this.bounds.getSize(size);
     const maxDim = Math.max(size.x, size.y, size.z);
+    this.controls.maxDistance = maxDim * 4; // bound zoom-out to the world extent
 
     if (view === 'top') {
       const span = Math.max(size.x, size.z);

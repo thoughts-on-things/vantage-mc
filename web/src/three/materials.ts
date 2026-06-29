@@ -126,8 +126,14 @@ export function createTerrainMaterial(texData: DecodedTextureArray): THREE.Shade
   const tex = new THREE.DataArrayTexture(texData.pixels, texData.width, texData.height, texData.layers);
   tex.format = THREE.RGBAFormat;
   tex.type = THREE.UnsignedByteType;
+  // NEAREST mag keeps the crisp pixel-art look up close; mipmaps + anisotropy on
+  // the min filter kill the distant shimmer/sparkle (worst on high-frequency leaf
+  // and water textures viewed at a grazing angle). A texture *array* mips each
+  // layer independently, so there's none of the atlas mip-bleed seam problem.
   tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = true;
+  tex.anisotropy = 16; // three clamps this to the hardware max
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.needsUpdate = true;

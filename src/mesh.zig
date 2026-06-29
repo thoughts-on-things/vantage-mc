@@ -973,9 +973,36 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
 /// Mark which of a block's baked faces may be greedy plane-merged. Only occluder
 /// blocks qualify, and only their full-cube boundary faces (see `isGreedyGeom`);
 /// overlays, sub-cube elements and cross/plant billboards are left per-block.
+///
+/// A face is also disqualified when another face shares its boundary plane (same
+/// cull direction) — the coincident-overlay pattern (grass_block_side +
+/// grass_block_side_overlay, mycelium, podzol, nylium…). Greedy-merging the base
+/// would shunt it into the separate greedy mesh drawn *after* the per-block
+/// overlay, so at distance (once the tiny outward nudge drops below depth
+/// precision) the untinted base wins the depth test and z-fights/flickers. Kept
+/// per-block, base and overlay emit in element order (base then overlay) into the
+/// same mesh, so LEQUAL + draw order lets the overlay win deterministically.
 fn markGreedy(face_list: []BakedFace, occluder: bool) void {
     if (!occluder) return;
-    for (face_list) |*f| f.greedy = isGreedyGeom(f.*);
+    for (face_list, 0..) |*f, i| {
+        if (!isGreedyGeom(f.*)) {
+            f.greedy = false;
+            continue;
+        }
+        var shares_plane = false;
+        for (face_list, 0..) |other, j| {
+            if (i == j) continue;
+            if (other.cull) |oc| {
+                if (f.cull) |fc| {
+                    if (oc == fc) {
+                        shares_plane = true;
+                        break;
+                    }
+                }
+            }
+        }
+        f.greedy = !shares_plane;
+    }
 }
 
 /// True when a baked face is a full unit-square face lying on a cube boundary:

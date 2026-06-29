@@ -252,7 +252,7 @@ pub fn buildTextured(
     for (emission, 0..) |*e, id| e.* = if (id == 0) 0 else lighting.emissionOf(g.nameOf(@intCast(id)));
     const t_light0 = std.Io.Timestamp.now(resolver.io, .awake);
     const light_node: ?std.Progress.Node = if (progress) |p| p.start("computing light", 0) else null;
-    try lighting.compute(arena, g, id_occluder, emission);
+    try lighting.compute(arena, g, id_occluder, emission, waterish);
     if (light_node) |n| n.end();
     const light_ms = t_light0.durationTo(std.Io.Timestamp.now(resolver.io, .awake)).toMilliseconds();
 

@@ -116,22 +116,23 @@ const FRAG = /* glsl */ `
     vec3 ambient = mix(GND, SKY, 0.5 + 0.5 * N.y); // sky above, earth below
     float ndl = max(dot(N, normalize(lightDir)), 0.0);
 
-    // Water pass: clean flat-lit surface, BlueMap-style — no specular/animation.
-    // The wave look comes from the mesh geometry (real Minecraft flowing-water
-    // heights), so the surface normal vN already slopes where water flows and the
-    // ridges catch light. Depth (colour alpha, 0..1) drives *opacity* — shallow
-    // water is clear so the seabed shows, deep water turns solid blue; that
-    // accumulation reads as real depth without per-block shading.
+    // Water pass: a semi-transparent blue tint over the normally-lit seabed —
+    // BlueMap-style. The depth read comes from the SEABED darkening (sky light is
+    // attenuated through water in the light pass), seen through the clear surface,
+    // NOT from fading the water to opaque. So keep the surface fairly transparent
+    // so sand/gravel/seagrass show through; the wave look is the real flowing-water
+    // mesh geometry, whose sloped normal (vN) catches light.
     if (uWater > 0.5) {
       float depth = vTint.a;
       vec3 wcol = toLinear(vTint.rgb);
-      wcol = mix(wcol, wcol * vec3(0.55, 0.66, 0.85), depth);   // deep water cools + deepens
+      wcol = mix(wcol, wcol * vec3(0.55, 0.66, 0.85), depth * 0.7); // deep water cools + deepens
       vec3 Nw = normalize(vN);
-      vec3 wamb = mix(GND, SKY, 0.5 + 0.5 * Nw.y);
       float ndl2 = max(dot(Nw, normalize(lightDir)), 0.0);
-      vec3 wlit = grade(wcol * (0.5 + 0.45 * wamb + 0.55 * SUN * ndl2) * lightAmt * lightCol * uExposure);
+      // Flat-lit like BlueMap (mostly the water colour × baked light); only a small
+      // directional term so the wave-slope normals read, no blown-out sun sheen.
+      vec3 wlit = grade(wcol * (0.62 + 0.28 * SUN * ndl2) * lightAmt * lightCol * uExposure);
       float wf = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity;
-      float wa = mix(0.35, 0.90, depth);                        // shallow clear -> deep opaque
+      float wa = mix(0.5, 0.74, depth);                         // blue tint, seabed still reads through
       frag = vec4(mix(wlit, fogCol, wf), wa);
       return;
     }

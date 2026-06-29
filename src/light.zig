@@ -24,7 +24,12 @@ pub const MAX: u8 = 15;
 /// `occluder[id]` marks blocks that stop light (opaque full cubes); `emission[id]`
 /// is each block id's emitted level (0 = none). Both are indexed by grid block id
 /// (id 0 = air: not an occluder, no emission). All scratch comes from `arena`.
-pub fn compute(arena: std.mem.Allocator, g: grid.Grid, occluder: []const bool, emission: []const u8) !void {
+/// `attenuate[id]` (optional, parallel to `occluder`) marks blocks that dim sky
+/// light as it passes down through them — water — so the seabed darkens with
+/// depth instead of staying full-bright. With the surface drawn semi-transparent,
+/// that depth gradient is what reads as deep vs. shallow water (the way BlueMap
+/// renders it), rather than fading the water itself to opaque.
+pub fn compute(arena: std.mem.Allocator, g: grid.Grid, occluder: []const bool, emission: []const u8, attenuate: ?[]const bool) !void {
     const n = g.sx * g.sy * g.sz;
     if (n == 0 or g.light.len != n) return;
 
@@ -41,11 +46,17 @@ pub fn compute(arena: std.mem.Allocator, g: grid.Grid, occluder: []const bool, e
         var x: usize = 0;
         while (x < g.sx) : (x += 1) {
             var y: usize = g.sy;
+            var level: u8 = MAX;
             while (y > 0) {
                 y -= 1;
                 const idx = g.index(x, y, z);
-                if (occluder[g.ids[idx]]) break; // first opaque from the top closes the column
-                sky[idx] = MAX;
+                const id = g.ids[idx];
+                if (occluder[id]) break; // first opaque from the top closes the column
+                sky[idx] = level;
+                // Water dims the column going down, so deep seabed is dark.
+                if (attenuate) |att| {
+                    if (att[id] and level > 0) level -= 1;
+                }
             }
         }
     }
@@ -216,7 +227,7 @@ test "sky light floods down and sideways into an opening, losing 1 per step" {
 
     const occluder = [_]bool{ false, true };
     const emission = [_]u8{ 0, 0 };
-    try compute(a, g, &occluder, &emission);
+    try compute(a, g, &occluder, &emission, null);
 
     const skyOf = struct {
         fn f(gg: grid.Grid, x: usize, y: usize, z: usize) u8 {
@@ -258,7 +269,7 @@ test "block light radiates from an emitter and is blocked by walls" {
 
     const occluder = [_]bool{ false, true, false };
     const emission = [_]u8{ 0, 0, 14 };
-    try compute(a, g, &occluder, &emission);
+    try compute(a, g, &occluder, &emission, null);
     const blkOf = struct {
         fn f(gg: grid.Grid, x: usize) u8 {
             return gg.light[gg.index(x, 0, 0)] & 0x0F;
@@ -267,4 +278,49 @@ test "block light radiates from an emitter and is blocked by walls" {
     try std.testing.expectEqual(@as(u8, 14), blkOf(g, 0));
     try std.testing.expectEqual(@as(u8, 13), blkOf(g, 1));
     try std.testing.expectEqual(@as(u8, 10), blkOf(g, 4));
+}
+
+test "water attenuates the sky-light column so the seabed darkens with depth" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+
+    // 1-wide column: air, then 4 water cells, then a stone floor. Water dims the
+    // column one level per block, so each cell below the surface is darker.
+    const sx: usize = 1;
+    const sy: usize = 7;
+    const sz: usize = 1;
+    var ids = [_]u16{0} ** (sx * sy * sz); // id 0 = air, 1 = water, 2 = stone
+    var lightbuf = [_]u8{0} ** (sx * sy * sz);
+    const names = [_][]const u8{ "", "minecraft:water", "minecraft:stone" };
+    var g: grid.Grid = .{
+        .sx = sx,
+        .sy = sy,
+        .sz = sz,
+        .min_x = 0,
+        .min_y = 0,
+        .min_z = 0,
+        .ids = &ids,
+        .light = &lightbuf,
+        .names = @constCast(&names),
+    };
+    // y: 6,5 air; 4,3,2,1 water; 0 stone.
+    for (1..5) |y| ids[g.index(0, y, 0)] = 1;
+    ids[g.index(0, 0, 0)] = 2;
+
+    const occluder = [_]bool{ false, false, true }; // only stone occludes
+    const attenuate = [_]bool{ false, true, false }; // water dims the column
+    const emission = [_]u8{ 0, 0, 0 };
+    try compute(a, g, &occluder, &emission, &attenuate);
+
+    const skyOf = struct {
+        fn f(gg: grid.Grid, y: usize) u8 {
+            return gg.light[gg.index(0, y, 0)] >> 4;
+        }
+    }.f;
+    try std.testing.expectEqual(@as(u8, 15), skyOf(g, 5)); // air, full sky
+    try std.testing.expectEqual(@as(u8, 15), skyOf(g, 4)); // first (surface) water cell
+    try std.testing.expectEqual(@as(u8, 14), skyOf(g, 3)); // one block down
+    try std.testing.expectEqual(@as(u8, 13), skyOf(g, 2));
+    try std.testing.expectEqual(@as(u8, 12), skyOf(g, 1)); // the seabed-facing cell is dimmer
 }

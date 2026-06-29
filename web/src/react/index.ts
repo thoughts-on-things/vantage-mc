@@ -18,6 +18,7 @@ export type {
   TileSource,
   TextureSource,
   ViewMode,
+  LightSettings,
   BiomeEntry,
   DecodedTile,
 } from '../three/index.js';

@@ -28,6 +28,13 @@ pub const Grid = struct {
     min_z: i32,
     /// Interned block id per voxel (0 = air).
     ids: []u16,
+    /// Packed light per voxel: `(sky << 4) | block`, each 0..15. Allocated here
+    /// but flood-filled by the mesher's light pass (see `light.zig`) — Minecraft
+    /// worlds frequently omit saved light, so we compute it the way BlueMap does.
+    /// Filled for *every* cell including air, because a face's brightness comes
+    /// from the light of the air cell it faces, not the block it belongs to.
+    /// Cells start at open sky (0xF0) before the light pass runs.
+    light: []u8 = &.{},
     /// names[0] = "" (air sentinel); names[id] is the block name for id>=1.
     names: [][]const u8,
     /// Parallel to `names`: the block-state key for each id ("" if stateless).
@@ -54,6 +61,20 @@ pub const Grid = struct {
         const uz: usize = @intCast(z);
         if (ux >= self.sx or uy >= self.sy or uz >= self.sz) return AIR;
         return self.ids[self.index(ux, uy, uz)];
+    }
+
+    /// Packed light at world-local grid coords; out-of-bounds (and ungenerated
+    /// cells) read as open sky (sky 15, block 0). Signed so the mesher can sample
+    /// the neighbour a face looks toward without special-casing edges.
+    pub fn lightAt(self: Grid, x: isize, y: isize, z: isize) u8 {
+        const open_sky: u8 = 15 << 4;
+        if (self.light.len == 0) return open_sky;
+        if (x < 0 or y < 0 or z < 0) return open_sky;
+        const ux: usize = @intCast(x);
+        const uy: usize = @intCast(y);
+        const uz: usize = @intCast(z);
+        if (ux >= self.sx or uy >= self.sy or uz >= self.sz) return open_sky;
+        return self.light[self.index(ux, uy, uz)];
     }
 
     pub fn nameOf(self: Grid, id: u16) []const u8 {
@@ -253,6 +274,7 @@ pub fn buildGrid(arena: std.mem.Allocator, loaded: []const chunk.Chunk, stats: *
         .min_y = min_y,
         .min_z = min_z,
         .ids = try arena.alloc(u16, sx * sy * sz),
+        .light = try arena.alloc(u8, sx * sy * sz),
         .names = undefined,
         .states = undefined,
         .bsx = bsx,
@@ -262,6 +284,7 @@ pub fn buildGrid(arena: std.mem.Allocator, loaded: []const chunk.Chunk, stats: *
         .biome_names = undefined,
     };
     @memset(grid.ids, AIR);
+    @memset(grid.light, 15 << 4); // default: open sky, no block light
     @memset(grid.biome_ids, 0);
 
     var interner = try Interner.init(arena, true);

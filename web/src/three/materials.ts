@@ -14,6 +14,7 @@ const VERT = /* glsl */ `
   in vec4 atint;
   in vec3 abcol;
   in float abiome;
+  in float alight;                                 // packed (sky<<4)|block, 0..255
   out vec2 vUv;
   out vec4 vTint;
   out vec3 vBcol;
@@ -21,12 +22,17 @@ const VERT = /* glsl */ `
   flat out float vBiome;
   out vec3 vN;
   out float vFog;
+  out float vSky;                                  // saved sky light, 0..1
+  out float vBlk;                                  // saved block light, 0..1
   void main() {
     vUv = uv;
     vTint = atint;
     vBcol = abcol;
     vLayer = alayer;
     vBiome = abiome;
+    float sky = floor(alight / 16.0);
+    vSky = sky / 15.0;
+    vBlk = (alight - sky * 16.0) / 15.0;
     vN = normalize(mat3(modelMatrix) * normal);
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     vFog = -mv.z;                                  // view-space depth for fog
@@ -45,6 +51,9 @@ const FRAG = /* glsl */ `
   uniform vec2 uFog;         // (near, far)
   uniform float uAlpha;      // terrain opacity (1)
   uniform float uWater;      // 1 = this is the water pass
+  uniform float uDay;        // daylight 0..1 (scales sky light; 1 = noon)
+  uniform float uAmbient;    // brightness floor at zero light (map readability)
+  uniform float uExposure;   // overall brightness/tone multiplier (1 = neutral)
   in vec2 vUv;
   in vec4 vTint;
   in vec3 vBcol;
@@ -52,11 +61,28 @@ const FRAG = /* glsl */ `
   flat in float vBiome;
   in vec3 vN;
   in float vFog;
+  in float vSky;
+  in float vBlk;
   out vec4 frag;
   const vec3 SKY = vec3(0.62, 0.72, 0.88);        // hemispheric sky ambient
   const vec3 GND = vec3(0.34, 0.31, 0.27);        // hemispheric ground ambient
   const vec3 SUN = vec3(1.0, 0.95, 0.84);         // warm key light
+  const vec3 TORCH = vec3(1.0, 0.80, 0.52);       // warm tint where block light leads
+
+  // Baked sky+block light -> a (brightness, colour) pair. Effective level is the
+  // brighter of (sky * daylight) and block light, eased and floored so caves read
+  // on a map; block-lit areas pick up a warm cast that sunlit ones don't.
+  void bakedLight(out float amt, out vec3 col) {
+    float sky = vSky * uDay;
+    float lvl = max(sky, vBlk);
+    float curve = lvl * lvl * (3.0 - 2.0 * lvl);  // smoothstep ease
+    amt = mix(uAmbient, 1.0, curve);
+    col = mix(vec3(1.0), TORCH, 0.6 * clamp(vBlk - sky, 0.0, 1.0));
+  }
+
   void main() {
+    float lightAmt; vec3 lightCol;
+    bakedLight(lightAmt, lightCol);
     vec4 t = texture(map, vec3(vUv, vLayer));
     if (t.a < 0.5) discard;                        // alpha cutout (grass overlay etc.)
     vec3 N = normalize(vN);
@@ -72,7 +98,7 @@ const FRAG = /* glsl */ `
       vec3 wcol = vTint.rgb * (0.82 + 0.20 * ripple);
       float depth = vTint.a;
       wcol = mix(wcol, wcol * vec3(0.55, 0.66, 0.85), depth);   // deep water cools + deepens
-      vec3 wlit = wcol * (0.55 + 0.40 * ambient + 0.45 * SUN * ndl);
+      vec3 wlit = wcol * (0.55 + 0.40 * ambient + 0.45 * SUN * ndl) * lightAmt * lightCol * uExposure;
       float wf = smoothstep(uFog.x, uFog.y, vFog);
       float wa = mix(0.35, 0.88, depth);                        // shallow clear -> deep opaque
       frag = vec4(mix(wlit, uFogColor, wf), wa);
@@ -89,7 +115,7 @@ const FRAG = /* glsl */ `
       float g = dot(base, vec3(0.299, 0.587, 0.114));
       base = mix(base, vec3(g) * 0.55, 0.82);      // fade biomes other than the selected one
     }
-    vec3 lit = base * (0.25 + 0.45 * ambient + 0.55 * SUN * ndl) * ao;
+    vec3 lit = base * (0.25 + 0.45 * ambient + 0.55 * SUN * ndl) * ao * lightAmt * lightCol * uExposure;
     float f = smoothstep(uFog.x, uFog.y, vFog);    // aerial depth into the horizon
     frag = vec4(mix(lit, uFogColor, f), uAlpha);
   }
@@ -116,6 +142,9 @@ export function createTerrainMaterial(texData: DecodedTextureArray): THREE.Shade
       uFog: { value: new THREE.Vector2(1e6, 2e6) }, // set from terrain extent
       uAlpha: { value: 1.0 },
       uWater: { value: 0.0 },
+      uDay: { value: 1.0 },        // noon; a day/night control can drive this
+      uAmbient: { value: 0.12 },   // caves stay readable rather than pure black
+      uExposure: { value: 1.0 },   // overall brightness/tone (live-tunable)
     },
     vertexShader: VERT,
     fragmentShader: FRAG,

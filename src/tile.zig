@@ -127,6 +127,8 @@ pub const VERSION4: u32 = 4;
 ///   u32 biome_count, then per biome: u16 name_len + name bytes.
 /// A section is: u32 V, u32 I, f32[3V] pos, f32[2V] uv, f32[V] layer,
 ///   u8[4V] color, i8[4V] normal, f32[V] biome, u32[I] indices.
+/// The normal's 4th byte (historically pad) carries packed sky/block light,
+/// `(sky << 4) | block` each 0..15 — free per-vertex light at no size cost.
 /// The solid section's header (V,I) sits at offset 8 so a VTL4 reader can share
 /// the VTL3 solid-mesh parse and just continue into the fluid section + legend.
 pub fn serializeWithFluid(arena: std.mem.Allocator, solid: mesh.Mesh2, fluid: mesh.Mesh2, biome_names: []const []const u8) ![]u8 {

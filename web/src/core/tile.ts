@@ -26,6 +26,9 @@ export interface MeshSection {
   colors?: Uint8Array;
   /** `vertexCount` per-vertex biome ids (biome tiles only). */
   biome?: Float32Array;
+  /** `vertexCount` packed saved light `(sky << 4) | block` (each 0..15), carried
+   *  in the normal's spare 4th byte. Textured tiles only. */
+  light?: Uint8Array;
 }
 
 /**
@@ -76,6 +79,13 @@ function expandNormals(packed: Int8Array, vertexCount: number): Float32Array {
   return out;
 }
 
+/** Pull the packed light byte (the normal's 4th component) out as unsigned. */
+function extractLight(packed: Int8Array, vertexCount: number): Uint8Array {
+  const out = new Uint8Array(vertexCount);
+  for (let i = 0; i < vertexCount; i++) out[i] = packed[i * 4 + 3]! & 0xff;
+  return out;
+}
+
 /** Read a textured+biome mesh section (VTL3 layout) at the reader's cursor. */
 function readTexturedBiomeSection(r: ByteReader): MeshSection {
   const vertexCount = r.u32();
@@ -87,7 +97,12 @@ function readTexturedBiomeSection(r: ByteReader): MeshSection {
   const normalsI8 = r.i8a(4 * vertexCount);
   const biome = r.f32(vertexCount);
   const indices = r.u32a(indexCount);
-  return { vertexCount, indexCount, positions, uv, layer, colors, biome, normals: expandNormals(normalsI8, vertexCount), indices };
+  return {
+    vertexCount, indexCount, positions, uv, layer, colors, biome,
+    normals: expandNormals(normalsI8, vertexCount),
+    light: extractLight(normalsI8, vertexCount),
+    indices,
+  };
 }
 
 /** Read the VTL5 surface map at the reader's cursor. */
@@ -150,7 +165,8 @@ export function parseTile(buffer: ArrayBuffer): DecodedTile {
     return {
       magic, version, textured: true, hasBiome: false,
       vertexCount, indexCount, positions, uv, layer, colors,
-      normals: expandNormals(normalsI8, vertexCount), indices,
+      normals: expandNormals(normalsI8, vertexCount),
+      light: extractLight(normalsI8, vertexCount), indices,
     };
   }
 

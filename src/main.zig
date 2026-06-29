@@ -53,9 +53,9 @@ pub fn main(init: std.process.Init) !void {
 fn usage() error{MissingArgument} {
     std.debug.print(
         \\usage:
-        \\  vantage render  <world-save-dir> [--assets <dir>] [--radius <chunks>]
+        \\  vantage render  <world-save-dir> [--assets <dir>] [--radius <chunks>] [--light flat|smooth]
         \\  vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
-        \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1]
+        \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1] [--light flat|smooth]
         \\  vantage histo   <region.mca> [localX localZ]
         \\  vantage biomes  <region.mca> [cx0 cz0 cx1 cz1]
         \\  vantage resolve <assets/minecraft dir> <block-name> [state e.g. axis=x]
@@ -63,6 +63,19 @@ fn usage() error{MissingArgument} {
         \\
     , .{});
     return error.MissingArgument;
+}
+
+/// Scan args for `--light flat|smooth` (default `smooth`). The bake-time light
+/// quality: `smooth` averages light over each vertex's neighbourhood, `flat`
+/// lights per face. Tolerant of position — both meshtex and render accept it.
+fn parseLightQuality(args: []const []const u8) mesh.LightQuality {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--light")) continue;
+        if (std.mem.eql(u8, args[i + 1], "flat")) return .flat;
+        if (std.mem.eql(u8, args[i + 1], "smooth")) return .smooth;
+    }
+    return .smooth;
 }
 
 fn runTexinfo(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
@@ -223,7 +236,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
-    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg);
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, parseLightQuality(args), null);
     const arr = try builder.finish();
 
     // Resolve human-readable biome names from the language file for the legend.
@@ -317,6 +330,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var assets_opt: ?[]const u8 = null;
     var radius: i32 = 6; // default window half-size in chunks (kept browser-loadable
     // until greedy meshing/LOD land; --radius widens it)
+    const quality = parseLightQuality(args);
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--assets") and i + 1 < args.len) {
@@ -396,15 +410,16 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     const g = try world.assembleWindow(a, loaded, cx0, cz0, cx1, cz1, &stats, read_node);
     read_node.end();
 
-    const mesh_node = root.start("meshing + textures", 0);
     const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = assets };
     var builder = try texture.Builder.init(a, init.io, assets);
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
-    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg);
+    // buildTextured reports its own "computing light" + "meshing geometry" phases.
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, quality, root);
+    const tex_node = root.start("building textures", 0);
     const arr = try builder.finish();
-    mesh_node.end();
+    tex_node.end();
 
     const write_node = root.start("writing tile", 0);
     const names = lang.Lang.load(a, init.io, assets);

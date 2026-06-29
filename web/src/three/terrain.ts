@@ -37,11 +37,16 @@ function biomeColors(biome: Float32Array, vertexCount: number, palette: Rgb[], f
   return out;
 }
 
-/** Attach the shared textured-mesh attributes (uv/layer/tint/biome/biome-colour). */
+/** Attach the shared textured-mesh attributes (uv/layer/tint/biome/biome-colour/light). */
 function applyTexturedAttributes(geom: THREE.BufferGeometry, section: MeshSection, palette: Rgb[], waterFallback: Rgb): void {
   geom.setAttribute('uv', new THREE.BufferAttribute(section.uv!, 2));
   geom.setAttribute('alayer', new THREE.BufferAttribute(section.layer!, 1));
   geom.setAttribute('atint', new THREE.BufferAttribute(section.colors!, 4, true));
+
+  // Packed sky/block light (0..255). Older tiles without it read as full sky.
+  const light = section.light ?? new Uint8Array(section.vertexCount).fill(0xf0);
+  const lightF = new Float32Array(light); // exact 0..255 → unpacked in the shader
+  geom.setAttribute('alight', new THREE.BufferAttribute(lightF, 1));
   if (section.biome) {
     geom.setAttribute('abiome', new THREE.BufferAttribute(section.biome, 1));
     geom.setAttribute('abcol', new THREE.BufferAttribute(biomeColors(section.biome, section.vertexCount, palette, waterFallback), 3));

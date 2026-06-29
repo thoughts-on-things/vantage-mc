@@ -7,6 +7,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import {
   VantageViewer as Engine,
   type BiomeEntry,
+  type LightSettings,
   type TextureSource,
   type TileInfo,
   type TileSource,
@@ -26,6 +27,9 @@ export interface VantageViewerProps {
   antialias?: boolean;
   /** Device pixel-ratio cap. Default `2`. Changing this remounts the canvas. */
   maxPixelRatio?: number;
+  /** Live lighting appearance (ambient floor, daylight, exposure). Applied on
+   *  change without re-baking — drive it from a slider for a day/night control. */
+  light?: LightSettings;
   className?: string;
   style?: CSSProperties;
   /** Called once a tile has loaded and been framed. */
@@ -67,6 +71,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     view = 'orbit',
     antialias = true,
     maxPixelRatio = 2,
+    light,
     className,
     style,
     onLoad,
@@ -94,7 +99,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     injectStyles();
     const el = canvasRef.current;
     if (!el) return;
-    const v = new Engine(el, { antialias, maxPixelRatio, view });
+    const v = new Engine(el, { antialias, maxPixelRatio, view, light });
     engineRef.current = v;
     setEngine(v);
 
@@ -115,7 +120,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
       engineRef.current = null;
       setEngine(null);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- view is an initial-only seed; reload handles changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- view/light are initial-only seeds; reload + setLight handle changes
   }, [antialias, maxPixelRatio]);
 
   // (Re)load whenever the source changes.
@@ -135,6 +140,11 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
       cancelled = true;
     };
   }, [engine, tile, textures, view]);
+
+  // Apply live lighting changes (no remount, no re-load).
+  useEffect(() => {
+    if (engine && light) engine.setLight(light);
+  }, [engine, light?.ambient, light?.daylight, light?.exposure]);
 
   const ctx = useMemo<VantageContextValue>(
     () => ({

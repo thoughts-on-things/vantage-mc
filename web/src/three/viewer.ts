@@ -21,6 +21,19 @@ import { buildTerrain } from './terrain.js';
 /** How the camera frames the world on load. */
 export type ViewMode = 'orbit' | 'top';
 
+/** Live, render-time lighting appearance — tunable without re-baking the tile. */
+export interface LightSettings {
+  /** Brightness floor at zero baked light, 0..1. Higher = more readable caves.
+   *  Default `0.12`. */
+  ambient?: number;
+  /** Daylight factor scaling sky light, 0..1 (0 = night, 1 = noon). Default `1`. */
+  daylight?: number;
+  /** Overall brightness/tone multiplier (1 = neutral). Default `1`. */
+  exposure?: number;
+}
+
+const DEFAULT_LIGHT: Required<LightSettings> = { ambient: 0.12, daylight: 1, exposure: 1 };
+
 export interface VantageViewerOptions {
   /** Initial camera framing. Default `'orbit'`. */
   view?: ViewMode;
@@ -28,6 +41,8 @@ export interface VantageViewerOptions {
   antialias?: boolean;
   /** Device pixel-ratio cap. Default `2`. */
   maxPixelRatio?: number;
+  /** Initial lighting appearance (live-tunable later via {@link VantageViewer.setLight}). */
+  light?: LightSettings;
 }
 
 /** A tile source: a URL to fetch, a raw buffer, or already-decoded data. */
@@ -110,6 +125,9 @@ export class VantageViewer {
   private mixTarget = 0;
   private mixCurrent = 0;
 
+  // Live lighting appearance (applied to the shader on load and on change).
+  private light: Required<LightSettings> = { ...DEFAULT_LIGHT };
+
   // Hover picking.
   private readonly raycaster = new THREE.Raycaster();
   private readonly ndc = new THREE.Vector2();
@@ -124,7 +142,9 @@ export class VantageViewer {
       view: options.view ?? 'orbit',
       antialias: options.antialias ?? true,
       maxPixelRatio: options.maxPixelRatio ?? 2,
+      light: options.light ?? {},
     };
+    if (options.light) this.light = { ...this.light, ...options.light };
 
     this.renderer = new THREE.WebGLRenderer({ antialias: this.options.antialias });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, this.options.maxPixelRatio));
@@ -185,6 +205,7 @@ export class VantageViewer {
     this._biomes = summarizeBiomes(tile, built.palette);
     this.frameCamera(view);
     this.applyBiomeUniforms();
+    this.applyLight();
 
     const size = new THREE.Vector3();
     this.bounds.getSize(size);
@@ -261,6 +282,27 @@ export class VantageViewer {
   private applyBiomeUniforms(): void {
     if (!this.shader) return;
     this.shader.uniforms['uHi']!.value = this.biomeEnabled && this.highlight !== null ? this.highlight : -1;
+  }
+
+  // --- lighting appearance ---------------------------------------------------
+
+  /** The current live lighting appearance. */
+  get lightSettings(): Required<LightSettings> {
+    return { ...this.light };
+  }
+
+  /** Update the live lighting appearance (merges with current; takes effect
+   *  immediately, no re-bake). */
+  setLight(settings: LightSettings): void {
+    this.light = { ...this.light, ...settings };
+    this.applyLight();
+  }
+
+  private applyLight(): void {
+    if (!this.shader) return;
+    this.shader.uniforms['uAmbient']!.value = this.light.ambient;
+    this.shader.uniforms['uDay']!.value = this.light.daylight;
+    this.shader.uniforms['uExposure']!.value = this.light.exposure;
   }
 
   // --- events ---------------------------------------------------------------

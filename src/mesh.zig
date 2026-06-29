@@ -14,6 +14,7 @@ const blocks = @import("blocks.zig");
 const model = @import("model.zig");
 const texture = @import("texture.zig");
 const biome = @import("biome.zig");
+const lighting = @import("light.zig");
 
 pub const Mesh = struct {
     positions: std.ArrayList(f32) = .empty, // 3 per vertex (world coords)
@@ -174,6 +175,11 @@ const AO_LUT = [4]u8{ 130, 178, 218, 255 };
 /// blends over the already-drawn opaque one, so the seabed shows through.
 pub const Built = struct { solid: Mesh2 = .{}, fluid: Mesh2 = .{} };
 
+/// Baked-light quality. `flat` lights each face by the single cell it faces (hard
+/// per-face steps). `smooth` averages the four cells around each vertex (the AO
+/// neighbourhood) for soft, BlueMap-grade gradients. Set at bake time (`--light`).
+pub const LightQuality = enum { flat, smooth };
+
 /// Build the textured mesh. `maps` are the biome colormaps and `reg` the
 /// data-pack biome registry used to resolve each tinted face's colour from the
 /// biome at its block position. Water is split into a transparent `fluid` mesh
@@ -185,6 +191,8 @@ pub fn buildTextured(
     tex: *texture.Builder,
     maps: biome.Colormaps,
     reg: *biome.Registry,
+    quality: LightQuality,
+    progress: ?std.Progress.Node,
 ) !Built {
     var mesh: Mesh2 = .{}; // opaque terrain
     var fluid: Mesh2 = .{}; // transparent water
@@ -213,8 +221,20 @@ pub fn buildTextured(
     }
     const water_layer: f32 = @floatFromInt(tex.layerFor("block/water_still"));
 
+    // Compute sky + block light and flood-fill it into the grid, so each face can
+    // read the light of the cell it faces (see light.zig). This world — like many
+    // — saves no light in its region files, so we derive it the way BlueMap does.
+    const emission = try arena.alloc(u8, g.names.len);
+    for (emission, 0..) |*e, id| e.* = if (id == 0) 0 else lighting.emissionOf(g.nameOf(@intCast(id)));
+    const light_node: ?std.Progress.Node = if (progress) |p| p.start("computing light", 0) else null;
+    try lighting.compute(arena, g, id_occluder, emission);
+    if (light_node) |n| n.end();
+
+    const mesh_node: ?std.Progress.Node = if (progress) |p| p.start("meshing geometry", g.sy) else null;
+    defer if (mesh_node) |n| n.end();
     var y: usize = 0;
     while (y < g.sy) : (y += 1) {
+        if (mesh_node) |n| n.completeOne();
         var z: usize = 0;
         while (z < g.sz) : (z += 1) {
             var x: usize = 0;
@@ -235,23 +255,32 @@ pub fn buildTextured(
                 }
 
                 const cb = cache[id].?; // populated by the occluder pre-pass
+                const xi: isize = @intCast(x);
+                const yi: isize = @intCast(y);
+                const zi: isize = @intCast(z);
                 for (cb.faces) |face| {
                     if (face.cull) |c| {
                         const off = dirOffset(c);
-                        if (id_occluder[
-                            g.at(
-                                @as(isize, @intCast(x)) + off[0],
-                                @as(isize, @intCast(y)) + off[1],
-                                @as(isize, @intCast(z)) + off[2],
-                            )
-                        ]) continue;
+                        if (id_occluder[g.at(xi + off[0], yi + off[1], zi + off[2])]) continue;
                     }
                     const rgb = tint_colors[bid * nkind + @intFromEnum(face.tint)];
                     var ao = [4]u8{ 255, 255, 255, 255 };
                     if (face.ao) {
                         for (0..4) |ci| ao[ci] = cornerAo(g, id_occluder, x, y, z, face.ao_off[ci]);
                     }
-                    try emitBaked(arena, &mesh, wx, wy, wz, face, rgb, ao, bid);
+                    // A face is lit by the cell it faces (the air the cullface
+                    // looks into); billboards with no cullface read their own cell.
+                    const lo: [3]i8 = if (face.cull) |c| dirOffset(c) else .{ 0, 0, 0 };
+                    const flat_l = g.lightAt(xi + lo[0], yi + lo[1], zi + lo[2]);
+                    var lights = [4]u8{ flat_l, flat_l, flat_l, flat_l };
+                    // Smooth lighting: average each vertex's neighbourhood (same
+                    // cells as AO). Only full, cullface-bearing faces have the AO
+                    // offsets; billboards stay flat-lit.
+                    if (quality == .smooth and face.ao) {
+                        const base = [3]i8{ face.verts[0].n[0], face.verts[0].n[1], face.verts[0].n[2] };
+                        for (0..4) |ci| lights[ci] = cornerLight(g, id_occluder, x, y, z, base, face.ao_off[ci]);
+                    }
+                    try emitBaked(arena, &mesh, wx, wy, wz, face, rgb, ao, lights, bid);
                 }
 
                 // Waterlogged block (seagrass, kelp, waterlogged stair/…): it just
@@ -322,6 +351,7 @@ fn emitFluid(
     for (tex_faces) |tf| {
         const nb = g.at(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2]);
         if (id_occluder[nb] or waterish[nb]) continue; // hidden by solid / merged with water
+        const lp: i8 = @bitCast(g.lightAt(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2]));
         const base = mesh.vertex_count;
         for (0..4) |i| {
             const cs = tf.corners[i];
@@ -334,7 +364,7 @@ fn emitFluid(
             try mesh.uv.appendSlice(arena, &.{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(1 - tf.uvsel[i][1]) });
             try mesh.layer.append(arena, layer);
             try mesh.color.appendSlice(arena, &.{ rgb[0], rgb[1], rgb[2], depth });
-            try mesh.normals.appendSlice(arena, &.{ tf.n[0], tf.n[1], tf.n[2], 0 });
+            try mesh.normals.appendSlice(arena, &.{ tf.n[0], tf.n[1], tf.n[2], lp });
             try mesh.biome.append(arena, bid_f);
         }
         try mesh.indices.appendSlice(arena, &.{ base, base + 1, base + 2, base, base + 2, base + 3 });
@@ -357,6 +387,36 @@ fn cornerAo(g: grid.Grid, id_occluder: []const bool, x: usize, y: usize, z: usiz
     const cn = occ(g, id_occluder, x, y, z, off[2]);
     const level: usize = if (s1 == 1 and s2 == 1) 0 else 3 - @as(usize, s1 + s2 + cn);
     return AO_LUT[level];
+}
+
+/// Smooth per-vertex light: average the sky and block light of the (up to four)
+/// non-occluding cells touching this corner — the outward neighbour (`base`) plus
+/// the two edge cells and the diagonal (`off`, the same neighbourhood AO uses).
+/// Occluders are skipped so a vertex by a wall isn't darkened twice (that's the
+/// AO term's job); if every cell is solid, fall back to the outward cell.
+fn cornerLight(g: grid.Grid, id_occluder: []const bool, x: usize, y: usize, z: usize, base: [3]i8, off: [3][3]i8) u8 {
+    var sky: u32 = 0;
+    var blk: u32 = 0;
+    var cnt: u32 = 0;
+    const cells = [4][3]i8{ base, off[0], off[1], off[2] };
+    for (cells) |c| {
+        const ix = @as(isize, @intCast(x)) + c[0];
+        const iy = @as(isize, @intCast(y)) + c[1];
+        const iz = @as(isize, @intCast(z)) + c[2];
+        if (id_occluder[g.at(ix, iy, iz)]) continue;
+        const l = g.lightAt(ix, iy, iz);
+        sky += l >> 4;
+        blk += l & 0x0F;
+        cnt += 1;
+    }
+    if (cnt == 0) return g.lightAt(
+        @as(isize, @intCast(x)) + base[0],
+        @as(isize, @intCast(y)) + base[1],
+        @as(isize, @intCast(z)) + base[2],
+    );
+    const s: u8 = @intCast(sky / cnt);
+    const b: u8 = @intCast(blk / cnt);
+    return (s << 4) | b;
 }
 
 fn occ(g: grid.Grid, id_occluder: []const bool, x: usize, y: usize, z: usize, o: [3]i8) u8 {
@@ -535,9 +595,10 @@ fn addv(a: [3]i8, b: [3]i8) [3]i8 {
     return .{ a[0] + b[0], a[1] + b[1], a[2] + b[2] };
 }
 
-/// `rgb` is the face's biome tint (shared by all 4 verts); `ao` is the per-vertex
-/// ambient-occlusion brightness, carried in the colour's alpha channel.
-fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, wx: f32, wy: f32, wz: f32, face: BakedFace, rgb: [3]u8, ao: [4]u8, bid: usize) !void {
+/// `rgb` is the face's biome tint (shared by all 4 verts); `ao` and `light` are
+/// per-vertex — AO brightness in the colour's alpha, packed sky/block light in
+/// the normal's spare 4th byte (equal across verts for flat-quality faces).
+fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, wx: f32, wy: f32, wz: f32, face: BakedFace, rgb: [3]u8, ao: [4]u8, light: [4]u8, bid: usize) !void {
     const base = mesh.vertex_count;
     const bid_f: f32 = @floatFromInt(bid);
     for (face.verts, 0..) |v, i| {
@@ -545,7 +606,7 @@ fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, wx: f32, wy: f32, wz: f32, 
         try mesh.uv.appendSlice(arena, &.{ v.uv[0], v.uv[1] });
         try mesh.layer.append(arena, face.layer);
         try mesh.color.appendSlice(arena, &.{ rgb[0], rgb[1], rgb[2], ao[i] });
-        try mesh.normals.appendSlice(arena, &.{ v.n[0], v.n[1], v.n[2], 0 });
+        try mesh.normals.appendSlice(arena, &.{ v.n[0], v.n[1], v.n[2], @bitCast(light[i]) });
         try mesh.biome.append(arena, bid_f);
     }
     try mesh.indices.appendSlice(arena, &.{ base + 0, base + 1, base + 2, base + 0, base + 2, base + 3 });

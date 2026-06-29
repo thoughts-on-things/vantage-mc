@@ -63,6 +63,12 @@ const DEFAULT_DISPLAY: Required<DisplaySettings> = {
   renderScale: 1,
 };
 
+/** Keys that drive the keyboard fly-pan (lower-cased). */
+const PAN_KEYS = new Set([
+  'w', 'a', 's', 'd', 'q', 'e', 'shift',
+  'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
+]);
+
 export interface VantageViewerOptions {
   /** Initial camera framing. Default `'orbit'`. */
   view?: ViewMode;
@@ -169,6 +175,14 @@ export class VantageViewer {
   private dragging = false;
   private lastHover = -2; // sentinel distinct from -1 (off-terrain)
 
+  // Keyboard fly-pan: pressed keys + last-frame time for frame-rate-independent
+  // movement. WASD/arrows pan over the ground, Q/E drop/raise, Shift = faster.
+  private readonly keys = new Set<string>();
+  private lastFrameMs = 0;
+  private keydownHandler?: (e: KeyboardEvent) => void;
+  private keyupHandler?: (e: KeyboardEvent) => void;
+  private blurHandler?: () => void;
+
   constructor(container: HTMLElement | string, options: VantageViewerOptions = {}) {
     this.container = resolveContainer(container);
     this.options = {
@@ -262,6 +276,47 @@ export class VantageViewer {
     });
   }
 
+  /** Where the *land* is, from the surface heightmap: the elevation-weighted
+   *  centroid (so flat ocean is ignored) and the span of the elevated region.
+   *  Falls back to the geometric centre for tiles without a surface map. Keeps
+   *  the demo's first frame on the interesting terrain, not out over the water. */
+  private landTarget(center: THREE.Vector3, size: THREE.Vector3): { x: number; z: number; span: number } {
+    const s = this.tile?.surface;
+    const names = this.tile?.biomeNames;
+    const fallback = { x: center.x, z: center.z, span: Math.max(size.x, size.z) };
+    if (!s) return fallback;
+    const { width, depth, originX, originZ, height, biome } = s;
+    // Centre on the dry landmass: skip empty columns and water biomes (ocean/
+    // river), then take the plain centroid + extent of what's left. Robust to
+    // ocean-heavy worlds and not biased toward the tallest peaks.
+    let n = 0;
+    let sx = 0;
+    let sz = 0;
+    let minx = Infinity;
+    let maxx = -Infinity;
+    let minz = Infinity;
+    let maxz = -Infinity;
+    for (let z = 0; z < depth; z++) {
+      for (let x = 0; x < width; x++) {
+        const i = z * width + x;
+        if (height[i]! < 1) continue; // empty-column sentinel
+        const nm = names?.[biome[i]!] ?? '';
+        if (nm.includes('ocean') || nm.includes('river')) continue; // water, not land
+        const wx = originX + x;
+        const wz = originZ + z;
+        n++;
+        sx += wx;
+        sz += wz;
+        if (wx < minx) minx = wx;
+        if (wx > maxx) maxx = wx;
+        if (wz < minz) minz = wz;
+        if (wz > maxz) maxz = wz;
+      }
+    }
+    if (n < 16) return fallback; // almost all water ⇒ just frame the whole thing
+    return { x: sx / n, z: sz / n, span: Math.max(maxx - minx, maxz - minz, 48) * 1.15 };
+  }
+
   private frameCamera(view: ViewMode): void {
     const center = new THREE.Vector3();
     const size = new THREE.Vector3();
@@ -275,14 +330,24 @@ export class VantageViewer {
       this.controls.target.set(center.x, this.bounds.max.y, center.z);
       this.camera.position.set(center.x, this.bounds.max.y + span * 0.9, center.z + 0.001);
     } else {
-      this.controls.target.copy(center);
-      this.camera.position.set(center.x + maxDim * 0.7, center.y + maxDim * 0.6, center.z + maxDim * 0.7);
+      // Aim at the land (not the volume's centre — that can sit out over ocean,
+      // and the surface lives near the top of a tall box with caves far below).
+      // A 3/4 aerial angle fits the elevated terrain in frame.
+      const land = this.landTarget(center, size);
+      const surfaceY = this.bounds.max.y - size.y * 0.18;
+      this.controls.target.set(land.x, surfaceY, land.z);
+      // A fairly steep 3/4 aerial angle, framed close enough that clear terrain
+      // (not fogged distance) fills the view — large maps are mostly ocean that
+      // otherwise washes into the horizon and reads as empty sky.
+      const dir = new THREE.Vector3(0.4, 0.85, 0.4).normalize();
+      this.camera.position.copy(this.controls.target).addScaledVector(dir, land.span * 0.62);
     }
     this.camera.far = maxDim * 12;
     this.camera.updateProjectionMatrix();
 
-    // Fog fades terrain into the horizon over the back half of the extent.
-    if (this.shader) this.shader.uniforms['uFog']!.value.set(maxDim * 0.85, maxDim * 2.4);
+    // Fog fades the far edge into the horizon for depth, but kept well back so the
+    // map itself reads crisply at the default framing (the haze dial tightens it).
+    if (this.shader) this.shader.uniforms['uFog']!.value.set(maxDim * 1.2, maxDim * 3.2);
   }
 
   // --- biome layer ----------------------------------------------------------
@@ -395,6 +460,8 @@ export class VantageViewer {
 
   private bindInput(): void {
     const dom = this.renderer.domElement;
+    dom.style.cursor = 'grab'; // affordance: the map is draggable
+    dom.style.touchAction = 'none';
     dom.addEventListener('pointermove', (e) => {
       const rect = dom.getBoundingClientRect();
       this.ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -406,14 +473,68 @@ export class VantageViewer {
       this.pointerInside = false;
       this.pointerDirty = true;
     });
-    // Skip picking while orbiting/panning so interaction stays perfectly smooth.
+    // Skip picking while orbiting/panning so interaction stays perfectly smooth,
+    // and show a "grabbing" cursor for the duration of the drag.
     this.controls.addEventListener('start', () => {
       this.dragging = true;
+      dom.style.cursor = 'grabbing';
       this.emitHover(-1);
     });
     this.controls.addEventListener('end', () => {
       this.dragging = false;
+      dom.style.cursor = 'grab';
     });
+
+    // Keyboard fly-pan. Listen on window so the map responds without click-to-focus,
+    // but ignore keys while a form control (e.g. a slider) is focused, and let the
+    // browser keep its own shortcuts (Cmd/Ctrl/Alt chords).
+    const isTyping = () => {
+      const el = document.activeElement;
+      return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || (el as HTMLElement).isContentEditable);
+    };
+    this.keydownHandler = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || isTyping()) return;
+      const k = e.key.toLowerCase();
+      if (PAN_KEYS.has(k)) {
+        this.keys.add(k);
+        e.preventDefault(); // stop arrows/space from scrolling the page
+      }
+    };
+    this.keyupHandler = (e: KeyboardEvent) => this.keys.delete(e.key.toLowerCase());
+    this.blurHandler = () => this.keys.clear(); // never get stuck "held" after focus loss
+    window.addEventListener('keydown', this.keydownHandler);
+    window.addEventListener('keyup', this.keyupHandler);
+    window.addEventListener('blur', this.blurHandler);
+  }
+
+  /** Frame-rate-independent keyboard fly-pan: move the camera and its target
+   *  together over the ground (WASD/arrows), or up/down (Q/E), at a speed that
+   *  scales with zoom so it feels the same close-up and far-out. Shift = ×3. */
+  private panKeys(dtMs: number): void {
+    if (this.keys.size === 0) return;
+    const k = this.keys;
+    const fwd = new THREE.Vector3();
+    this.camera.getWorldDirection(fwd);
+    fwd.y = 0;
+    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+    fwd.normalize();
+    const right = new THREE.Vector3(-fwd.z, 0, fwd.x); // 90° CW on the ground plane
+    const move = new THREE.Vector3();
+    if (k.has('w') || k.has('arrowup')) move.add(fwd);
+    if (k.has('s') || k.has('arrowdown')) move.sub(fwd);
+    if (k.has('d') || k.has('arrowright')) move.add(right);
+    if (k.has('a') || k.has('arrowleft')) move.sub(right);
+    let vy = 0;
+    if (k.has('e')) vy += 1;
+    if (k.has('q')) vy -= 1;
+    if (move.lengthSq() === 0 && vy === 0) return;
+
+    const dist = this.camera.position.distanceTo(this.controls.target);
+    const speed = dist * 0.001 * dtMs * (k.has('shift') ? 3 : 1); // ~zoom-relative
+    if (move.lengthSq() > 0) move.normalize().multiplyScalar(speed);
+    move.y = vy * speed;
+    this.camera.position.add(move);
+    this.controls.target.add(move);
   }
 
   private emitHover(id: number): void {
@@ -435,6 +556,10 @@ export class VantageViewer {
   }
 
   private frame(): void {
+    const now = performance.now();
+    const dtMs = this.lastFrameMs ? Math.min(now - this.lastFrameMs, 50) : 16.7; // clamp tab-switch jumps
+    this.lastFrameMs = now;
+    this.panKeys(dtMs);
     this.controls.update();
     this.sky.position.copy(this.camera.position); // keep the dome centred on the eye
 
@@ -471,6 +596,9 @@ export class VantageViewer {
   dispose(): void {
     this.renderer.setAnimationLoop(null);
     this.resizeObserver.disconnect();
+    if (this.keydownHandler) window.removeEventListener('keydown', this.keydownHandler);
+    if (this.keyupHandler) window.removeEventListener('keyup', this.keyupHandler);
+    if (this.blurHandler) window.removeEventListener('blur', this.blurHandler);
     this.controls.dispose();
     this.disposeCurrent();
     this.emitter.clear();

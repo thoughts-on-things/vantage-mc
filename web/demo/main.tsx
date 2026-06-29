@@ -41,7 +41,7 @@ function Hud() {
         {verts} verts · {tris} tris · {dims} blocks
       </div>
       <div style={{ color: '#6f86ab', marginTop: 7, fontSize: 11 }}>
-        drag pan · right-drag rotate · scroll zoom · <b>B</b> biomes · hover to identify
+        drag / <b>WASD</b> pan · right-drag rotate · <b>Q/E</b> up/down · scroll zoom · <b>B</b> biomes
       </div>
     </div>
   );

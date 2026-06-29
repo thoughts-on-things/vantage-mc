@@ -98,7 +98,8 @@ const FRAG = /* glsl */ `
     float lightAmt; vec3 lightCol;
     bakedLight(lightAmt, lightCol);
     vec4 t = texture(map, vec3(vUv, vLayer), -uSharpness); // negative bias = sharper
-    if (t.a < 0.5) discard;                        // alpha cutout (grass overlay etc.)
+    if (t.a < 0.05) discard;                       // drop only fully-empty texels; the
+                                                   // fractional edge becomes MSAA coverage
     vec3 N = normalize(vN);
     vec3 ambient = mix(GND, SKY, 0.5 + 0.5 * N.y); // sky above, earth below
     float ndl = max(dot(N, normalize(lightDir)), 0.0);
@@ -131,7 +132,7 @@ const FRAG = /* glsl */ `
     }
     vec3 lit = grade(base * (0.25 + 0.45 * ambient + 0.55 * SUN * ndl) * ao * lightAmt * lightCol * uExposure);
     float f = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity; // aerial depth into the horizon
-    frag = vec4(mix(lit, uFogColor, f), uAlpha);
+    frag = vec4(mix(lit, uFogColor, f), uAlpha * t.a);        // alpha → MSAA coverage (foliage AA)
   }
 `;
 
@@ -173,6 +174,12 @@ export function createTerrainMaterial(texData: DecodedTextureArray): THREE.Shade
     },
     vertexShader: VERT,
     fragmentShader: FRAG,
+    // Alpha-to-coverage turns the (mip-averaged, fractional) cutout edge of leaves
+    // and grass into MSAA sample coverage instead of a hard discard — the standard
+    // fix for the foliage shimmer/"noise" you get when moving the camera. Needs the
+    // renderer's MSAA (antialias:true), which is on. Opaque blocks (alpha 1) are
+    // unaffected. The water material stays transparent and ignores this.
+    alphaToCoverage: true,
   });
 }
 

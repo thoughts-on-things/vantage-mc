@@ -315,7 +315,10 @@ export class VantageViewer {
    *  alpha-to-coverage survive), then RenderPass → GTAO → bloom → OutputPass. */
   private buildComposer(): void {
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
-    const samples = this.options.antialias ? 4 : 0;
+    // 8× MSAA (GPU-clamped): the high-frequency foliage silhouette is the worst
+    // shimmer source when the camera moves, and more coverage samples smooth those
+    // edges (and the alpha-to-coverage cutouts), cutting the frame-to-frame crawl.
+    const samples = this.options.antialias ? 8 : 0;
     const target = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples });
     this.composer = new EffectComposer(this.renderer, target);
     this.composer.setPixelRatio(this.renderer.getPixelRatio());

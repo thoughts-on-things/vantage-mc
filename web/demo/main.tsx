@@ -48,8 +48,12 @@ function Hud() {
 }
 
 function App() {
+  // Dev-only: expose the engine for manual poking in the console.
+  const ref = (e: import('../src/three/index.js').VantageViewer | null) => {
+    (window as unknown as { __vantage?: unknown }).__vantage = e;
+  };
   return (
-    <VantageViewer tile="/terrain.vtile" textures="/terrain.vtexarr" view={view}>
+    <VantageViewer ref={ref} tile="/terrain.vtile" textures="/terrain.vtexarr" view={view}>
       <Hud />
       <BiomeLayer legend hover defaultEnabled={biomeOpen} />
       <LightPanel />

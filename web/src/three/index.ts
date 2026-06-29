@@ -11,6 +11,7 @@ export {
   SKY_HORIZON,
 } from './materials.js';
 export { pickBiome } from './pick.js';
+export { MapControls, type MapControlsOptions, type HeightSampler } from './controls.js';
 export {
   VantageViewer,
   type VantageViewerOptions,

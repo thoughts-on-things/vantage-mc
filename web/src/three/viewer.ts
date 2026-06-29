@@ -4,7 +4,7 @@
 // and emits events. The React components are thin wrappers over this.
 
 import * as THREE from 'three';
-import { MapControls } from 'three/examples/jsm/controls/MapControls.js';
+import { MapControls, type HeightSampler } from './controls.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
@@ -17,6 +17,7 @@ import {
   type BiomeEntry,
   type DecodedTextureArray,
   type DecodedTile,
+  type SurfaceMap,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
 import { createSky, SKY_HORIZON } from './materials.js';
@@ -129,12 +130,6 @@ const DEFAULT_DISPLAY: Required<DisplaySettings> = { ...CINEMATIC_DISPLAY };
  *  cost — see `applyDisplay`). */
 const GTAO_VERTEX_BUDGET = 3_500_000;
 
-/** Keys that drive the keyboard fly-pan (lower-cased). */
-const PAN_KEYS = new Set([
-  'w', 'a', 's', 'd', 'q', 'e', 'shift',
-  'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
-]);
-
 export interface VantageViewerOptions {
   /** Initial camera framing. Default `'orbit'`. */
   view?: ViewMode;
@@ -203,6 +198,21 @@ function resolveContainer(container: HTMLElement | string): HTMLElement {
   return el;
 }
 
+/** A nearest-column terrain-height lookup over the tile's surface map, for the
+ *  controls' terrain-riding pivot. Returns `null` outside the map or on empty
+ *  columns so the controls can relax toward the floor. */
+function makeHeightSampler(surface: SurfaceMap | undefined): HeightSampler | null {
+  if (!surface) return null;
+  const { width, depth, originX, originZ, height } = surface;
+  return (x: number, z: number): number | null => {
+    const cx = Math.floor(x - originX);
+    const cz = Math.floor(z - originZ);
+    if (cx < 0 || cz < 0 || cx >= width || cz >= depth) return null;
+    const h = height[cz * width + cx]!;
+    return h < 1 ? null : h; // <1 = empty-column sentinel
+  };
+}
+
 export class VantageViewer {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene: THREE.Scene;
@@ -254,13 +264,8 @@ export class VantageViewer {
   private dragging = false;
   private lastHover = -2; // sentinel distinct from -1 (off-terrain)
 
-  // Keyboard fly-pan: pressed keys + last-frame time for frame-rate-independent
-  // movement. WASD/arrows pan over the ground, Q/E drop/raise, Shift = faster.
-  private readonly keys = new Set<string>();
+  // Last-frame timestamp, for frame-rate-independent control inertia.
   private lastFrameMs = 0;
-  private keydownHandler?: (e: KeyboardEvent) => void;
-  private keyupHandler?: (e: KeyboardEvent) => void;
-  private blurHandler?: () => void;
 
   constructor(container: HTMLElement | string, options: VantageViewerOptions = {}) {
     this.container = resolveContainer(container);
@@ -294,16 +299,11 @@ export class VantageViewer {
 
     this.camera = new THREE.PerspectiveCamera(60, 1, 0.5, 8000);
     this.camera.layers.enable(1); // beauty camera sees terrain (0) + sky/water (1)
-    // Map-style navigation (à la BlueMap): left-drag pans across the ground,
-    // right-drag rotates/tilts, wheel zooms toward the cursor. Damping gives it
-    // weight; the polar clamp keeps the camera above the horizon.
-    this.controls = new MapControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.08;
-    this.controls.zoomToCursor = true;
-    this.controls.screenSpacePanning = false; // pan parallel to the ground plane
-    this.controls.maxPolarAngle = Math.PI * 0.495; // don't dip below the horizon
-    this.controls.minDistance = 2;
+    // BlueMap-faithful map navigation: left-drag grabs and pans the ground,
+    // right-drag (or alt+left) orbits — horizontal rotates, vertical tilts —
+    // wheel zooms. Everything carries inertia; tilt auto-flattens to top-down as
+    // you zoom out, and the pivot rides the terrain surface. See controls.ts.
+    this.controls = new MapControls(this.camera, this.renderer.domElement, { minDistance: 3 });
 
     this.bindInput();
     this.buildComposer();
@@ -378,6 +378,9 @@ export class VantageViewer {
       this.scene.add(sun);
     }
 
+    // Let the controls' pivot ride the terrain surface (BlueMap's feel), from
+    // the same top-down heightmap the biome picker uses.
+    this.controls.heightAt = makeHeightSampler(tile.surface);
     this._biomes = summarizeBiomes(tile, built.palette);
     this.frameCamera(view);
     this.applyBiomeUniforms();
@@ -444,23 +447,34 @@ export class VantageViewer {
     const maxDim = Math.max(size.x, size.y, size.z);
     this.controls.maxDistance = maxDim * 4; // bound zoom-out to the world extent
 
+    const pivot = new THREE.Vector3();
+    let distance: number;
+    let rotation: number;
+    let angle: number;
     if (view === 'top') {
       const span = Math.max(size.x, size.z);
-      this.controls.target.set(center.x, this.bounds.max.y, center.z);
-      this.camera.position.set(center.x, this.bounds.max.y + span * 0.9, center.z + 0.001);
+      pivot.set(center.x, this.bounds.max.y, center.z);
+      distance = span * 0.9;
+      rotation = 0;
+      angle = 0; // straight top-down
     } else {
       // Aim at the land (not the volume's centre — that can sit out over ocean,
       // and the surface lives near the top of a tall box with caves far below).
-      // A 3/4 aerial angle fits the elevated terrain in frame.
       const land = this.landTarget(center, size);
       const surfaceY = this.bounds.max.y - size.y * 0.18;
-      this.controls.target.set(land.x, surfaceY, land.z);
-      // A fairly steep 3/4 aerial angle, framed close enough that clear terrain
-      // (not fogged distance) fills the view — large maps are mostly ocean that
-      // otherwise washes into the horizon and reads as empty sky.
-      const dir = new THREE.Vector3(0.4, 0.85, 0.4).normalize();
-      this.camera.position.copy(this.controls.target).addScaledVector(dir, land.span * 0.62);
+      pivot.set(land.x, surfaceY, land.z);
+      // A steep 3/4 aerial: close enough that clear terrain (not fogged distance)
+      // fills the view, tilted ~34° off top-down, looking from the south-east.
+      distance = land.span * 0.62;
+      rotation = -Math.PI / 4;
+      angle = 0.6;
     }
+    // Start the pivot on the actual surface beneath it so there's no settle on
+    // load; the controls keep it riding the terrain from here.
+    const h = this.controls.heightAt?.(pivot.x, pivot.z);
+    if (h != null) pivot.y = h + 3;
+    this.controls.setView({ position: pivot, distance, rotation, angle, floorY: pivot.y });
+
     this.camera.far = maxDim * 12;
     this.camera.updateProjectionMatrix();
 
@@ -620,57 +634,6 @@ export class VantageViewer {
       this.dragging = false;
       dom.style.cursor = 'grab';
     });
-
-    // Keyboard fly-pan. Listen on window so the map responds without click-to-focus,
-    // but ignore keys while a form control (e.g. a slider) is focused, and let the
-    // browser keep its own shortcuts (Cmd/Ctrl/Alt chords).
-    const isTyping = () => {
-      const el = document.activeElement;
-      return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || (el as HTMLElement).isContentEditable);
-    };
-    this.keydownHandler = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey || isTyping()) return;
-      const k = e.key.toLowerCase();
-      if (PAN_KEYS.has(k)) {
-        this.keys.add(k);
-        e.preventDefault(); // stop arrows/space from scrolling the page
-      }
-    };
-    this.keyupHandler = (e: KeyboardEvent) => this.keys.delete(e.key.toLowerCase());
-    this.blurHandler = () => this.keys.clear(); // never get stuck "held" after focus loss
-    window.addEventListener('keydown', this.keydownHandler);
-    window.addEventListener('keyup', this.keyupHandler);
-    window.addEventListener('blur', this.blurHandler);
-  }
-
-  /** Frame-rate-independent keyboard fly-pan: move the camera and its target
-   *  together over the ground (WASD/arrows), or up/down (Q/E), at a speed that
-   *  scales with zoom so it feels the same close-up and far-out. Shift = ×3. */
-  private panKeys(dtMs: number): void {
-    if (this.keys.size === 0) return;
-    const k = this.keys;
-    const fwd = new THREE.Vector3();
-    this.camera.getWorldDirection(fwd);
-    fwd.y = 0;
-    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
-    fwd.normalize();
-    const right = new THREE.Vector3(-fwd.z, 0, fwd.x); // 90° CW on the ground plane
-    const move = new THREE.Vector3();
-    if (k.has('w') || k.has('arrowup')) move.add(fwd);
-    if (k.has('s') || k.has('arrowdown')) move.sub(fwd);
-    if (k.has('d') || k.has('arrowright')) move.add(right);
-    if (k.has('a') || k.has('arrowleft')) move.sub(right);
-    let vy = 0;
-    if (k.has('e')) vy += 1;
-    if (k.has('q')) vy -= 1;
-    if (move.lengthSq() === 0 && vy === 0) return;
-
-    const dist = this.camera.position.distanceTo(this.controls.target);
-    const speed = dist * 0.001 * dtMs * (k.has('shift') ? 3 : 1); // ~zoom-relative
-    if (move.lengthSq() > 0) move.normalize().multiplyScalar(speed);
-    move.y = vy * speed;
-    this.camera.position.add(move);
-    this.controls.target.add(move);
   }
 
   private emitHover(id: number): void {
@@ -693,10 +656,9 @@ export class VantageViewer {
 
   private frame(): void {
     const now = performance.now();
-    const dtMs = this.lastFrameMs ? Math.min(now - this.lastFrameMs, 50) : 16.7; // clamp tab-switch jumps
+    const dtMs = this.lastFrameMs ? now - this.lastFrameMs : 16.7;
     this.lastFrameMs = now;
-    this.panKeys(dtMs);
-    this.controls.update();
+    this.controls.update(dtMs);
     this.sky.position.copy(this.camera.position); // keep the dome centred on the eye
 
     // Ease the textured<->biome crossfade, and advance the water-animation clock.
@@ -744,9 +706,6 @@ export class VantageViewer {
   dispose(): void {
     this.renderer.setAnimationLoop(null);
     this.resizeObserver.disconnect();
-    if (this.keydownHandler) window.removeEventListener('keydown', this.keydownHandler);
-    if (this.keyupHandler) window.removeEventListener('keyup', this.keyupHandler);
-    if (this.blurHandler) window.removeEventListener('blur', this.blurHandler);
     this.controls.dispose();
     this.disposeCurrent();
     this.composer.dispose();

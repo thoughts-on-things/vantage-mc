@@ -488,10 +488,12 @@ export class VantageViewer {
       const land = this.landTarget(center, size);
       const surfaceY = this.bounds.max.y - size.y * 0.18;
       pivot.set(land.x, surfaceY, land.z);
-      // A gentle aerial: mostly map-like, tilted just ~24° off top-down to read
-      // relief without an awkward near-horizon lean, looking from the south-east.
+      // A gentle aerial: tilted ~24° off top-down to read relief, but kept
+      // NORTH-UP (looking from due south) so the square world reads edge-on and
+      // straight, not as a corner-on diamond — a 45° heading makes every shore
+      // and tile edge run diagonally and the whole view feel crooked.
       distance = land.span * 0.62;
-      rotation = -Math.PI / 4;
+      rotation = 0;
       angle = DEFAULT_ORBIT_ANGLE;
     }
     // Start the pivot on the actual surface beneath it so there's no settle on
@@ -644,6 +646,12 @@ export class VantageViewer {
    *  {@link DEFAULT_ORBIT_ANGLE} = the gentle aerial ("3D"). The tilt control. */
   setTilt(angle: number): void {
     this.controls.animateTo({ angle });
+  }
+
+  /** Smoothly drop to a clean, north-up top-down map (the "2D" toggle): levels
+   *  the tilt and straightens the heading so the world is axis-aligned. */
+  flatten(): void {
+    this.controls.animateTo({ angle: 0, rotation: 0 });
   }
 
   /** The current pitch in radians (0 = top-down), for a tilt toggle's state. */

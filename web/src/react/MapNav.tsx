@@ -92,8 +92,8 @@ export function MapNav({ compass = true, tilt = true, zoom = true, home = true, 
 
   if (!viewer) return null;
 
-  // Toggle between a flat top-down map and the default aerial tilt.
-  const toggleTilt = () => viewer.setTilt(viewer.tilt > TILT_THRESHOLD ? 0 : DEFAULT_ORBIT_ANGLE);
+  // Toggle between a clean north-up flat map (2D) and the default aerial tilt (3D).
+  const toggleTilt = () => (viewer.tilt > TILT_THRESHOLD ? viewer.flatten() : viewer.setTilt(DEFAULT_ORBIT_ANGLE));
 
   return (
     <div className={className ? `vtg-nav vtg-glass ${className}` : 'vtg-nav vtg-glass'} role="group" aria-label="map navigation">

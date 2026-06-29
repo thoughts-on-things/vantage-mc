@@ -85,6 +85,13 @@ const FRAG = /* glsl */ `
     col = mix(vec3(1.0), TORCH, 0.6 * clamp(vBlk - sky, 0.0, 1.0));
   }
 
+  // Pixel-art textures + the colour uniforms are authored in sRGB; decode to
+  // linear so lighting and the AgX tonemap are correct (raw ShaderMaterial
+  // uniforms bypass three's automatic colour management).
+  vec3 toLinear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+  }
+
   // Final colour grade: saturation then contrast around mid grey. Cheap pop/clarity
   // controls so the look is tunable without re-baking. Neutral at (1, 1).
   vec3 grade(vec3 c) {
@@ -100,6 +107,8 @@ const FRAG = /* glsl */ `
     vec4 t = texture(map, vec3(vUv, vLayer), -uSharpness); // negative bias = sharper
     if (t.a < 0.05) discard;                       // drop only fully-empty texels; the
                                                    // fractional edge becomes MSAA coverage
+    t.rgb = toLinear(t.rgb);                        // work in linear; OutputPass tonemaps + encodes
+    vec3 fogCol = toLinear(uFogColor);
     vec3 N = normalize(vN);
     vec3 ambient = mix(GND, SKY, 0.5 + 0.5 * N.y); // sky above, earth below
     float ndl = max(dot(N, normalize(lightDir)), 0.0);
@@ -110,21 +119,21 @@ const FRAG = /* glsl */ `
     // solid blue. That accumulation reads as real depth without per-block shading.
     if (uWater > 0.5) {
       float ripple = dot(t.rgb, vec3(0.299, 0.587, 0.114));
-      vec3 wcol = vTint.rgb * (0.82 + 0.20 * ripple);
+      vec3 wcol = toLinear(vTint.rgb) * (0.82 + 0.20 * ripple);
       float depth = vTint.a;
       wcol = mix(wcol, wcol * vec3(0.55, 0.66, 0.85), depth);   // deep water cools + deepens
       vec3 wlit = grade(wcol * (0.55 + 0.40 * ambient + 0.45 * SUN * ndl) * lightAmt * lightCol * uExposure);
       float wf = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity;
       float wa = mix(0.35, 0.88, depth);                        // shallow clear -> deep opaque
-      frag = vec4(mix(wlit, uFogColor, wf), wa);
+      frag = vec4(mix(wlit, fogCol, wf), wa);
       return;
     }
 
     float ao = 1.0 - (1.0 - vTint.a) * uAoStrength; // baked AO (colour alpha), strength-scaled
-    vec3 texcol = t.rgb * vTint.rgb;
+    vec3 texcol = t.rgb * toLinear(vTint.rgb);
     float luma = dot(texcol, vec3(0.299, 0.587, 0.114));
     // Biome view keeps terrain relief by modulating the flat biome colour by luma.
-    vec3 biomecol = vBcol * (0.45 + 0.65 * luma);
+    vec3 biomecol = toLinear(vBcol) * (0.45 + 0.65 * luma);
     vec3 base = mix(texcol, biomecol, uBiomeMix);
     if (uBiomeMix > 0.5 && uHi >= 0.0 && abs(vBiome - uHi) > 0.5) {
       float g = dot(base, vec3(0.299, 0.587, 0.114));
@@ -132,7 +141,7 @@ const FRAG = /* glsl */ `
     }
     vec3 lit = grade(base * (0.25 + 0.45 * ambient + 0.55 * SUN * ndl) * ao * lightAmt * lightCol * uExposure);
     float f = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity; // aerial depth into the horizon
-    frag = vec4(mix(lit, uFogColor, f), uAlpha * t.a);        // alpha → MSAA coverage (foliage AA)
+    frag = vec4(mix(lit, fogCol, f), uAlpha * t.a);           // alpha → MSAA coverage (foliage AA)
   }
 `;
 
@@ -222,9 +231,12 @@ export function createSky(): THREE.Mesh {
       precision highp float;
       uniform vec3 uTop; uniform vec3 uHorizon;
       in vec3 vDir; out vec4 frag;
+      vec3 toLinear(vec3 c) {
+        return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+      }
       void main() {
         float t = smoothstep(-0.08, 0.5, vDir.y);
-        frag = vec4(mix(uHorizon, uTop, t), 1.0);
+        frag = vec4(toLinear(mix(uHorizon, uTop, t)), 1.0); // linear; OutputPass tonemaps + encodes
       }
     `,
     uniforms: {

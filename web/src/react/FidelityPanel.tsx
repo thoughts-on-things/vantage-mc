@@ -24,24 +24,35 @@ interface Knob {
 }
 
 const KNOBS: Knob[] = [
+  { key: 'gtao', label: 'contact shadows', min: 0, max: 1.5, step: 0.05 },
+  { key: 'aoRadius', label: 'shadow radius', min: 0.5, max: 6, step: 0.5 },
+  { key: 'bloom', label: 'bloom', min: 0, max: 1.2, step: 0.05 },
+  { key: 'toneExposure', label: 'tone exposure', min: 0.4, max: 2, step: 0.05 },
   { key: 'sharpness', label: 'sharpness', min: 0, max: 3, step: 0.05 },
-  { key: 'ao', label: 'ambient occlusion', min: 0, max: 2, step: 0.05 },
+  { key: 'ao', label: 'baked AO', min: 0, max: 2, step: 0.05 },
   { key: 'saturation', label: 'saturation', min: 0, max: 2, step: 0.05 },
   { key: 'contrast', label: 'contrast', min: 0.5, max: 1.6, step: 0.02 },
   { key: 'fog', label: 'haze', min: 0, max: 1.5, step: 0.05 },
   { key: 'renderScale', label: 'render scale', min: 0.5, max: 2, step: 0.25, suffix: '×' },
 ];
 
+const DEFAULTS: Required<DisplaySettings> = {
+  sharpness: 0,
+  ao: 1,
+  saturation: 1.35,
+  contrast: 1.06,
+  fog: 1,
+  renderScale: 1,
+  gtao: 1,
+  aoRadius: 2.5,
+  bloom: 0.35,
+  bloomThreshold: 0.8,
+  toneExposure: 1.05,
+};
+
 export function FidelityPanel({ title = 'fidelity', className }: FidelityPanelProps) {
   const { viewer } = useVantage();
-  const [display, setDisplay] = useState<Required<DisplaySettings>>({
-    sharpness: 0,
-    ao: 1,
-    saturation: 1,
-    contrast: 1,
-    fog: 1,
-    renderScale: 1,
-  });
+  const [display, setDisplay] = useState<Required<DisplaySettings>>(DEFAULTS);
 
   // Seed the sliders from the engine's current settings once it exists.
   useEffect(() => {

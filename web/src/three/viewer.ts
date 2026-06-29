@@ -5,6 +5,11 @@
 
 import * as THREE from 'three';
 import { MapControls } from 'three/examples/jsm/controls/MapControls.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import {
   parseTextureArray,
   parseTile,
@@ -52,16 +57,40 @@ export interface DisplaySettings {
   /** Super-/sub-sampling factor on devicePixelRatio (1 = native; 2 = 2× SSAA for
    *  extra crispness; <1 = faster/softer). Capped by `maxPixelRatio`. Default `1`. */
   renderScale?: number;
+  /** Screen-space (GTAO) contact-shadow intensity, 0..1. 0 disables the pass.
+   *  Adds the "raytraced" depth in crevices. Default `1`. */
+  gtao?: number;
+  /** GTAO sample radius in blocks (how far contact shadows reach). Default `2.5`. */
+  aoRadius?: number;
+  /** Bloom strength (glow on bright highlights/water). 0 disables. Default `0.3`. */
+  bloom?: number;
+  /** Bloom luminance threshold, 0..1 (higher = only the brightest bloom). Default `0.8`. */
+  bloomThreshold?: number;
+  /** ACES tone-mapping exposure (cinematic tone curve). 1 = neutral. Default `1`. */
+  toneExposure?: number;
 }
 
 const DEFAULT_DISPLAY: Required<DisplaySettings> = {
   sharpness: 0,
+  // AgX tone mapping desaturates (esp. greens), so the cinematic default pushes
+  // saturation + a touch of contrast back up; dial these down toward 1.0 for a
+  // flatter, more neutral look.
   ao: 1,
-  saturation: 1,
-  contrast: 1,
+  saturation: 1.35,
+  contrast: 1.06,
   fog: 1,
   renderScale: 1,
+  gtao: 1,
+  aoRadius: 2.5,
+  bloom: 0.35,
+  bloomThreshold: 0.8,
+  toneExposure: 1.05,
 };
+
+/** Above this vertex count GTAO's per-frame geometry re-render is too costly, so
+ *  it auto-disables (the user can still force it via the dial if they accept the
+ *  cost — see `applyDisplay`). */
+const GTAO_VERTEX_BUDGET = 3_500_000;
 
 /** Keys that drive the keyboard fly-pan (lower-cased). */
 const PAN_KEYS = new Set([
@@ -149,6 +178,19 @@ export class VantageViewer {
   private readonly sky: THREE.Mesh;
   private readonly resizeObserver: ResizeObserver;
 
+  // Post-processing pipeline: RenderPass → GTAO → bloom → OutputPass (tonemap +
+  // encode). `aoCamera` mirrors the main camera but renders only layer 0 (opaque
+  // terrain) so the camera-locked sky dome and translucent water don't occlude
+  // GTAO's depth/normal prepass.
+  private composer!: EffectComposer;
+  private renderPass!: RenderPass;
+  private gtaoPass!: GTAOPass;
+  private bloomPass!: UnrealBloomPass;
+  private outputPass!: OutputPass;
+  private readonly aoCamera = new THREE.PerspectiveCamera();
+  private postEnabled = true;
+  private gtaoHeavy = false; // current tile exceeds the GTAO vertex budget
+
   // Current tile state.
   private tile: DecodedTile | null = null;
   private shader: THREE.ShaderMaterial | null = null;
@@ -195,18 +237,26 @@ export class VantageViewer {
     if (options.light) this.light = { ...this.light, ...options.light };
     if (options.display) this.display = { ...this.display, ...options.display };
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: this.options.antialias });
+    // MSAA lives on the composer's render target now, not the default framebuffer.
+    this.renderer = new THREE.WebGLRenderer({ antialias: false });
     this.renderer.setPixelRatio(this.targetPixelRatio());
-    // Output shader colours directly (textures are already sRGB pixel art).
-    this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+    // Cinematic colour pipeline: shaders light in linear and output HDR; the
+    // OutputPass applies AgX tone mapping (gentler than ACES, keeps the pixel-art
+    // palette punchy) then sRGB-encodes. The terrain/sky shaders sRGB-decode their
+    // textures/tints themselves (raw ShaderMaterial uniforms skip colour mgmt).
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.AgXToneMapping;
+    this.renderer.toneMappingExposure = this.display.toneExposure;
     this.container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(...SKY_HORIZON);
     this.sky = createSky();
+    this.sky.layers.set(1); // layer 1 = excluded from GTAO's depth/normal prepass
     this.scene.add(this.sky);
 
     this.camera = new THREE.PerspectiveCamera(60, 1, 0.5, 8000);
+    this.camera.layers.enable(1); // beauty camera sees terrain (0) + sky/water (1)
     // Map-style navigation (à la BlueMap): left-drag pans across the ground,
     // right-drag rotates/tilts, wheel zooms toward the cursor. Damping gives it
     // weight; the polar clamp keeps the camera above the horizon.
@@ -219,11 +269,34 @@ export class VantageViewer {
     this.controls.minDistance = 2;
 
     this.bindInput();
+    this.buildComposer();
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.container);
     this.resize();
 
     this.renderer.setAnimationLoop(() => this.frame());
+  }
+
+  /** Build the post-processing pipeline: a multisampled HDR target (so MSAA +
+   *  alpha-to-coverage survive), then RenderPass → GTAO → bloom → OutputPass. */
+  private buildComposer(): void {
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    const samples = this.options.antialias ? 4 : 0;
+    const target = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples });
+    this.composer = new EffectComposer(this.renderer, target);
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
+
+    this.renderPass = new RenderPass(this.scene, this.camera);
+    this.gtaoPass = new GTAOPass(this.scene, this.aoCamera, size.x, size.y);
+    this.gtaoPass.output = GTAOPass.OUTPUT.Default;
+    this.gtaoPass.updateGtaoMaterial({ radius: this.display.aoRadius, distanceExponent: 1, thickness: 1, scale: 1, samples: 8 });
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), this.display.bloom, 0.5, this.display.bloomThreshold);
+    this.outputPass = new OutputPass();
+
+    this.composer.addPass(this.renderPass);
+    this.composer.addPass(this.gtaoPass);
+    this.composer.addPass(this.bloomPass);
+    this.composer.addPass(this.outputPass);
   }
 
   /** Construct a viewer and load a tile in one call. */
@@ -249,8 +322,14 @@ export class VantageViewer {
     this.shader = built.shader ?? null;
     this.bounds = built.bounds;
     this.scene.add(built.terrain);
-    if (built.water) this.scene.add(built.water);
+    if (built.water) {
+      built.water.layers.set(1); // exclude translucent water from GTAO's prepass
+      this.scene.add(built.water);
+    }
     this.current = { terrain: built.terrain, water: built.water };
+    // GTAO re-renders the whole geometry every frame; on very large tiles that's
+    // too costly, so auto-disable it past a vertex budget (the dial still shows).
+    this.gtaoHeavy = tile.vertexCount + (tile.fluid?.vertexCount ?? 0) > GTAO_VERTEX_BUDGET;
 
     if (built.requiresSceneLights) {
       this.scene.add(new THREE.HemisphereLight(0xbcd7ff, 0x4a4636, 1.0));
@@ -442,12 +521,26 @@ export class VantageViewer {
   }
 
   private applyDisplay(): void {
+    // Post-processing passes (exist regardless of whether a tile is loaded).
+    const d = this.display;
+    if (this.gtaoPass) {
+      this.gtaoPass.enabled = d.gtao > 0 && !this.gtaoHeavy;
+      this.gtaoPass.blendIntensity = d.gtao;
+      this.gtaoPass.updateGtaoMaterial({ radius: d.aoRadius });
+    }
+    if (this.bloomPass) {
+      this.bloomPass.enabled = d.bloom > 0;
+      this.bloomPass.strength = d.bloom;
+      this.bloomPass.threshold = d.bloomThreshold;
+    }
+    this.renderer.toneMappingExposure = d.toneExposure;
+
     if (!this.shader) return;
-    this.shader.uniforms['uSharpness']!.value = this.display.sharpness;
-    this.shader.uniforms['uAoStrength']!.value = this.display.ao;
-    this.shader.uniforms['uSaturation']!.value = this.display.saturation;
-    this.shader.uniforms['uContrast']!.value = this.display.contrast;
-    this.shader.uniforms['uFogDensity']!.value = this.display.fog;
+    this.shader.uniforms['uSharpness']!.value = d.sharpness;
+    this.shader.uniforms['uAoStrength']!.value = d.ao;
+    this.shader.uniforms['uSaturation']!.value = d.saturation;
+    this.shader.uniforms['uContrast']!.value = d.contrast;
+    this.shader.uniforms['uFogDensity']!.value = d.fog;
   }
 
   // --- events ---------------------------------------------------------------
@@ -571,7 +664,15 @@ export class VantageViewer {
     }
 
     this.pickHover();
-    this.renderer.render(this.scene, this.camera);
+    if (this.postEnabled) {
+      // GTAO's depth/normal prepass uses aoCamera; restrict it to layer 0 (opaque
+      // terrain) so the sky dome and translucent water don't occlude the AO.
+      this.aoCamera.copy(this.camera);
+      this.aoCamera.layers.set(0);
+      this.composer.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
   }
 
   private resize(): void {
@@ -580,6 +681,10 @@ export class VantageViewer {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
+    if (this.composer) {
+      this.composer.setPixelRatio(this.renderer.getPixelRatio());
+      this.composer.setSize(w, h);
+    }
   }
 
   private disposeCurrent(): void {
@@ -601,6 +706,9 @@ export class VantageViewer {
     if (this.blurHandler) window.removeEventListener('blur', this.blurHandler);
     this.controls.dispose();
     this.disposeCurrent();
+    this.composer.dispose();
+    this.gtaoPass.dispose();
+    this.bloomPass.dispose();
     this.emitter.clear();
     this.renderer.dispose();
     this.renderer.domElement.remove();

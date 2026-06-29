@@ -59,7 +59,7 @@ export const CSS = `
 .vtg-name { overflow: hidden; text-overflow: ellipsis; }
 .vtg-pct { margin-left: auto; color: #6f86ab; font-size: 11px; font-variant-numeric: tabular-nums; }
 
-.vtg-sliders { padding: 11px 13px 13px; display: flex; flex-direction: column; gap: 12px; }
+.vtg-sliders { padding: 11px 13px 13px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(132,170,230,0.3) transparent; }
 .vtg-slider { display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
 .vtg-slider-row { display: flex; justify-content: space-between; color: #8ba6cd; font-size: 11px; }
 .vtg-slider-row b { color: #d8e6fc; font-weight: 600; font-variant-numeric: tabular-nums; }

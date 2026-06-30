@@ -623,9 +623,12 @@ export class MapControls {
       this.panBuf.x += (sx * cs - sy * sn) * sp;
       this.panBuf.y += (sx * sn + sy * cs) * sp;
     }
-    const rot = (k.has('e') ? 1 : 0) - (k.has('q') ? 1 : 0);
+    // Orbit mode: Q turns left, E right; R tilts down toward the pivot, F up.
+    // (Opposite sign to fly mode — orbiting a point inverts the perceived turn
+    // vs. rotating in place, so the keys must too.)
+    const rot = (k.has('q') ? 1 : 0) - (k.has('e') ? 1 : 0);
     if (rot) this.rotBuf += rot * 7 * fr;
-    const tilt = (k.has('r') ? 1 : 0) - (k.has('f') ? 1 : 0);
+    const tilt = (k.has('f') ? 1 : 0) - (k.has('r') ? 1 : 0);
     if (tilt) this.angleBuf += tilt * 6 * fr;
     const zoom = (k.has('-') || k.has('_') ? 1 : 0) - (k.has('=') || k.has('+') ? 1 : 0);
     if (zoom) this.zoomBuf += zoom * 0.08 * fr;

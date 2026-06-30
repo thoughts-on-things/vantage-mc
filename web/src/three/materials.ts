@@ -83,7 +83,11 @@ const FRAG = /* glsl */ `
   void bakedLight(out float amt, out vec3 col) {
     float sky = vSky * uDay;
     float lvl = max(sky, vBlk);
-    float curve = lvl * lvl * (3.0 - 2.0 * lvl);  // smoothstep ease
+    // Minecraft's exact lightmap curve: brightness = l / (4 - 3l) (LightTexture).
+    // Concave — far darker in the midtones than a smoothstep (a light-7 nook is
+    // ~0.18, not ~0.5). Surface terrain is full skylight (l=1 → 1.0); the curve
+    // only deepens shaded overhangs and caves, matching the game.
+    float curve = lvl / (4.0 - 3.0 * lvl);
     amt = mix(uAmbient, 1.0, curve);
     col = mix(vec3(1.0), TORCH, 0.6 * clamp(vBlk - sky, 0.0, 1.0));
   }

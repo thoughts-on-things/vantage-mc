@@ -22,7 +22,12 @@ export const CSS = `
   --vtg-line: rgba(132, 170, 230, 0.16);
 }
 .vtg-canvas { position: absolute; inset: 0; }
-.vtg-canvas > canvas { display: block; }
+/* Constrain the GL canvas to its container. The renderer keeps a high-res
+   drawing buffer (devicePixelRatio × renderScale) via setSize(…, false), which
+   leaves the canvas's intrinsic attribute size large; without an explicit
+   display size that size leaks into layout and overflows. width/height:100%
+   pins the *displayed* size to the container while the buffer stays crisp. */
+.vtg-canvas > canvas { display: block; width: 100%; height: 100%; }
 
 .vtg-glass {
   background: linear-gradient(180deg, rgba(18, 24, 35, 0.72), rgba(11, 15, 22, 0.7));

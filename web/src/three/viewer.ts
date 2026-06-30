@@ -187,6 +187,16 @@ export class VantageViewer {
   private readonly sky: THREE.Mesh;
   private readonly resizeObserver: ResizeObserver;
 
+  // Anti-aliasing: the scene renders into an 8× multisampled offscreen target,
+  // then a fullscreen pass copies the resolved result to the canvas. 8× (vs the
+  // default framebuffer's driver-chosen ~4×) is what keeps high-frequency foliage
+  // silhouettes and the alpha-to-coverage cutouts from crawling as the camera
+  // moves. No GTAO/bloom/tonemap — purely AA + present.
+  private msaa!: THREE.WebGLRenderTarget;
+  private readonly present = new THREE.Scene();
+  private readonly presentCamera = new THREE.Camera();
+  private presentMaterial!: THREE.RawShaderMaterial;
+
   // Current tile state.
   private tile: DecodedTile | null = null;
   private shader: THREE.ShaderMaterial | null = null;
@@ -230,14 +240,16 @@ export class VantageViewer {
     if (options.light) this.light = { ...this.light, ...options.light };
     if (options.display) this.display = { ...this.display, ...options.display };
 
-    // Direct rendering with the default framebuffer's MSAA (no post-processing
-    // pipeline). The terrain/sky shaders light in linear and sRGB-encode their
-    // own output (raw ShaderMaterial uniforms skip three's colour management), so
-    // they write display-ready sRGB straight to the canvas.
-    this.renderer = new THREE.WebGLRenderer({ antialias: this.options.antialias });
+    // MSAA lives on an offscreen target (see buildAA / frame), so the canvas
+    // context itself doesn't need antialiasing. The terrain/sky shaders light in
+    // linear and sRGB-encode their own output (raw ShaderMaterial uniforms skip
+    // three's colour management), writing display-ready sRGB into the target.
+    this.renderer = new THREE.WebGLRenderer({ antialias: false });
     this.renderer.setPixelRatio(this.targetPixelRatio());
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.autoClear = false;
     this.container.appendChild(this.renderer.domElement);
+    this.buildAA();
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(...SKY_HORIZON);
@@ -260,6 +272,39 @@ export class VantageViewer {
     this.resize();
 
     this.renderer.setAnimationLoop(() => this.frame());
+  }
+
+  /** Build the offscreen multisampled target and the fullscreen present pass.
+   *  The scene already writes display-ready sRGB, so present is a raw passthrough
+   *  drawn over one oversized clip-space triangle. */
+  private buildAA(): void {
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    this.msaa = new THREE.WebGLRenderTarget(Math.max(1, size.x), Math.max(1, size.y), {
+      samples: this.options.antialias ? 8 : 0,
+      type: THREE.UnsignedByteType,
+      depthBuffer: true,
+    });
+    this.msaa.texture.colorSpace = THREE.NoColorSpace; // already sRGB bytes — don't reinterpret
+    this.msaa.texture.minFilter = THREE.LinearFilter;
+    this.msaa.texture.magFilter = THREE.LinearFilter;
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3));
+    this.presentMaterial = new THREE.RawShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      uniforms: { tSrc: { value: this.msaa.texture } },
+      depthTest: false,
+      depthWrite: false,
+      vertexShader: /* glsl */ `
+        in vec3 position; out vec2 vUv;
+        void main() { vUv = position.xy * 0.5 + 0.5; gl_Position = vec4(position.xy, 0.0, 1.0); }
+      `,
+      fragmentShader: /* glsl */ `
+        precision highp float; uniform sampler2D tSrc; in vec2 vUv; out vec4 frag;
+        void main() { frag = texture(tSrc, vUv); }
+      `,
+    });
+    this.present.add(new THREE.Mesh(geo, this.presentMaterial));
   }
 
   /** Construct a viewer and load a tile in one call. */
@@ -641,7 +686,13 @@ export class VantageViewer {
     }
 
     this.pickHover();
+    // Render the scene into the 8× MSAA target, then resolve+copy it to the
+    // canvas. autoClear is off, so clear the target explicitly each frame.
+    this.renderer.setRenderTarget(this.msaa);
+    this.renderer.clear();
     this.renderer.render(this.scene, this.camera);
+    this.renderer.setRenderTarget(null);
+    this.renderer.render(this.present, this.presentCamera);
   }
 
   private resize(): void {
@@ -650,6 +701,8 @@ export class VantageViewer {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    this.msaa.setSize(Math.max(1, size.x), Math.max(1, size.y));
   }
 
   private disposeCurrent(): void {
@@ -668,6 +721,11 @@ export class VantageViewer {
     this.resizeObserver.disconnect();
     this.controls.dispose();
     this.disposeCurrent();
+    this.present.traverse((o) => {
+      if (o instanceof THREE.Mesh) o.geometry.dispose();
+    });
+    this.presentMaterial.dispose();
+    this.msaa.dispose();
     this.emitter.clear();
     this.renderer.dispose();
     this.renderer.domElement.remove();

@@ -322,7 +322,10 @@ export class VantageViewer {
     this.sky.layers.set(1); // layer 1 = excluded from GTAO's depth/normal prepass
     this.scene.add(this.sky);
 
-    this.camera = new THREE.PerspectiveCamera(60, 1, 0.5, 8000);
+    // FOV 75 matches BlueMap — a wider lens than a "photographic" 60° gives the
+    // perspective convergence that reads as a real 3D view over the world rather
+    // than a flat isometric map. Framing compensates (see fitDistance).
+    this.camera = new THREE.PerspectiveCamera(75, 1, 0.5, 8000);
     this.camera.layers.enable(1); // beauty camera sees terrain (0) + sky/water (1)
     // BlueMap-faithful map navigation: left-drag grabs and pans the ground,
     // right-drag (or alt+left) orbits — horizontal rotates, vertical tilts —
@@ -464,6 +467,14 @@ export class VantageViewer {
     return { x: sx / n, z: sz / n, span: Math.max(maxx - minx, maxz - minz, 48) * 1.15 };
   }
 
+  /** Camera-to-pivot distance that vertically fits a world span of `s` blocks at
+   *  the current FOV, so framing is FOV-independent: widening the lens (60→75)
+   *  doesn't silently zoom the load view out. The callers' multipliers preserve
+   *  the previously-tuned on-screen framing. */
+  private fitDistance(s: number): number {
+    return (s * 0.5) / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
+  }
+
   private frameCamera(view: ViewMode): void {
     const center = new THREE.Vector3();
     const size = new THREE.Vector3();
@@ -479,7 +490,7 @@ export class VantageViewer {
     if (view === 'top') {
       const span = Math.max(size.x, size.z);
       pivot.set(center.x, this.bounds.max.y, center.z);
-      distance = span * 0.9;
+      distance = this.fitDistance(span) * 1.04;
       rotation = 0;
       angle = 0; // straight top-down
     } else {
@@ -492,7 +503,7 @@ export class VantageViewer {
       // NORTH-UP (looking from due south) so the square world reads edge-on and
       // straight, not as a corner-on diamond — a 45° heading makes every shore
       // and tile edge run diagonally and the whole view feel crooked.
-      distance = land.span * 0.62;
+      distance = this.fitDistance(land.span) * 0.72;
       rotation = 0;
       angle = DEFAULT_ORBIT_ANGLE;
     }

@@ -179,6 +179,8 @@ interface ViewerEvents extends Record<string, unknown> {
   hover: number | null;
   /** Biome layer state changed. */
   biomelayer: { enabled: boolean; highlight: number | null };
+  /** Camera control scheme changed (map ⇄ free-flight). */
+  mode: { fly: boolean };
 }
 
 async function fetchBuffer(url: string): Promise<ArrayBuffer> {
@@ -675,6 +677,26 @@ export class VantageViewer {
     if (this.framedState) this.controls.animateTo(this.framedState);
   }
 
+  /** Whether the free-flight (spectator) camera is active. */
+  get isFlying(): boolean {
+    return this.controls.flyMode;
+  }
+
+  /** Enter or leave free-flight. In fly mode the camera becomes a first-person
+   *  spectator: WASD to move, space/shift up-down, mouse (click to capture) to
+   *  look, wheel to trim speed. Emits `'mode'`. */
+  setFlyMode(on: boolean): void {
+    if (this.controls.flyMode === on) return;
+    this.controls.setMode(on ? 'fly' : 'map');
+    if (on) this.emitHover(-1);
+    this.emitter.emit('mode', { fly: on });
+  }
+
+  /** Toggle free-flight on/off. */
+  toggleFly(): void {
+    this.setFlyMode(!this.controls.flyMode);
+  }
+
   // --- events ---------------------------------------------------------------
 
   on<K extends keyof ViewerEvents>(event: K, listener: (payload: ViewerEvents[K]) => void): () => void {
@@ -718,6 +740,10 @@ export class VantageViewer {
   }
 
   private pickHover(): void {
+    if (this.controls.flyMode) {
+      this.emitHover(-1); // no biome hover while flying (pointer is captured/centred)
+      return;
+    }
     if (this.dragging || !this.pointerDirty) return; // at most once per frame, never mid-drag
     this.pointerDirty = false;
     const surface = this.tile?.surface;

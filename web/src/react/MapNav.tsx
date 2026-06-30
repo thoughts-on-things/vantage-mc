@@ -6,7 +6,7 @@
 // directly (needle transform, tilt label, coordinate text), so it never triggers
 // a React re-render while you fly around.
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useVantage } from './context.js';
 import { DEFAULT_ORBIT_ANGLE } from '../three/index.js';
 
@@ -15,6 +15,8 @@ export interface MapNavProps {
   compass?: boolean;
   /** Show the 2D/3D tilt toggle. Default `true`. */
   tilt?: boolean;
+  /** Show the free-flight toggle. Default `true`. */
+  fly?: boolean;
   /** Show the zoom in/out buttons. Default `true`. */
   zoom?: boolean;
   /** Show the home (re-frame) button. Default `true`. */
@@ -45,13 +47,28 @@ const Icon = {
       <path d="M4 7v5.5h8V7" />
     </svg>
   ),
+  fly: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14.5 1.5 1.2 6.6l5 1.7 1.7 5z" />
+      <path d="M14.5 1.5 7.9 8.1" />
+    </svg>
+  ),
 };
 
-export function MapNav({ compass = true, tilt = true, zoom = true, home = true, coords = true, className }: MapNavProps) {
+export function MapNav({ compass = true, tilt = true, fly = true, zoom = true, home = true, coords = true, className }: MapNavProps) {
   const { viewer } = useVantage();
   const needleRef = useRef<SVGGElement>(null);
   const coordRef = useRef<HTMLSpanElement>(null);
   const tiltRef = useRef<HTMLButtonElement>(null);
+  const [flying, setFlying] = useState(false);
+
+  // Free-flight is the one nav state that drives a real re-render (rare toggle),
+  // so the button can reflect active styling and the tilt/home buttons can hide.
+  useEffect(() => {
+    if (!viewer) return;
+    setFlying(viewer.isFlying);
+    return viewer.on('mode', ({ fly }) => setFlying(fly));
+  }, [viewer]);
 
   // Drive the compass needle, tilt label, and coordinate text from the live
   // camera each frame — imperatively, no React state, no re-render churn.
@@ -110,9 +127,22 @@ export function MapNav({ compass = true, tilt = true, zoom = true, home = true, 
         </button>
       )}
 
-      {tilt && (
+      {tilt && !flying && (
         <button ref={tiltRef} type="button" className="vtg-navbtn vtg-navbtn-text" title="Tilt to 3D" aria-label="Toggle tilt" onClick={toggleTilt}>
           3D
+        </button>
+      )}
+
+      {fly && (
+        <button
+          type="button"
+          className={flying ? 'vtg-navbtn vtg-on' : 'vtg-navbtn'}
+          title={flying ? 'Exit free-flight (Esc)' : 'Free-flight — fly over the world'}
+          aria-label="Toggle free-flight"
+          aria-pressed={flying}
+          onClick={() => viewer.toggleFly()}
+        >
+          {Icon.fly}
         </button>
       )}
 
@@ -123,9 +153,9 @@ export function MapNav({ compass = true, tilt = true, zoom = true, home = true, 
         </span>
       )}
 
-      {(zoom || home) && <span className="vtg-nav-sep" />}
+      {!flying && (zoom || home) && <span className="vtg-nav-sep" />}
 
-      {zoom && (
+      {zoom && !flying && (
         <>
           <button type="button" className="vtg-navbtn" title="Zoom out" aria-label="Zoom out" onClick={() => viewer.zoomBy(-1)}>
             {Icon.minus}
@@ -136,7 +166,7 @@ export function MapNav({ compass = true, tilt = true, zoom = true, home = true, 
         </>
       )}
 
-      {home && (
+      {home && !flying && (
         <button type="button" className="vtg-navbtn" title="Reset view" aria-label="Reset view" onClick={() => viewer.resetView()}>
           {Icon.home}
         </button>

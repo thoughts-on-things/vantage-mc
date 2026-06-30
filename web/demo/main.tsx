@@ -4,7 +4,7 @@
 // `just render <save>`). Deep-links: #top frames top-down, #biome opens the
 // biome layer.
 
-import { StrictMode } from 'react';
+import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BiomeLayer, FidelityPanel, LightPanel, MapNav, Reticle, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
@@ -15,12 +15,19 @@ const biomeOpen = /biome/i.test(location.hash);
 /** A small HUD overlay showing the loaded tile's stats + the control legend — a
  *  custom child that reads the shared engine state via useVantage(). */
 function Hud() {
-  const { info } = useVantage();
+  const { viewer, info } = useVantage();
+  const [flying, setFlying] = useState(false);
+  useEffect(() => {
+    if (!viewer) return;
+    setFlying(viewer.isFlying);
+    return viewer.on('mode', ({ fly }) => setFlying(fly));
+  }, [viewer]);
   if (!info) return null;
   const tris = Math.round(info.triangleCount).toLocaleString();
   const verts = info.vertexCount.toLocaleString();
   const dims = `${Math.round(info.size.x)}×${Math.round(info.size.y)}×${Math.round(info.size.z)}`;
   const mono = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  const k = (t: string) => <b style={{ color: '#93a9cc' }}>{t}</b>;
   return (
     <div
       style={{
@@ -42,11 +49,19 @@ function Hud() {
         {verts} verts · {tris} tris · {dims}
       </div>
       <div style={{ color: '#6f86ab', marginTop: 8, fontSize: 11, lineHeight: 1.6 }}>
-        <b style={{ color: '#93a9cc' }}>drag</b> pan · <b style={{ color: '#93a9cc' }}>right-drag</b> orbit ·{' '}
-        <b style={{ color: '#93a9cc' }}>scroll</b> zoom
-        <br />
-        <b style={{ color: '#93a9cc' }}>WASD</b> move · <b style={{ color: '#93a9cc' }}>Q/E</b> turn ·{' '}
-        <b style={{ color: '#93a9cc' }}>R/F</b> tilt · <b style={{ color: '#93a9cc' }}>B</b> biomes
+        {flying ? (
+          <>
+            {k('WASD')} fly · {k('Space/Shift')} up·down
+            <br />
+            {k('mouse')} look (click to capture) · {k('scroll')} speed · {k('Esc')} exit
+          </>
+        ) : (
+          <>
+            {k('drag')} pan · {k('right-drag')} orbit · {k('scroll')} zoom
+            <br />
+            {k('WASD')} move · {k('Q/E')} turn · {k('R/F')} tilt · {k('B')} biomes
+          </>
+        )}
       </div>
     </div>
   );

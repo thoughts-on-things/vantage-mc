@@ -63,8 +63,16 @@ export class MapControls {
   distance = 300;
   /** Azimuth in radians; 0 looks toward −Z (north). Wrapped to [−π, π]. */
   rotation = 0;
-  /** Pitch in radians; 0 = straight top-down, π/2 = horizon. */
+  /** Pitch in radians; 0 = straight top-down, π/2 = horizon, π = straight up. */
   angle = 0;
+
+  /** Active control scheme. `'map'` orbits/pans a ground pivot (distance > 0);
+   *  `'fly'` is a free-flight spectator camera — the eye sits AT `position`
+   *  (distance 0), full perspective, pitch free across the whole sky. This is
+   *  BlueMap's two-mode model over one shared camera state. */
+  mode: 'map' | 'fly' = 'map';
+  /** Free-flight move speed; the wheel scales it (0.05‥5) while in `'fly'`. */
+  moveSpeed = 0.5;
 
   // --- bounds & wiring -------------------------------------------------------
   minDistance: number;
@@ -81,6 +89,16 @@ export class MapControls {
   private rotBuf = 0;
   private angleBuf = 0;
   private zoomBuf = 0;
+
+  // Free-flight input: `lookBuf` accumulates pointer/key px deltas (yaw, pitch);
+  // `moveBuf` accumulates WASD/▲▼/space-shift direction. Both drain through the
+  // same inertia model as the map buffers, so fly motion glides like the map.
+  private readonly lookBuf = new THREE.Vector2();
+  private readonly moveBuf = new THREE.Vector3();
+  private readonly lastLook = new THREE.Vector2();
+  private pointerLocked = false;
+  private flyPointerDown = false;
+  private savedDistance = 0; // map dolly remembered across a fly excursion
 
   // Pointer-drag bookkeeping.
   private readonly pointers = new Map<number, THREE.Vector2>();
@@ -127,6 +145,7 @@ export class MapControls {
   private readonly onKeyDown: (e: KeyboardEvent) => void;
   private readonly onKeyUp: (e: KeyboardEvent) => void;
   private readonly onBlur: () => void;
+  private readonly onPointerLockChange: () => void;
 
   constructor(camera: THREE.PerspectiveCamera, domElement: HTMLElement, options: MapControlsOptions = {}) {
     this.camera = camera;
@@ -146,6 +165,10 @@ export class MapControls {
       this.pointers.clear();
       this.endDrag();
     };
+    this.onPointerLockChange = () => {
+      this.pointerLocked = document.pointerLockElement === this.domElement;
+      if (!this.pointerLocked) this.lookBuf.set(0, 0); // no drift after release
+    };
 
     const dom = domElement;
     dom.style.touchAction = 'none';
@@ -159,6 +182,7 @@ export class MapControls {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onBlur);
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
 
     this.updateCamera();
   }
@@ -191,6 +215,82 @@ export class MapControls {
     this.zoomBuf -= steps; // +zoomBuf = zoom out, so invert for an "in is positive" API
     this.dynamicDistance = false;
     this.goal = null;
+  }
+
+  /** True when the free-flight (spectator) camera is active. */
+  get flyMode(): boolean {
+    return this.mode === 'fly';
+  }
+
+  /** Whether the pointer is currently captured for mouse-look. */
+  get isPointerLocked(): boolean {
+    return this.pointerLocked;
+  }
+
+  /** Switch control scheme, transitioning the camera continuously. Entering
+   *  `'fly'` reinterprets the current eye as the free-flight position (the view
+   *  doesn't jump); exiting drops the orbit pivot back onto the point the eye
+   *  looks at, at the remembered dolly distance. */
+  setMode(mode: 'map' | 'fly'): void {
+    if (mode === this.mode) return;
+    this.endDrag();
+    this.goal = null;
+    if (mode === 'fly') {
+      this.savedDistance = this.distance;
+      this.position.copy(this.camera.position); // eye becomes the fly position
+      this.distance = 0;
+      this.moveBuf.set(0, 0, 0);
+      this.lookBuf.set(0, 0);
+      this.mode = 'fly';
+    } else {
+      // Exit fly: clamp the tilt back into the map envelope, then push the pivot
+      // forward along the (clamped) view so the camera stays put as it re-docks.
+      this.mode = 'map';
+      const dist = this.savedDistance > this.minDistance ? this.savedDistance : 200;
+      this.distance = clamp(dist, this.minDistance, this.maxDistance);
+      this.angle = clamp(this.angle, 0, this.maxAngleForDistance(this.distance));
+      this.position.add(this.lookDir().multiplyScalar(this.distance));
+      this.targetHeight = this.cameraHeight = this.position.y; // seed terrain-follow
+      this.exitPointerLock();
+    }
+    this.updateCamera();
+  }
+
+  /** Toggle between map and free-flight. */
+  toggleFly(): void {
+    this.setMode(this.mode === 'fly' ? 'map' : 'fly');
+  }
+
+  /** The unit forward (look) direction from yaw `rotation` + pitch `angle`. */
+  private lookDir(): THREE.Vector3 {
+    const sa = Math.sin(this.angle);
+    return new THREE.Vector3(Math.sin(this.rotation) * sa, -Math.cos(this.angle), -Math.cos(this.rotation) * sa);
+  }
+
+  /** Capture the pointer for mouse-look (free-flight). Prefers raw/unaccelerated
+   *  movement, falling back to standard capture where unsupported. */
+  private requestPointerLock(): void {
+    const el = this.domElement as HTMLElement & {
+      requestPointerLock?: (opts?: { unadjustedMovement?: boolean }) => Promise<void> | void;
+    };
+    try {
+      const r = el.requestPointerLock?.({ unadjustedMovement: true });
+      if (r && typeof (r as Promise<void>).catch === 'function') {
+        (r as Promise<void>).catch(() => {
+          try {
+            el.requestPointerLock?.();
+          } catch {
+            /* best-effort */
+          }
+        });
+      }
+    } catch {
+      /* pointer lock is best-effort */
+    }
+  }
+
+  private exitPointerLock(): void {
+    if (document.pointerLockElement === this.domElement) document.exitPointerLock?.();
   }
 
   /** Ease the view toward a partial target state (rotation/angle/distance/pivot),
@@ -229,15 +329,23 @@ export class MapControls {
 
     const before = this.changeKey();
 
-    this.feedKeys(d);
-    this.applyPan(d);
-    this.applyRotate(d);
-    this.applyAngle(d);
-    this.applyZoom(d);
-    this.applyDynamicDistance();
-    this.applyGoal(d);
-    this.applyBounds();
-    this.applyHeight(d);
+    if (this.mode === 'fly') {
+      this.feedKeys(d);
+      this.applyFlyLook(d);
+      this.applyFlyMove(d);
+      this.applyGoal(d); // compass "face north" still eases while flying
+      this.applyFlyBounds();
+    } else {
+      this.feedKeys(d);
+      this.applyPan(d);
+      this.applyRotate(d);
+      this.applyAngle(d);
+      this.applyZoom(d);
+      this.applyDynamicDistance();
+      this.applyGoal(d);
+      this.applyBounds();
+      this.applyHeight(d);
+    }
 
     this.updateCamera();
     const changed = this.changeKey() !== before;
@@ -256,6 +364,8 @@ export class MapControls {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onBlur);
+    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    if (this.pointerLocked) document.exitPointerLock?.();
     for (const set of Object.values(this.listeners)) set.clear();
   }
 
@@ -338,6 +448,53 @@ export class MapControls {
     target = Math.max(target, this.minDistance);
     this.distance = softSet(this.distance, target, 0.4);
     this.angle = softMax(this.angle, this.maxAngleForDistance(target), 0.8);
+  }
+
+  // --- free-flight motion ----------------------------------------------------
+
+  /** Drain the look buffer into yaw/pitch (mouse-look + Q/E/R/F keys), smoothed
+   *  like every other motion. Pixel deltas are normalized to screen height so
+   *  sensitivity is resolution-independent. */
+  private applyFlyLook(dt: number): void {
+    if (this.lookBuf.lengthSq() < 1e-6) {
+      this.lookBuf.set(0, 0);
+      return;
+    }
+    const s = this.smoothing(0.5, dt);
+    const h = this.domElement.clientHeight || 1;
+    const k = (1.5 / h) * s; // BlueMap-ish sensitivity, normalized to height
+    this.rotation += this.lookBuf.x * k; // mouse right → turn right
+    this.angle -= this.lookBuf.y * k; // mouse up (movementY < 0) → look up (angle→π)
+    this.lookBuf.multiplyScalar(1 - s);
+  }
+
+  /** Drain the move buffer into the eye position: WASD strafes/advances on the
+   *  heading plane (yaw only, BlueMap-faithful — looking down doesn't sink you),
+   *  space/shift raise/lower. The `dt·0.06` factor makes the steady-state speed
+   *  frame-rate independent. */
+  private applyFlyMove(dt: number): void {
+    if (this.moveBuf.lengthSq() < 1e-8) {
+      this.moveBuf.set(0, 0, 0);
+      return;
+    }
+    const s = this.smoothing(0.3, dt);
+    const f = s * this.moveSpeed * dt * 0.06;
+    const sinr = Math.sin(this.rotation);
+    const cosr = Math.cos(this.rotation);
+    // forward (heading) = (sin, 0, −cos); right = (cos, 0, sin).
+    this.position.x += (cosr * this.moveBuf.x + sinr * this.moveBuf.z) * f;
+    this.position.z += (sinr * this.moveBuf.x - cosr * this.moveBuf.z) * f;
+    this.position.y += this.moveBuf.y * f;
+    this.moveBuf.multiplyScalar(1 - s);
+  }
+
+  /** Free-flight bounds: pitch spans nearly the whole sky (just shy of the poles
+   *  to dodge the gimbal flip), distance is pinned to the eye, azimuth wraps. */
+  private applyFlyBounds(): void {
+    this.distance = 0;
+    this.angle = clamp(this.angle, 0.02, Math.PI - 0.02);
+    if (this.rotation > Math.PI) this.rotation -= 2 * Math.PI;
+    else if (this.rotation < -Math.PI) this.rotation += 2 * Math.PI;
   }
 
   /** Ease toward an animation goal (frame-rate-normalized), clearing it once the
@@ -430,6 +587,23 @@ export class MapControls {
     this.goal = null; // user is driving
     const k = this.keys;
     const fr = dt / 16.666; // frame-rate normalizer
+
+    if (this.mode === 'fly') {
+      // WASD/▲▼ steer the heading plane; space/shift raise/lower; Q/E/R/F look.
+      const f = (k.has('w') || k.has('arrowup') ? 1 : 0) - (k.has('s') || k.has('arrowdown') ? 1 : 0);
+      const strafeKey = (k.has('d') || k.has('arrowright') ? 1 : 0) - (k.has('a') || k.has('arrowleft') ? 1 : 0);
+      const vert = (k.has(' ') ? 1 : 0) - (k.has('shift') ? 1 : 0);
+      // ±1 per held frame; the inertia drain makes the steady-state speed fps-stable.
+      this.moveBuf.x += strafeKey;
+      this.moveBuf.y += vert;
+      this.moveBuf.z += f;
+      const rot = (k.has('e') ? 1 : 0) - (k.has('q') ? 1 : 0);
+      if (rot) this.rotation += rot * 0.028 * fr;
+      const tilt = (k.has('r') ? 1 : 0) - (k.has('f') ? 1 : 0);
+      if (tilt) this.angle += tilt * 0.028 * fr; // R look up, F look down
+      return;
+    }
+
     const boost = k.has('shift') ? 2.4 : 1;
 
     const fwd = (k.has('w') || k.has('arrowup') ? 1 : 0) - (k.has('s') || k.has('arrowdown') ? 1 : 0);
@@ -486,6 +660,15 @@ export class MapControls {
     this.downPos.copy(p);
     this.moved = false;
 
+    if (this.mode === 'fly') {
+      // No pivot pan/orbit in fly: a click (no drag) captures the pointer for
+      // mouse-look; a drag rotates directly (handled in pointerMove/Up).
+      this.flyPointerDown = true;
+      this.lastLook.copy(p);
+      this.emit('start');
+      return;
+    }
+
     if (this.pointers.size === 1) {
       // Left = pan; right or alt/ctrl+left = orbit (rotate + tilt).
       const orbit = e.button === 2 || e.altKey || e.ctrlKey || e.metaKey;
@@ -519,8 +702,29 @@ export class MapControls {
   }
 
   private pointerMove(e: PointerEvent): void {
+    // Captured mouse-look fires globally with movement deltas and no tracked
+    // pointer — handle it before the per-pointer guard.
+    if (this.mode === 'fly' && this.pointerLocked) {
+      this.lookBuf.x += e.movementX || 0;
+      this.lookBuf.y += e.movementY || 0;
+      return;
+    }
     if (!this.pointers.has(e.pointerId)) return;
     const p = this.localXY(e);
+
+    if (this.mode === 'fly') {
+      // Unlocked drag-look: rotate by the pointer delta (trackpad-friendly).
+      if (this.flyPointerDown) {
+        if (p.distanceToSquared(this.downPos) > 9) this.moved = true;
+        this.lookBuf.x += p.x - this.lastLook.x;
+        this.lookBuf.y += p.y - this.lastLook.y;
+        this.lastLook.copy(p);
+      }
+      this.pointers.set(e.pointerId, p);
+      e.preventDefault();
+      return;
+    }
+
     const prev = this.pointers.get(e.pointerId)!;
 
     if (this.pointers.size >= 2) {
@@ -569,6 +773,15 @@ export class MapControls {
     } catch {
       /* best-effort */
     }
+
+    if (this.mode === 'fly') {
+      const wasClick = this.flyPointerDown && !this.moved;
+      this.flyPointerDown = false;
+      this.emit('end');
+      if (wasClick && !this.pointerLocked) this.requestPointerLock();
+      return;
+    }
+
     if (this.pointers.size === 0) this.endDrag();
     else if (this.pointers.size === 1) {
       // Dropped from pinch to one finger: resume panning with it.
@@ -592,6 +805,11 @@ export class MapControls {
     let delta = e.deltaY;
     if (e.deltaMode === 1) delta *= 16; // lines → ~pixels
     else if (e.deltaMode === 2) delta *= 100; // pages
+    if (this.mode === 'fly') {
+      // In free-flight the wheel trims fly speed (BlueMap), not the dolly.
+      this.moveSpeed = clamp(this.moveSpeed * Math.pow(1.0016, -delta), 0.05, 5);
+      return;
+    }
     this.zoomBuf += delta * 0.01; // +deltaY (scroll down) → zoom out
     this.dynamicDistance = false; // explicit distance request
     this.goal = null;
@@ -600,7 +818,7 @@ export class MapControls {
   // --- keyboard input --------------------------------------------------------
 
   private static readonly MOVE_KEYS = new Set([
-    'w', 'a', 's', 'd', 'q', 'e', 'r', 'f', 'shift',
+    'w', 'a', 's', 'd', 'q', 'e', 'r', 'f', 'shift', ' ',
     'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
     '-', '_', '=', '+',
   ]);
@@ -613,6 +831,12 @@ export class MapControls {
   private keyDown(e: KeyboardEvent): void {
     if (!this.enabled || e.metaKey || e.ctrlKey || e.altKey || this.isTyping()) return;
     const k = e.key.toLowerCase();
+    // Esc leaves free-flight (when the pointer isn't locked — while locked the
+    // browser eats Esc to release the capture first).
+    if (k === 'escape') {
+      if (this.mode === 'fly' && !this.pointerLocked) this.setMode('map');
+      return;
+    }
     if (MapControls.MOVE_KEYS.has(k)) {
       this.keys.add(k);
       if (k !== 'shift') e.preventDefault(); // don't scroll the page on arrows/space

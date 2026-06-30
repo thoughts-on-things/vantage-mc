@@ -70,6 +70,12 @@ web-install:
 render save *args: build
     {{bin}} render "{{save}}" {{args}}
 
+# Generate a streamed tiled map of a whole world save (the P4 path): a quadtree of
+# tiles + manifest under web/public/map/. `just map "~/…/saves/My World"`; then
+# `just serve` and open the viewer (it loads the map by default; #single = one tile).
+map save *args: build
+    {{bin}} map "{{save}}" {{args}}
+
 # Serve the web viewer with the Vite dev server (Ctrl-C to stop). Needs `just web-install` once.
 serve:
     @echo "→ http://127.0.0.1:{{port}}/   (press B for the biome layer)"

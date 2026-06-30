@@ -23,6 +23,7 @@ const texture = @import("texture.zig");
 const biome = @import("biome.zig");
 const lang = @import("lang.zig");
 const world = @import("world.zig");
+const tiling = @import("tiling.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -33,6 +34,8 @@ pub fn main(init: std.process.Init) !void {
     // region path for the legacy histogram form.
     if (std.mem.eql(u8, args[1], "render")) {
         return runRender(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "map")) {
+        return runMap(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "mesh")) {
         return runMesh(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "meshtex")) {
@@ -54,6 +57,7 @@ fn usage() error{MissingArgument} {
     std.debug.print(
         \\usage:
         \\  vantage render  <world-save-dir> [--assets <dir>] [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off]
+        \\  vantage map     <world-save-dir> [--assets <dir>] [--out <dir>] [--light flat|smooth] [--biome-blend on|off]
         \\  vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
         \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1] [--light flat|smooth] [--biome-blend on|off]
         \\  vantage histo   <region.mca> [localX localZ]
@@ -249,7 +253,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
-    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, parseLightQuality(args), parseBiomeBlend(args), null);
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, parseLightQuality(args), parseBiomeBlend(args), null, null, null);
     const arr = try builder.finish();
 
     // Resolve human-readable biome names from the language file for the legend.
@@ -432,7 +436,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
     // buildTextured reports its own "computing light" + "meshing geometry" phases.
-    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, quality, blend_biomes, root);
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, quality, blend_biomes, null, null, root);
     const t_mesh = std.Io.Timestamp.now(init.io, .awake);
     const tex_node = root.start("building textures", 0);
     const arr = try builder.finish();
@@ -485,6 +489,53 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         "  note: large tile — if it's slow in the browser, render less with --radius {d}\n",
         .{@max(2, @divFloor(radius, 2))},
     );
+}
+
+/// `vantage map <save-dir>` — the tiled-map entry point: discover the world and
+/// assets like `render`, then emit a quadtree of streamable tiles + a manifest
+/// under `--out` (default `web/public/map`) instead of one monolithic tile.
+/// This is the P4 path that lets the full world stream and frustum-cull.
+fn runMap(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 1) return usage();
+    const save = args[0];
+    var assets_opt: ?[]const u8 = null;
+    var out_dir: []const u8 = "web/public/map";
+    const quality = parseLightQuality(args);
+    const blend = parseBiomeBlend(args);
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--assets") and i + 1 < args.len) {
+            assets_opt = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--out") and i + 1 < args.len) {
+            out_dir = args[i + 1];
+            i += 1;
+        }
+    }
+
+    const region_dir = (try world.findRegionDir(a, init.io, save)) orelse {
+        std.debug.print(
+            \\no Minecraft region files found under:
+            \\  {s}
+            \\Point me at a world save folder (the one with level.dat).
+            \\
+        , .{save});
+        return error.NoRegions;
+    };
+    const home = init.environ_map.get("HOME") orelse "";
+    const assets = assets_opt orelse (try findAssets(a, init.io, home)) orelse {
+        std.debug.print(
+            \\no extracted assets found. Get them from a client jar first:
+            \\  just extract <client.jar>     (or pass --assets <assets/minecraft dir>)
+            \\
+        , .{});
+        return error.NoAssets;
+    };
+
+    std.debug.print("world:   {s}\nassets:  {s}\nout:     {s}\n", .{ region_dir, assets, out_dir });
+    const root = std.Progress.start(init.io, .{ .root_name = "vantage map" });
+    defer root.end();
+    try tiling.run(init, a, region_dir, assets, out_dir, .{ .quality = quality, .blend_biomes = blend }, root);
 }
 
 /// Auto-detect an extracted `assets/minecraft` under `~/.cache/vantage/assets/<ver>/`,
@@ -658,4 +709,5 @@ test {
     _ = biome;
     _ = lang;
     _ = world;
+    _ = tiling;
 }

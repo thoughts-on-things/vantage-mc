@@ -1,16 +1,19 @@
-// Demo app — the reference consumer of vantage-mc/react. This is exactly how a
-// server-admin web app would drop Vantage in: one <VantageViewer> with a
-// <BiomeLayer> child. Tiles are served from web/public/ (regenerate with
-// `just render <save>`). Deep-links: #top frames top-down, #biome opens the
-// biome layer.
+// Demo app — the reference consumer of vantage-mc. Two modes:
+//   default      the streamed tiled map (VantageMap) over web/public/map/map.json
+//                — regenerate with `just map <save>`. This is the P4 path.
+//   #single      the original single-tile React viewer (VantageViewer) over
+//                /terrain.vtile — regenerate with `just render <save>`.
+// Deep-links carried through: #top frames top-down, #biome opens the biome layer.
 
 import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BiomeLayer, LightPanel, MapNav, Reticle, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
+import { VantageMap } from '../src/three/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
 const biomeOpen = /biome/i.test(location.hash);
+const singleMode = /single/i.test(location.hash);
 
 /** A small HUD overlay showing the loaded tile's stats + the control legend — a
  *  custom child that reads the shared engine state via useVantage(). */
@@ -68,7 +71,6 @@ function Hud() {
 }
 
 function App() {
-  // Dev-only: expose the engine for manual poking in the console.
   const ref = (e: import('../src/three/index.js').VantageViewer | null) => {
     (window as unknown as { __vantage?: unknown }).__vantage = e;
   };
@@ -83,8 +85,44 @@ function App() {
   );
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+/** Mount the streamed tiled map (vanilla — exercises VantageMap directly), with a
+ *  minimal DOM HUD wired to its stream/load events. `B` toggles the biome layer. */
+function mountMap(root: HTMLElement) {
+  const hud = document.createElement('div');
+  hud.className = 'vtg-glass';
+  hud.style.cssText =
+    'position:absolute;top:16px;left:16px;padding:12px 15px;font:12px/1.5 system-ui,sans-serif;color:#e6eefb;max-width:340px;pointer-events:none';
+  root.appendChild(hud);
+
+  void VantageMap.mount(root, '/map/map.json', { view }).then((map) => {
+    (window as unknown as { __vantage?: unknown }).__vantage = map;
+    if (biomeOpen) map.setBiomeLayer(true);
+    let world = '';
+    map.on('load', (info) => {
+      world = `X[${info.world.minX}..${info.world.maxX}] Z[${info.world.minZ}..${info.world.maxZ}] · ${info.legend.length - 1} biomes`;
+    });
+    const mono = 'ui-monospace,Menlo,monospace';
+    const render = (loaded: number, visible: number, total: number) => {
+      hud.innerHTML =
+        `<div style="font-weight:700;letter-spacing:.04em;color:#eef4ff">vantage <b style="color:#5b9bff;font:600 11px ${mono};margin-left:2px">tiled map</b></div>` +
+        `<div style="color:#93a9cc;margin-top:4px;font:11px ${mono};font-variant-numeric:tabular-nums">${visible} visible · ${loaded} resident · ${total} tiles</div>` +
+        `<div style="color:#6f86ab;margin-top:4px;font:10px ${mono}">${world}</div>` +
+        `<div style="color:#6f86ab;margin-top:8px;font-size:11px;line-height:1.6"><b style="color:#93a9cc">drag</b> pan · <b style="color:#93a9cc">right-drag</b> orbit · <b style="color:#93a9cc">scroll</b> zoom · <b style="color:#93a9cc">B</b> biomes</div>`;
+    };
+    map.on('tiles', ({ loaded, visible, total }) => render(loaded, visible, total));
+    addEventListener('keydown', (e) => {
+      if (e.key === 'b' || e.key === 'B') map.toggleBiomeLayer();
+    });
+  });
+}
+
+const root = document.getElementById('root')!;
+if (singleMode) {
+  createRoot(root).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+} else {
+  mountMap(root);
+}

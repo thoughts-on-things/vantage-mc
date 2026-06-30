@@ -162,6 +162,58 @@ pub fn assembleWindow(
     return grid.buildGrid(arena, chunks.items, stats);
 }
 
+/// A decode-once cache of chunks keyed by world chunk coords `{cx, cz}`. The
+/// tiled-map generator decodes every chunk a single time into this, then assembles
+/// each tile's grid (tile + apron) from it — so a chunk shared by several tiles'
+/// aprons isn't decompressed and NBT-parsed once per tile. Chunks live in the
+/// store's arena (the map-level arena), so per-tile grids built from them are safe
+/// to free.
+pub const ChunkStore = std.AutoHashMap([2]i32, chunk.Chunk);
+
+/// Decode every populated chunk across all loaded regions exactly once.
+pub fn decodeAll(arena: std.mem.Allocator, loaded: []const LoadedRegion) !ChunkStore {
+    var store = ChunkStore.init(arena);
+    for (loaded) |r| {
+        const reg = region.Region.fromBytes(r.bytes);
+        var lz: u32 = 0;
+        while (lz < 32) : (lz += 1) {
+            var lx: u32 = 0;
+            while (lx < 32) : (lx += 1) {
+                const ch = (grid.decodeChunk(arena, reg, @intCast(lx), @intCast(lz)) catch continue) orelse continue;
+                if (ch.sections.len == 0) continue;
+                try store.put(.{ ch.x, ch.z }, ch);
+            }
+        }
+    }
+    return store;
+}
+
+/// Assemble a grid over the world-chunk window `[cx0..cx1] × [cz0..cz1]` from
+/// already-decoded chunks in `store` — no re-decode. Same result as
+/// {@link assembleWindow}, minus the decompression/parse per call.
+pub fn assembleFromStore(
+    arena: std.mem.Allocator,
+    store: *const ChunkStore,
+    cx0: i32,
+    cz0: i32,
+    cx1: i32,
+    cz1: i32,
+    stats: *grid.Stats,
+) !grid.Grid {
+    var chunks: std.ArrayList(chunk.Chunk) = .empty;
+    var cz = cz0;
+    while (cz <= cz1) : (cz += 1) {
+        var cx = cx0;
+        while (cx <= cx1) : (cx += 1) {
+            if (store.get(.{ cx, cz })) |ch| {
+                stats.chunks_loaded += 1;
+                try chunks.append(arena, ch);
+            } else stats.chunks_missing += 1;
+        }
+    }
+    return grid.buildGrid(arena, chunks.items, stats);
+}
+
 test "parseRegionName" {
     try std.testing.expectEqual([2]i32{ -2, 1 }, parseRegionName("r.-2.1.mca").?);
     try std.testing.expectEqual([2]i32{ 0, 0 }, parseRegionName("r.0.0.mca").?);

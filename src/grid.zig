@@ -130,29 +130,47 @@ pub const Surface = struct {
 /// non-air block. Water/plants count (the hover over an ocean reports the ocean,
 /// not the seabed). Cheap relative to meshing — it stops at the first hit.
 pub fn buildSurface(arena: std.mem.Allocator, g: Grid) !Surface {
-    const n = g.sx * g.sz;
-    const biome = try arena.alloc(u16, n);
-    const height = try arena.alloc(i16, n);
+    const x1 = g.min_x + @as(i32, @intCast(g.sx)) - 1;
+    const z1 = g.min_z + @as(i32, @intCast(g.sz)) - 1;
+    return buildSurfaceRect(arena, g, g.min_x, g.min_z, x1, z1);
+}
+
+/// Like {@link buildSurface} but restricted to an inclusive world-block XZ rect —
+/// a tile builds the surface for just its interior (the apron is excluded). The
+/// returned map's origin is the rect min; columns whose XZ lies outside the grid
+/// read as empty. Reused by the tiled-map generator for per-tile hover/height.
+pub fn buildSurfaceRect(arena: std.mem.Allocator, g: Grid, wx0: i32, wz0: i32, wx1: i32, wz1: i32) !Surface {
+    const sw: usize = @intCast(@max(0, wx1 - wx0 + 1));
+    const sd: usize = @intCast(@max(0, wz1 - wz0 + 1));
+    const biome = try arena.alloc(u16, sw * sd);
+    const height = try arena.alloc(i16, sw * sd);
     @memset(biome, 0);
     const empty: i16 = @intCast(g.min_y - 1);
-    var z: usize = 0;
-    while (z < g.sz) : (z += 1) {
-        var x: usize = 0;
-        while (x < g.sx) : (x += 1) {
-            const ci = z * g.sx + x;
+    const sxi: i32 = @intCast(g.sx);
+    const szi: i32 = @intCast(g.sz);
+    var wz = wz0;
+    while (wz <= wz1) : (wz += 1) {
+        var wx = wx0;
+        while (wx <= wx1) : (wx += 1) {
+            const ci = @as(usize, @intCast(wz - wz0)) * sw + @as(usize, @intCast(wx - wx0));
             height[ci] = empty;
+            const gx = wx - g.min_x;
+            const gz = wz - g.min_z;
+            if (gx < 0 or gz < 0 or gx >= sxi or gz >= szi) continue; // outside the grid
+            const ux: usize = @intCast(gx);
+            const uz: usize = @intCast(gz);
             var y: usize = g.sy;
             while (y > 0) {
                 y -= 1;
-                if (g.ids[g.index(x, y, z)] != AIR) {
+                if (g.ids[g.index(ux, y, uz)] != AIR) {
                     height[ci] = @intCast(g.min_y + @as(i32, @intCast(y)));
-                    biome[ci] = g.biomeAt(x, y, z);
+                    biome[ci] = g.biomeAt(ux, y, uz);
                     break;
                 }
             }
         }
     }
-    return .{ .sx = g.sx, .sz = g.sz, .min_x = g.min_x, .min_z = g.min_z, .biome = biome, .height = height };
+    return .{ .sx = sw, .sz = sd, .min_x = wx0, .min_z = wz0, .biome = biome, .height = height };
 }
 
 const Interner = struct {

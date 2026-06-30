@@ -6,6 +6,9 @@ zig-out/
 *.vtile
 *.vtexarr
 
+# Generated tiled map (regenerate with `vantage map` → web/public/map/)
+web/public/map/
+
 # Web package (see web/.gitignore for the rest)
 web/node_modules/
 web/dist/

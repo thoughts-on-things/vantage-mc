@@ -181,6 +181,42 @@ const AO_LUT = [4]u8{ 130, 178, 218, 255 };
 /// blends over the already-drawn opaque one, so the seabed shows through.
 pub const Built = struct { solid: Mesh2 = .{}, fluid: Mesh2 = .{}, light_ms: i64 = 0 };
 
+/// Inclusive world-block XZ rectangle the mesher should emit geometry for. A
+/// tile's grid carries an apron of neighbour blocks so cross-tile culling, AO,
+/// and the light flood-fill read correctly at the seam; only cells whose world
+/// (x,z) fall inside this rect actually produce faces. Each solid block lives in
+/// exactly one tile's interior, so faces emit once — no seams, no double-draw.
+/// `null` (the default) emits the whole grid (the pre-tiling single-tile path).
+/// A bake cache shared across many tiles: resolve + bake each distinct
+/// (block, state) model exactly once for the whole map instead of once per tile.
+/// Keyed by `name\x00state`; baked faces live in `arena` (the map-level arena), so
+/// they outlive the per-tile arenas. Pass one into {@link buildTextured} when
+/// meshing many tiles (the tiled-map generator); `null` bakes per call (the
+/// single-tile path). The texture `Builder` is shared separately, so layer ids
+/// baked into a cached model stay valid across tiles.
+pub const BakeCache = struct {
+    arena: std.mem.Allocator,
+    map: std.StringHashMap(Cached),
+
+    pub fn init(arena: std.mem.Allocator) BakeCache {
+        return .{ .arena = arena, .map = std.StringHashMap(Cached).init(arena) };
+    }
+};
+
+pub const Interior = struct {
+    x0: i64,
+    x1: i64,
+    z0: i64,
+    z1: i64,
+
+    /// Is the grid cell at world-local (x,z) over grid `g` inside the rect?
+    inline fn contains(self: Interior, g: grid.Grid, x: usize, z: usize) bool {
+        const wx = @as(i64, g.min_x) + @as(i64, @intCast(x));
+        const wz = @as(i64, g.min_z) + @as(i64, @intCast(z));
+        return wx >= self.x0 and wx <= self.x1 and wz >= self.z0 and wz <= self.z1;
+    }
+};
+
 /// Baked-light quality. `flat` lights each face by the single cell it faces (hard
 /// per-face steps). `smooth` averages the four cells around each vertex (the AO
 /// neighbourhood) for soft, BlueMap-grade gradients. Set at bake time (`--light`).
@@ -199,6 +235,8 @@ pub fn buildTextured(
     reg: *biome.Registry,
     quality: LightQuality,
     blend_biomes: bool,
+    interior: ?Interior,
+    bake_cache: ?*BakeCache,
     progress: ?std.Progress.Node,
 ) !Built {
     var mesh: Mesh2 = .{}; // opaque terrain
@@ -228,7 +266,7 @@ pub fn buildTextured(
         w.* = id != 0 and isWater(nm);
         wi.* = id != 0 and (w.* or isWaterlogged(nm, g.stateOf(@intCast(id))));
         lvl.* = if (w.*) @intCast(parseLevel(g.stateOf(@intCast(id)))) else if (wi.*) 0 else -1;
-        o.* = if (id == 0) false else (try getCached(arena, g, resolver, tex, cache, @intCast(id))).occluder;
+        o.* = if (id == 0) false else (try getCached(arena, g, resolver, tex, cache, @intCast(id), bake_cache)).occluder;
     }
     const water_layer: f32 = @floatFromInt(tex.layerFor("block/water_still"));
 
@@ -274,6 +312,7 @@ pub fn buildTextured(
         .blend_biomes = blend_biomes,
         .water_level = water_level,
         .greedy_faces = greedy_faces,
+        .interior = interior,
     };
     const cpu = std.Thread.getCpuCount() catch 1;
     const n_threads = @max(1, @min(cpu, g.sy));
@@ -299,16 +338,21 @@ pub fn buildTextured(
 
     // Greedy pass: merge the full-cube occluder faces (which the per-block pass
     // skipped) into big tiled quads. The 6 directions are independent, so they
-    // run as 6 workers into disjoint meshes, concatenated in direction order.
-    const gp = try arena.alloc(GreedyPartial, 6);
-    const gthreads = try arena.alloc(std.Thread, 6);
-    for (gp, 0..) |*p, di| p.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator), .di = di };
-    for (gp, gthreads) |*p, *t| t.* = try std.Thread.spawn(.{}, greedyWorker, .{ &ctx, p });
-    for (gthreads) |t| t.join();
-    for (gp) |*p| {
-        defer p.arena.deinit();
-        if (p.err) |e| return e;
-        try appendMesh(arena, &mesh, &p.mesh);
+    // run as 6 workers into disjoint meshes, concatenated in direction order —
+    // or inline, in direction order, for small grids (same byte-identical result).
+    if (n_threads <= 1) {
+        for (0..6) |di| try meshGreedyDir(&ctx, arena, &mesh, di);
+    } else {
+        const gp = try arena.alloc(GreedyPartial, 6);
+        const gthreads = try arena.alloc(std.Thread, 6);
+        for (gp, 0..) |*p, di| p.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator), .di = di };
+        for (gp, gthreads) |*p, *t| t.* = try std.Thread.spawn(.{}, greedyWorker, .{ &ctx, p });
+        for (gthreads) |t| t.join();
+        for (gp) |*p| {
+            defer p.arena.deinit();
+            if (p.err) |e| return e;
+            try appendMesh(arena, &mesh, &p.mesh);
+        }
     }
 
     return .{ .solid = mesh, .fluid = fluid, .light_ms = light_ms };
@@ -337,6 +381,10 @@ const MeshCtx = struct {
     /// directions (see `dirIndex`), or -1. The greedy pass uses this to find a
     /// cell's mergeable face; the per-block pass skips faces marked `greedy`.
     greedy_faces: [][6]i16,
+    /// When set, only cells whose world (x,z) lie in this rect emit geometry; the
+    /// rest of the grid is apron (neighbour context for culling/AO/light). See
+    /// `Interior`. `null` emits the whole grid.
+    interior: ?Interior = null,
 };
 
 /// One thread's slice of the mesh: its own arena (page-backed) and Y range.
@@ -368,6 +416,7 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
             while (x < g.sx) : (x += 1) {
                 const id = g.ids[g.index(x, y, z)];
                 if (id == grid.AIR) continue;
+                if (ctx.interior) |iv| if (!iv.contains(g, x, z)) continue; // apron cell: context only
                 const bid: usize = g.biomeAt(x, y, z);
                 const wx: f32 = @floatFromInt(@as(i64, g.min_x) + @as(i64, @intCast(x)));
                 const wy: f32 = @floatFromInt(@as(i64, g.min_y) + @as(i64, @intCast(y)));
@@ -556,6 +605,7 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, di
                 const z = cell[2];
                 const id = g.ids[g.index(x, y, z)];
                 if (id == grid.AIR) continue;
+                if (ctx.interior) |iv| if (!iv.contains(g, x, z)) continue; // apron cell: context only
                 const fi = ctx.greedy_faces[id][di];
                 if (fi < 0) continue;
                 const xi: isize = @intCast(x);
@@ -956,9 +1006,26 @@ fn getCached(
     tex: *texture.Builder,
     cache: []?Cached,
     id: u16,
+    bake_cache: ?*BakeCache,
 ) !Cached {
     if (cache[id]) |c| return c;
-    const c = try bake(arena, g.nameOf(id), g.stateOf(id), resolver, tex);
+    const name = g.nameOf(id);
+    const state = g.stateOf(id);
+    // With a shared cache, bake each distinct (name,state) once for the whole map
+    // (into the map-level arena); without one, bake into the per-call arena.
+    const c = if (bake_cache) |bc| blk: {
+        // `name`/`state` point into the per-tile grid arena (freed after this tile),
+        // so the stored key must be owned by the cache arena or it dangles. The
+        // composite (state≠"") form is already cache-arena-allocated; dupe the bare
+        // name form. getOrPut hashes the lookup bytes; we then pin the stored key.
+        const lookup = if (state.len == 0) name else try std.fmt.allocPrint(bc.arena, "{s}\x00{s}", .{ name, state });
+        const gop = try bc.map.getOrPut(lookup);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = if (state.len == 0) try bc.arena.dupe(u8, name) else lookup;
+            gop.value_ptr.* = try bake(bc.arena, name, state, resolver, tex);
+        }
+        break :blk gop.value_ptr.*;
+    } else try bake(arena, name, state, resolver, tex);
     cache[id] = c;
     return c;
 }

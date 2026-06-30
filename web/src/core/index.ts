@@ -5,6 +5,7 @@
 export { ByteReader, TILE_MAGIC, TEXTURE_MAGIC, type TileMagic } from './format.js';
 export { parseTile, type DecodedTile, type MeshSection, type SurfaceMap } from './tile.js';
 export { parseTextureArray, type DecodedTextureArray } from './texture.js';
+export { loadManifest, type MapManifest, type MapTile, type LoadedManifest } from './manifest.js';
 export {
   biomePalette,
   stripNamespace,

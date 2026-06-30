@@ -22,10 +22,7 @@ export {
   type ViewMode,
   type LightSettings,
   type DisplaySettings,
-  type RenderMode,
-  CINEMATIC_DISPLAY,
   VANILLA_DISPLAY,
-  DISPLAY_PRESETS,
   DEFAULT_ORBIT_ANGLE,
 } from './viewer.js';
 

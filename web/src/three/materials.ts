@@ -89,10 +89,26 @@ const FRAG = /* glsl */ `
   }
 
   // Pixel-art textures + the colour uniforms are authored in sRGB; decode to
-  // linear so lighting and the AgX tonemap are correct (raw ShaderMaterial
-  // uniforms bypass three's automatic colour management).
+  // linear so lighting is correct, then re-encode at the end (raw ShaderMaterial
+  // bypasses three's colour management, and we render straight to the canvas).
   vec3 toLinear(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+  }
+  // Linear -> display sRGB (the OETF). Done in-shader since there's no OutputPass.
+  vec3 toSRGB(vec3 c) {
+    c = max(c, vec3(0.0));
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+  }
+
+  // Minecraft's fixed face-direction brightness — the signature relief cue the
+  // game bakes into every block's vertex colour: top 1.0, bottom 0.5, north/south
+  // (±Z) 0.8, east/west (±X) 0.6. Full-cube faces have axis-aligned normals so the
+  // pick is exact; this reads as Minecraft far more than a soft sun dot-product.
+  float faceShade(vec3 n) {
+    vec3 a = abs(n);
+    if (a.y >= a.x && a.y >= a.z) return n.y >= 0.0 ? 1.0 : 0.5; // top / bottom
+    if (a.x >= a.z) return 0.6;                                  // east / west
+    return 0.8;                                                  // north / south
   }
 
   // Final colour grade: saturation then contrast around mid grey. Cheap pop/clarity
@@ -110,11 +126,9 @@ const FRAG = /* glsl */ `
     vec4 t = texture(map, vec3(vUv, vLayer), -uSharpness); // negative bias = sharper
     if (t.a < 0.05) discard;                       // drop only fully-empty texels; the
                                                    // fractional edge becomes MSAA coverage
-    t.rgb = toLinear(t.rgb);                        // work in linear; OutputPass tonemaps + encodes
+    t.rgb = toLinear(t.rgb);                        // work in linear; encode at the end
     vec3 fogCol = toLinear(uFogColor);
     vec3 N = normalize(vN);
-    vec3 ambient = mix(GND, SKY, 0.5 + 0.5 * N.y); // sky above, earth below
-    float ndl = max(dot(N, normalize(lightDir)), 0.0);
 
     // Water pass: a semi-transparent blue tint over the normally-lit seabed —
     // BlueMap-style. The depth read comes from the SEABED darkening (sky light is
@@ -133,7 +147,7 @@ const FRAG = /* glsl */ `
       vec3 wlit = grade(wcol * (0.62 + 0.28 * SUN * ndl2) * lightAmt * lightCol * uExposure);
       float wf = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity;
       float wa = mix(0.5, 0.74, depth);                         // blue tint, seabed still reads through
-      frag = vec4(mix(wlit, fogCol, wf), wa);
+      frag = vec4(toSRGB(mix(wlit, fogCol, wf)), wa);
       return;
     }
 
@@ -147,9 +161,16 @@ const FRAG = /* glsl */ `
       float g = dot(base, vec3(0.299, 0.587, 0.114));
       base = mix(base, vec3(g) * 0.55, 0.82);      // fade biomes other than the selected one
     }
-    vec3 lit = grade(base * (0.25 + 0.45 * ambient + 0.55 * SUN * ndl) * ao * lightAmt * lightCol * uExposure);
+    // Relief from Minecraft's per-face brightness (not a soft sun dot), times the
+    // baked sky/block light and AO — i.e. the game's own shading formula. A faint
+    // hemispheric colour cast (sky above / earth below) keeps the atmosphere
+    // without washing out the crisp face steps.
+    float fshade = faceShade(N);
+    vec3 hemi = mix(GND, SKY, 0.5 + 0.5 * N.y);
+    vec3 shade = mix(vec3(1.0), hemi, 0.16) * fshade;
+    vec3 lit = grade(base * shade * ao * lightAmt * lightCol * uExposure);
     float f = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity; // aerial depth into the horizon
-    frag = vec4(mix(lit, fogCol, f), uAlpha * t.a);           // alpha → MSAA coverage (foliage AA)
+    frag = vec4(toSRGB(mix(lit, fogCol, f)), uAlpha * t.a);   // alpha → MSAA coverage (foliage AA)
   }
 `;
 
@@ -239,12 +260,9 @@ export function createSky(): THREE.Mesh {
       precision highp float;
       uniform vec3 uTop; uniform vec3 uHorizon;
       in vec3 vDir; out vec4 frag;
-      vec3 toLinear(vec3 c) {
-        return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
-      }
       void main() {
         float t = smoothstep(-0.08, 0.5, vDir.y);
-        frag = vec4(toLinear(mix(uHorizon, uTop, t)), 1.0); // linear; OutputPass tonemaps + encodes
+        frag = vec4(mix(uHorizon, uTop, t), 1.0); // authored sRGB, straight to the canvas
       }
     `,
     uniforms: {

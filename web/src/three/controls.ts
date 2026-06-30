@@ -18,7 +18,6 @@ import * as THREE from 'three';
 
 const HALF_PI = Math.PI * 0.5;
 const HALF_PI_DIV = 1 / HALF_PI;
-const VEC2_ZERO = new THREE.Vector2(0, 0);
 
 /** A terrain-height lookup: world surface Y at (x, z), or `null` off the map. */
 export type HeightSampler = (x: number, z: number) => number | null;
@@ -110,6 +109,13 @@ export class MapControls {
   private dynamicDistance = false; // tilt pulls the camera in (only when close)
   private moved = false; // any drag actually moved (vs. a click) — for tap detect
   private downPos = new THREE.Vector2();
+
+  // Scratch for cursor→ground projection (the anchored pan). `panBuf` holds a
+  // WORLD-space shift (not pixels): the amount that keeps the grabbed ground
+  // point pinned under the cursor, accumulated per event and drained with inertia.
+  private readonly _ndc = new THREE.Vector3();
+  private readonly _gpA = new THREE.Vector2();
+  private readonly _gpB = new THREE.Vector2();
 
   // Two-finger touch pinch/rotate bookkeeping.
   private touchDist = 0;
@@ -397,18 +403,16 @@ export class MapControls {
   // --- motion application (drains the buffers) -------------------------------
 
   private applyPan(dt: number): void {
-    if (this.panBuf.lengthSq() < 1e-8) {
+    if (this.panBuf.lengthSq() < 1e-9) {
       this.panBuf.set(0, 0);
       return;
     }
-    const s = this.smoothing(0.3, dt);
-    const h = this.domElement.clientHeight || 1;
-    const dir = this.panBuf.clone().rotateAround(VEC2_ZERO, this.rotation);
-    // speed 1.5; both pixel multipliers reduce to 1/height (aspect cancels), so
-    // motion is normalized to a fraction of screen height and scaled by zoom.
-    const f = (s * this.distance * 1.5) / h;
-    this.position.x += dir.x * f;
-    this.position.z += dir.y * f;
+    // panBuf is already a world-space shift (cursor-anchored); just ease it in.
+    // A tighter stiffness than rotate/zoom keeps the ground tracking the cursor
+    // closely while still leaving a residual to glide on release (inertia).
+    const s = this.smoothing(0.55, dt);
+    this.position.x += this.panBuf.x * s;
+    this.position.z += this.panBuf.y * s;
     this.panBuf.multiplyScalar(1 - s);
   }
 
@@ -609,9 +613,15 @@ export class MapControls {
     const fwd = (k.has('w') || k.has('arrowup') ? 1 : 0) - (k.has('s') || k.has('arrowdown') ? 1 : 0);
     const strafe = (k.has('d') || k.has('arrowright') ? 1 : 0) - (k.has('a') || k.has('arrowleft') ? 1 : 0);
     if (fwd || strafe) {
-      const px = 9 * fr * boost; // px-equivalent per frame
-      this.panBuf.x += strafe * px;
-      this.panBuf.y += -fwd * px; // forward = up the screen
+      // World-space (panBuf is world now), scaled by zoom so a key-pan covers a
+      // consistent fraction of the view at any distance, rotated by the heading.
+      const sp = this.distance * 0.025 * fr * boost;
+      const cs = Math.cos(this.rotation);
+      const sn = Math.sin(this.rotation);
+      const sx = strafe; // screen x = strafe
+      const sy = -fwd; // forward = up the screen (−y)
+      this.panBuf.x += (sx * cs - sy * sn) * sp;
+      this.panBuf.y += (sx * sn + sy * cs) * sp;
     }
     const rot = (k.has('e') ? 1 : 0) - (k.has('q') ? 1 : 0);
     if (rot) this.rotBuf += rot * 7 * fr;
@@ -622,6 +632,26 @@ export class MapControls {
   }
 
   // --- camera derivation -----------------------------------------------------
+
+  /** Project a screen-pixel point onto the horizontal plane at world height
+   *  `planeY`, writing the world (x, z) into `out`. Returns false when the ray
+   *  runs parallel to / away from the plane (e.g. aimed above the horizon). This
+   *  is what anchors the pan to the cursor: the world point under the cursor is
+   *  recoverable, so we can keep it pinned there. */
+  private groundPoint(screen: THREE.Vector2, planeY: number, out: THREE.Vector2): boolean {
+    const w = this.domElement.clientWidth || 1;
+    const h = this.domElement.clientHeight || 1;
+    this._ndc.set((screen.x / w) * 2 - 1, -((screen.y / h) * 2 - 1), 0.5).unproject(this.camera);
+    const ox = this.camera.position.x;
+    const oy = this.camera.position.y;
+    const oz = this.camera.position.z;
+    const dy = this._ndc.y - oy;
+    if (Math.abs(dy) < 1e-6) return false;
+    const t = (planeY - oy) / dy;
+    if (t <= 0) return false; // plane is behind the camera / above the horizon
+    out.set(ox + (this._ndc.x - ox) * t, oz + (this._ndc.z - oz) * t);
+    return true;
+  }
 
   private updateCamera(): void {
     // Place the camera on the orbit: a horizontal bearing from `rotation`, lifted
@@ -736,9 +766,16 @@ export class MapControls {
     if (p.distanceToSquared(this.downPos) > 9) this.moved = true;
 
     if (this.panning) {
-      // Sum the negated pixel delta — grabbing the world under the cursor.
-      this.panBuf.x += this.lastPan.x - p.x;
-      this.panBuf.y += this.lastPan.y - p.y;
+      // Cursor-anchored grab: shift the pivot by the WORLD distance between where
+      // the cursor pointed last and where it points now (both on the pivot-height
+      // ground plane). The grabbed point stays under the cursor at any tilt/zoom —
+      // unlike a pixel·distance heuristic, which slides faster/slower than the
+      // cursor on a tilted view. Falls back to no-op when the ray misses the plane.
+      const planeY = this.position.y;
+      if (this.groundPoint(this.lastPan, planeY, this._gpA) && this.groundPoint(p, planeY, this._gpB)) {
+        this.panBuf.x += this._gpA.x - this._gpB.x;
+        this.panBuf.y += this._gpA.y - this._gpB.y;
+      }
       this.lastPan.copy(p);
     } else if (this.orbiting) {
       this.rotBuf += p.x - this.lastOrbit.x; // horizontal → azimuth

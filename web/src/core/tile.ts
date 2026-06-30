@@ -105,6 +105,45 @@ function readTexturedBiomeSection(r: ByteReader): MeshSection {
   };
 }
 
+/**
+ * Read a VTL6 quantized mesh section: uv/colour/normal/indices unchanged, then
+ * a per-axis bounding box, u16 positions (world = min + q·scale), and u16
+ * layer/biome ids. Positions/layer/biome are expanded back to Float32 so the
+ * decoded section is shape-identical to the unquantized VTL3/4/5 readers.
+ */
+function readQuantizedSection(r: ByteReader): MeshSection {
+  const vertexCount = r.u32();
+  const indexCount = r.u32();
+  const uv = r.f32(2 * vertexCount);
+  const colors = r.u8a(4 * vertexCount);
+  const normalsI8 = r.i8a(4 * vertexCount);
+  const indices = r.u32a(indexCount);
+  const bbox = r.f32(6); // min xyz, scale xyz
+  const mnx = bbox[0]!, mny = bbox[1]!, mnz = bbox[2]!;
+  const scx = bbox[3]!, scy = bbox[4]!, scz = bbox[5]!;
+  const posQ = r.u16a(3 * vertexCount);
+  const layerQ = r.u16a(vertexCount);
+  const biomeQ = r.u16a(vertexCount);
+  r.align4(); // skip the section's tail padding
+
+  const positions = new Float32Array(3 * vertexCount);
+  const layer = new Float32Array(vertexCount);
+  const biome = new Float32Array(vertexCount);
+  for (let i = 0; i < vertexCount; i++) {
+    positions[i * 3 + 0] = mnx + posQ[i * 3 + 0]! * scx;
+    positions[i * 3 + 1] = mny + posQ[i * 3 + 1]! * scy;
+    positions[i * 3 + 2] = mnz + posQ[i * 3 + 2]! * scz;
+    layer[i] = layerQ[i]!;
+    biome[i] = biomeQ[i]!;
+  }
+  return {
+    vertexCount, indexCount, positions, uv, layer, colors, biome,
+    normals: expandNormals(normalsI8, vertexCount),
+    light: extractLight(normalsI8, vertexCount),
+    indices,
+  };
+}
+
 /** Read the VTL5 surface map at the reader's cursor. */
 function readSurface(r: ByteReader): SurfaceMap {
   const width = r.u32();
@@ -140,6 +179,16 @@ export function parseTile(buffer: ArrayBuffer): DecodedTile {
   const magic = r.magic();
   r.off = 4;
   const version = r.u32();
+
+  // VTL6 = VTL5 with quantized vertices (u16 positions + layer/biome). Same
+  // section count + surface + legend; only the per-vertex decode differs.
+  if (magic === TILE_MAGIC.VTL6) {
+    const solid = readQuantizedSection(r);
+    const fluid = readQuantizedSection(r);
+    const surface = readSurface(r);
+    const biomeNames = readLegend(r);
+    return { magic, version, textured: true, hasBiome: true, ...solid, biomeNames, fluid, surface };
+  }
 
   // VTL3/4/5 share the same solid-section layout; 4 adds a fluid section, 5
   // adds a surface map. Read the common spine once, then the extensions.
@@ -184,5 +233,5 @@ export function parseTile(buffer: ArrayBuffer): DecodedTile {
     };
   }
 
-  throw new Error(`vantage: unrecognized tile magic "${magic}" (expected VTL1–VTL5)`);
+  throw new Error(`vantage: unrecognized tile magic "${magic}" (expected VTL1–VTL6)`);
 }

@@ -18,6 +18,8 @@ export const TILE_MAGIC = {
   VTL4: 'VTL4',
   /** + a top-down surface map for O(ray) biome picking. */
   VTL5: 'VTL5',
+  /** Quantized vertices: u16 positions (bbox transform) + u16 layer/biome. */
+  VTL6: 'VTL6',
 } as const;
 
 export type TileMagic = (typeof TILE_MAGIC)[keyof typeof TILE_MAGIC];
@@ -103,5 +105,10 @@ export class ByteReader {
     const a = new Uint32Array(this.buffer, this.off, n);
     this.off += 4 * n;
     return a;
+  }
+
+  /** Advance the cursor to the next 4-byte boundary (skips section padding). */
+  align4(): void {
+    this.off = (this.off + 3) & ~3;
   }
 }

@@ -8,6 +8,7 @@ import {
   encodeVTL3Geo,
   encodeVTL4,
   encodeVTL5,
+  encodeVTL6,
   LEGEND,
 } from './encode.js';
 
@@ -73,6 +74,25 @@ describe('parseTile', () => {
     expect([s.width, s.depth, s.originX, s.originZ]).toEqual([2, 2, 0, 0]);
     expect(Array.from(s.biome)).toEqual([1, 2, 1, 2]);
     expect(Array.from(s.height)).toEqual([64, 65, 66, 67]);
+    expect(t.biomeNames).toEqual(LEGEND);
+  });
+
+  it('decodes VTL6 (quantized vertices, round-trips positions)', () => {
+    const t = parseTile(encodeVTL6());
+    expect(t.magic).toBe('VTL6');
+    expect(t.version).toBe(6);
+    expect(t.textured).toBe(true);
+    expect(t.hasBiome).toBe(true);
+    expect(t.vertexCount).toBe(3);
+    // u16 positions reconstruct as min + q·scale.
+    expect(t.positions[0]).toBeCloseTo(-100, 3); // v0 x: q=0 → min
+    expect(t.positions[3]).toBeCloseTo(200, 2); // v1 x: q=65535 → min+span
+    expect(t.positions[7]).toBeCloseTo(64, 2); // v2 y: q=65535 → 0+64
+    expect(Array.from(t.layer!)).toEqual([3, 3, 3]); // u16 ids expand to float
+    expect(Array.from(t.biome!)).toEqual([1, 2, 1]);
+    expect(t.fluid).toBeDefined();
+    expect(t.surface).toBeDefined();
+    expect(Array.from(t.surface!.height)).toEqual([64, 65, 66, 67]);
     expect(t.biomeNames).toEqual(LEGEND);
   });
 

@@ -178,6 +178,53 @@ export function encodeVTL5(): ArrayBuffer {
   return w.buffer();
 }
 
+/** One VTL6 quantized section: floats for uv, bytes for colour/normal, u32
+ *  indices, then the bbox + u16 positions/layer/biome (mirrors the Zig writer). */
+export interface QSectionInput {
+  uv: number[]; // 2V
+  colors: number[]; // 4V
+  normals: number[]; // 4V (xyzw int8)
+  indices: number[]; // I
+  min: [number, number, number];
+  scale: [number, number, number];
+  posQ: number[]; // 3V (u16)
+  layer: number[]; // V (u16)
+  biome: number[]; // V (u16)
+}
+
+function writeQuantizedSection(w: Writer, V: number, s: QSectionInput): void {
+  w.u32(V).u32(s.indices.length);
+  w.f32a(s.uv).u8a(s.colors).i8a(s.normals).u32a(s.indices);
+  w.f32a([...s.min, ...s.scale]);
+  w.u16a(s.posQ).u16a(s.layer).u16a(s.biome);
+  while (w.off % 4 !== 0) w.u8a([0]); // tail pad to a 4-byte boundary
+}
+
+export function encodeVTL6(): ArrayBuffer {
+  const w = new Writer();
+  w.magic('VTL6').u32(6);
+  // Positions span x∈[-100,200], y∈[0,64], z=0; corners pinned at q=0 / q=65535.
+  const solid: QSectionInput = {
+    uv: [0, 0, 1, 0, 1, 1],
+    colors: Array.from({ length: 12 }, (_, i) => (i * 7) % 256),
+    normals: [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0],
+    indices: [0, 1, 2],
+    min: [-100, 0, 0],
+    scale: [300 / 65535, 64 / 65535, 0],
+    posQ: [0, 0, 0, 65535, 0, 0, 0, 65535, 0],
+    layer: [3, 3, 3],
+    biome: [1, 2, 1],
+  };
+  writeQuantizedSection(w, 3, solid);
+  writeQuantizedSection(w, 3, { ...solid, posQ: [0, 0, 0, 0, 0, 0, 0, 0, 0], layer: [0, 0, 0], biome: [1, 1, 1] });
+  // surface map: 2x2 columns at origin (0,0)
+  w.u32(2).u32(2).i32(0).i32(0);
+  w.u16a([1, 2, 1, 2]); // biome ids
+  w.i16a([64, 65, 66, 67]); // heights
+  writeLegend(w, LEGEND);
+  return w.buffer();
+}
+
 export function encodeTextureArray(width = 2, height = 2, layers = 3): ArrayBuffer {
   const w = new Writer();
   w.magic('VTA1').u32(1).u32(width).u32(height).u32(layers);

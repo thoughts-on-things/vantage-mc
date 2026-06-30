@@ -1,8 +1,9 @@
 // Demo app — the reference consumer of vantage-mc. Two modes:
-//   default      the streamed tiled map (VantageMap) over web/public/map/map.json
-//                — regenerate with `just map <save>`. This is the P4 path.
-//   #single      the original single-tile React viewer (VantageViewer) over
-//                /terrain.vtile — regenerate with `just render <save>`.
+//   default      the single-tile React viewer (VantageViewer) over /terrain.vtile,
+//                with the full UI (biome panel, light panel, nav) — regenerate with
+//                `just render <save>`. This is the established viewer.
+//   #map         the streamed tiled map (VantageMap) over web/public/map/map.json
+//                — regenerate with `just map <save>`. The P4 streaming path.
 // Deep-links carried through: #top frames top-down, #biome opens the biome layer.
 
 import { StrictMode, useEffect, useState } from 'react';
@@ -13,7 +14,7 @@ import { VantageMap } from '../src/three/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
 const biomeOpen = /biome/i.test(location.hash);
-const singleMode = /single/i.test(location.hash);
+const mapMode = /\bmap\b/i.test(location.hash);
 
 /** A small HUD overlay showing the loaded tile's stats + the control legend — a
  *  custom child that reads the shared engine state via useVantage(). */
@@ -117,12 +118,12 @@ function mountMap(root: HTMLElement) {
 }
 
 const root = document.getElementById('root')!;
-if (singleMode) {
+if (mapMode) {
+  mountMap(root);
+} else {
   createRoot(root).render(
     <StrictMode>
       <App />
     </StrictMode>,
   );
-} else {
-  mountMap(root);
 }

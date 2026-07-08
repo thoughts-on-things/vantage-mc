@@ -11,6 +11,7 @@
 //!       subcommand is given, for back-compat: `vantage <region.mca> [lx lz]`.
 
 const std = @import("std");
+const compress = @import("compress.zig");
 const nbt = @import("nbt.zig");
 const region = @import("region.zig");
 const chunk = @import("chunk.zig");
@@ -53,7 +54,10 @@ pub fn main(init: std.process.Init) !void {
 fn usage() error{MissingArgument} {
     std.debug.print(
         \\usage:
-        \\  vantage render  <world-save-dir> [--assets <dir>] [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off]
+        \\  vantage render  <world-save-dir> [--assets <dir>] [--out <dir>] [--tile-chunks <n>]
+        \\                  [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off] [--caves off|<y>]
+        \\      Render the whole populated world as streamable tiles + manifest.json
+        \\      (default out: web/public). --radius caps to a window around spawn.
         \\  vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
         \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1] [--light flat|smooth] [--biome-blend on|off]
         \\  vantage histo   <region.mca> [localX localZ]
@@ -76,6 +80,20 @@ fn parseLightQuality(args: []const []const u8) mesh.LightQuality {
         if (std.mem.eql(u8, args[i + 1], "smooth")) return .smooth;
     }
     return .smooth;
+}
+
+/// Scan args for `--caves off|<y>` (default `55`, the BlueMap default). Faces
+/// below this world Y that only look into dark (sky-light-0) cells are culled —
+/// they are invisible from any above-ground view and dominate tile size on
+/// modern worlds. `off` renders full cave geometry.
+fn parseCaveY(args: []const []const u8) ?i32 {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--caves")) continue;
+        if (std.mem.eql(u8, args[i + 1], "off")) return null;
+        return std.fmt.parseInt(i32, args[i + 1], 10) catch 55;
+    }
+    return 55;
 }
 
 /// Scan args for `--biome-blend on|off` (default `on`). When on, biome tint
@@ -249,7 +267,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
-    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, parseLightQuality(args), parseBiomeBlend(args), null);
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, parseLightQuality(args), parseBiomeBlend(args), null, parseCaveY(args), null);
     const arr = try builder.finish();
 
     // Resolve human-readable biome names from the language file for the legend.
@@ -258,7 +276,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     if (display.len > 0) display[0] = ""; // air/no-data sentinel
     for (g.biome_names[1..], 1..) |bn, i| display[i] = names.biomeName(a, bn);
 
-    const surface = try grid.buildSurface(a, g);
+    const surface = try grid.buildSurface(a, g, null);
     const geo = try tile.serializeWithSurfaceQuantized(a, built.solid, built.fluid, surface, display);
     const tex_blob = try texture.serialize(a, arr);
 
@@ -335,27 +353,37 @@ fn dataRootFromAssets(a: std.mem.Allocator, assets: []const u8) []const u8 {
 }
 
 /// `vantage render <save-dir>` — the friendly entry point: auto-discover the
-/// world's region directory and the extracted assets, render the populated area
-/// (capped to a window) into web/public/terrain.vtile, with a live progress bar.
+/// world's region directory and the extracted assets, then render the WHOLE
+/// populated world as a grid of streamable tiles + a manifest (P4). Each tile
+/// spans `--tile-chunks`² chunks and is meshed with a 1-chunk apron of
+/// neighbour data, so culling, AO, light (range 15 < 16-block apron), and
+/// biome blending are seam-free across tile borders.
 fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 1) return usage();
     const save = args[0];
     var assets_opt: ?[]const u8 = null;
-    var radius: i32 = 6; // default window half-size in chunks (kept browser-loadable
-    // until greedy meshing/LOD land; --radius widens it)
+    var out_dir: []const u8 = "web/public";
+    var tile_chunks: i32 = 8; // tile span in chunks (128×128 blocks)
+    var radius: i32 = 0; // optional cap: only tiles within ±radius chunks of spawn/centre (0 = whole world)
     const quality = parseLightQuality(args);
     const blend_biomes = parseBiomeBlend(args);
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--assets") and i + 1 < args.len) {
-            assets_opt = args[i + 1];
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--radius") and i + 1 < args.len) {
-            radius = std.fmt.parseInt(i32, args[i + 1], 10) catch radius;
-            i += 1;
+    const cave_y = parseCaveY(args);
+    var argi: usize = 1;
+    while (argi < args.len) : (argi += 1) {
+        if (std.mem.eql(u8, args[argi], "--assets") and argi + 1 < args.len) {
+            assets_opt = args[argi + 1];
+            argi += 1;
+        } else if (std.mem.eql(u8, args[argi], "--out") and argi + 1 < args.len) {
+            out_dir = args[argi + 1];
+            argi += 1;
+        } else if (std.mem.eql(u8, args[argi], "--tile-chunks") and argi + 1 < args.len) {
+            tile_chunks = std.math.clamp(std.fmt.parseInt(i32, args[argi + 1], 10) catch tile_chunks, 1, 32);
+            argi += 1;
+        } else if (std.mem.eql(u8, args[argi], "--radius") and argi + 1 < args.len) {
+            radius = std.fmt.parseInt(i32, args[argi + 1], 10) catch radius;
+            argi += 1;
         }
     }
-    const out_path = "web/public/terrain.vtile";
 
     const region_dir = (try world.findRegionDir(a, init.io, save)) orelse {
         std.debug.print(
@@ -386,105 +414,262 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         std.debug.print("no populated chunks found.\n", .{});
         return;
     }
+    const populated = try world.populatedChunks(a, loaded);
+    const spawn = world.readSpawn(a, init.io, save);
 
-    // Window = populated extent, centred-and-capped to the radius.
-    var cx0 = bounds.min_cx;
-    var cx1 = bounds.max_cx;
-    var cz0 = bounds.min_cz;
-    var cz1 = bounds.max_cz;
-    const limit = 2 * radius + 1;
-    var capped = false;
-    if (bounds.spanX() > limit) {
-        const c = @divFloor(bounds.min_cx + bounds.max_cx, 2);
-        cx0 = c - radius;
-        cx1 = c + radius;
-        capped = true;
-    }
-    if (bounds.spanZ() > limit) {
-        const c = @divFloor(bounds.min_cz + bounds.max_cz, 2);
-        cz0 = c - radius;
-        cz1 = c + radius;
-        capped = true;
-    }
+    // The optional --radius cap centres on the spawn point when known (that's
+    // where the interesting builds are), else the populated centre.
+    const centre_cx: i32 = if (spawn) |s| @divFloor(s[0], 16) else @divFloor(bounds.min_cx + bounds.max_cx, 2);
+    const centre_cz: i32 = if (spawn) |s| @divFloor(s[2], 16) else @divFloor(bounds.min_cz + bounds.max_cz, 2);
 
-    std.debug.print("regions: {d} files · {d} populated chunks · extent {d}×{d} chunks\n", .{
-        loaded.len, bounds.count, bounds.spanX(), bounds.spanZ(),
+    // Enumerate the tiles that contain at least one populated chunk. Sparse
+    // worlds (exploration trails across hundreds of regions) stay proportional
+    // to what exists, not to the bounding box.
+    var tile_set = std.AutoHashMap(u64, void).init(a);
+    var pit = populated.keyIterator();
+    while (pit.next()) |key| {
+        const cx: i32 = @bitCast(@as(u32, @truncate(key.* >> 32)));
+        const cz: i32 = @bitCast(@as(u32, @truncate(key.*)));
+        if (radius > 0 and (@abs(cx - centre_cx) > radius or @abs(cz - centre_cz) > radius)) continue;
+        try tile_set.put(world.packChunk(@divFloor(cx, tile_chunks), @divFloor(cz, tile_chunks)), {});
+    }
+    var tile_keys_list: std.ArrayList(u64) = .empty;
+    var tit = tile_set.keyIterator();
+    while (tit.next()) |k| try tile_keys_list.append(a, k.*);
+    const tile_keys = tile_keys_list.items;
+    std.mem.sort(u64, tile_keys, {}, struct {
+        fn lt(_: void, x: u64, y: u64) bool {
+            // Sort by (z, x) for deterministic output and region-major locality.
+            const xz: i32 = @bitCast(@as(u32, @truncate(x)));
+            const yz: i32 = @bitCast(@as(u32, @truncate(y)));
+            if (xz != yz) return xz < yz;
+            const xx: i32 = @bitCast(@as(u32, @truncate(x >> 32)));
+            const yx: i32 = @bitCast(@as(u32, @truncate(y >> 32)));
+            return xx < yx;
+        }
+    }.lt);
+
+    std.debug.print("regions: {d} files · {d} populated chunks · extent {d}×{d} chunks · {d} tiles of {d}×{d} chunks\n", .{
+        loaded.len,    bounds.count, bounds.spanX(), bounds.spanZ(),
+        tile_keys.len, tile_chunks,  tile_chunks,
     });
-    if (capped) std.debug.print(
-        "  large world — rendering a {d}×{d}-chunk window around the centre (use --radius to widen)\n",
-        .{ cx1 - cx0 + 1, cz1 - cz0 + 1 },
-    );
 
-    const total: usize = @intCast((cx1 - cx0 + 1) * (cz1 - cz0 + 1));
-    const root = std.Progress.start(init.io, .{ .root_name = "vantage render" });
-    defer root.end();
-
-    var stats: grid.Stats = .{};
-    const t0 = std.Io.Timestamp.now(init.io, .awake);
-    const read_node = root.start("reading chunks", total);
-    const g = try world.assembleWindow(a, loaded, cx0, cz0, cx1, cz1, &stats, read_node);
-    read_node.end();
-    const t_read = std.Io.Timestamp.now(init.io, .awake);
-
-    const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = assets };
+    // Long-lived shared state: the model resolver (+ cross-tile memo), texture
+    // builder (one texture array for every tile), biome registry/colormaps/lang,
+    // and the world-level biome table that keeps per-vertex biome ids globally
+    // consistent across tiles.
+    var memo = std.StringHashMap([]model.ResolvedModel).init(a);
+    const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = assets, .memo = &memo };
     var builder = try texture.Builder.init(a, init.io, assets);
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
-    // buildTextured reports its own "computing light" + "meshing geometry" phases.
-    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, quality, blend_biomes, root);
-    const t_mesh = std.Io.Timestamp.now(init.io, .awake);
-    const tex_node = root.start("building textures", 0);
-    const arr = try builder.finish();
-    tex_node.end();
-    const t_tex = std.Io.Timestamp.now(init.io, .awake);
-
-    const write_node = root.start("writing tile", 0);
     const names = lang.Lang.load(a, init.io, assets);
-    const display = try a.alloc([]const u8, g.biome_names.len);
-    if (display.len > 0) display[0] = "";
-    for (g.biome_names[1..], 1..) |bn, idx| display[idx] = names.biomeName(a, bn);
-    const surface = try grid.buildSurface(a, g);
-    const geo = try tile.serializeWithSurfaceQuantized(a, built.solid, built.fluid, surface, display);
-    const tex_blob = try texture.serialize(a, arr);
-    const t_ser = std.Io.Timestamp.now(init.io, .awake);
-    const tex_path = try texArrayPath(a, out_path);
-    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = geo });
+
+    var world_raw: std.ArrayList([]const u8) = .empty; // biome resource names, id-indexed
+    var world_display: std.ArrayList([]const u8) = .empty; // legend labels, id-indexed
+    var world_biome_ids = std.StringHashMap(u16).init(a);
+    try world_raw.append(a, "");
+    try world_display.append(a, "");
+
+    var manifest_tiles: std.ArrayList(TileEntry) = .empty;
+
+    const tiles_dir = try std.fmt.allocPrint(a, "{s}/tiles", .{out_dir});
+    try std.Io.Dir.cwd().createDirPath(init.io, tiles_dir);
+
+    const root = std.Progress.start(init.io, .{ .root_name = "vantage render" });
+    defer root.end();
+    const tiles_node = root.start("rendering tiles", tile_keys.len);
+
+    var stats: grid.Stats = .{};
+    var total_solid_verts: u64 = 0;
+    var total_fluid_verts: u64 = 0;
+    var total_tris: u64 = 0;
+    var total_bytes: u64 = 0;
+    var total_raw_bytes: u64 = 0;
+    var read_ms: i64 = 0;
+    var light_ms: i64 = 0;
+    var mesh_ms: i64 = 0;
+    var write_ms: i64 = 0;
+    const t0 = std.Io.Timestamp.now(init.io, .awake);
+
+    // Per-tile arena, reset (capacity retained) between tiles so peak memory is
+    // one tile's working set, not the whole world's.
+    var tile_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer tile_arena.deinit();
+
+    for (tile_keys) |key| {
+        defer tiles_node.completeOne();
+        _ = tile_arena.reset(.retain_capacity);
+        const ta = tile_arena.allocator();
+        const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+        const tz: i32 = @bitCast(@as(u32, @truncate(key)));
+
+        // Window = the tile's chunks plus a 1-chunk apron on every side.
+        const cx0 = tx * tile_chunks - 1;
+        const cz0 = tz * tile_chunks - 1;
+        const cx1 = (tx + 1) * tile_chunks;
+        const cz1 = (tz + 1) * tile_chunks;
+
+        const t_r0 = std.Io.Timestamp.now(init.io, .awake);
+        const g = try world.assembleWindow(ta, loaded, cx0, cz0, cx1, cz1, &stats, null);
+        read_ms += t_r0.durationTo(std.Io.Timestamp.now(init.io, .awake)).toMilliseconds();
+        if (g.ids.len == 0) continue;
+
+        // Remap this grid's interned biome ids onto the world-level table so
+        // every tile's vertex biome ids agree (and one legend serves them all).
+        const remap = try ta.alloc(u16, g.biome_names.len);
+        if (remap.len > 0) remap[0] = 0;
+        for (g.biome_names[1..], 1..) |bn, gi| {
+            const gop = try world_biome_ids.getOrPut(bn);
+            if (!gop.found_existing) {
+                const dup = try a.dupe(u8, bn); // bn lives in the tile arena
+                gop.key_ptr.* = dup;
+                const id: u16 = @intCast(world_raw.items.len);
+                try world_raw.append(a, dup);
+                try world_display.append(a, names.biomeName(a, dup));
+                gop.value_ptr.* = id;
+            }
+            remap[gi] = gop.value_ptr.*;
+        }
+        for (g.biome_ids) |*b| b.* = remap[b.*];
+        var g2 = g;
+        g2.biome_names = world_raw.items;
+
+        // The tile's interior (its own chunks, apron excluded) in grid coords.
+        const bx0 = @as(i64, tx) * tile_chunks * 16;
+        const bz0 = @as(i64, tz) * tile_chunks * 16;
+        const bx1 = bx0 + @as(i64, tile_chunks) * 16;
+        const bz1 = bz0 + @as(i64, tile_chunks) * 16;
+        const interior: grid.Interior = .{
+            .x0 = @intCast(std.math.clamp(bx0 - g2.min_x, 0, @as(i64, @intCast(g2.sx)))),
+            .z0 = @intCast(std.math.clamp(bz0 - g2.min_z, 0, @as(i64, @intCast(g2.sz)))),
+            .x1 = @intCast(std.math.clamp(bx1 - g2.min_x, 0, @as(i64, @intCast(g2.sx)))),
+            .z1 = @intCast(std.math.clamp(bz1 - g2.min_z, 0, @as(i64, @intCast(g2.sz)))),
+        };
+        if (interior.x0 >= interior.x1 or interior.z0 >= interior.z1) continue;
+
+        const t_m0 = std.Io.Timestamp.now(init.io, .awake);
+        const built = try mesh.buildTextured(ta, g2, resolver, &builder, maps, &reg, quality, blend_biomes, interior, cave_y, null);
+        light_ms += built.light_ms;
+        mesh_ms += t_m0.durationTo(std.Io.Timestamp.now(init.io, .awake)).toMilliseconds() - built.light_ms;
+        if (built.solid.vertex_count == 0 and built.fluid.vertex_count == 0) continue;
+
+        const surface = try grid.buildSurface(ta, g2, interior);
+        const geo = try tile.serializeWithSurfaceQuantized(ta, built.solid, built.fluid, surface, world_display.items);
+
+        // Tiles ship gzip-wrapped (~8× smaller): any static host can serve
+        // them and the viewer inflates via native DecompressionStream.
+        const t_w0 = std.Io.Timestamp.now(init.io, .awake);
+        const zipped = try compress.gzipCompress(ta, geo, 6);
+        const tile_path = try std.fmt.allocPrint(ta, "{s}/tiles/t.{d}.{d}.vtile", .{ out_dir, tx, tz });
+        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = tile_path, .data = zipped });
+        write_ms += t_w0.durationTo(std.Io.Timestamp.now(init.io, .awake)).toMilliseconds();
+
+        try manifest_tiles.append(a, .{ .tx = tx, .tz = tz, .bytes = zipped.len });
+        total_solid_verts += built.solid.vertex_count;
+        total_fluid_verts += built.fluid.vertex_count;
+        total_tris += built.solid.triangleCount() + built.fluid.triangleCount();
+        total_bytes += zipped.len;
+        total_raw_bytes += geo.len;
+    }
+    tiles_node.end();
+
+    const tex_node = root.start("writing textures + manifest", 0);
+    const arr = try builder.finish();
+    const tex_blob = try compress.gzipCompress(a, try texture.serialize(a, arr), 6);
+    const tex_path = try std.fmt.allocPrint(a, "{s}/terrain.vtexarr", .{out_dir});
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = tex_path, .data = tex_blob });
-    write_node.end();
-    const t_write = std.Io.Timestamp.now(init.io, .awake);
+
+    const manifest = try buildManifest(a, .{
+        .tile_chunks = tile_chunks,
+        .spawn = spawn,
+        .biomes = world_display.items,
+        .tiles = manifest_tiles.items,
+    });
+    const manifest_path = try std.fmt.allocPrint(a, "{s}/manifest.json", .{out_dir});
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = manifest_path, .data = manifest });
+    tex_node.end();
+    const t_end = std.Io.Timestamp.now(init.io, .awake);
 
     std.debug.print(
         \\
-        \\chunks:  {d} rendered, {d} empty
-        \\blocks:  {d} states, {d} biomes
-        \\grid:    {d} × {d} × {d} blocks (minY={d})
+        \\chunks:  {d} populated ({d} decodes incl. apron overlap)
+        \\blocks:  {d} block states, {d} biomes
+        \\tiles:   {d} written ({d:.1} MB gzipped, {d:.1} MB raw) + texture array ({d} layers)
         \\mesh:    {d} vertices, {d} triangles ({d} water verts)
-        \\tile:    {s} ({d} bytes) + texture array ({d} layers)
+        \\out:     {s}/manifest.json
         \\
         \\→ view it:  just serve   then open http://127.0.0.1:8753/   (first run: cd web && npm install)
         \\
     , .{
-        stats.chunks_loaded,                                 stats.chunks_missing,
-        stats.distinct_blocks,                               stats.distinct_biomes,
-        g.sx,                                                g.sy,
-        g.sz,                                                g.min_y,
-        built.solid.vertex_count + built.fluid.vertex_count, built.solid.triangleCount() + built.fluid.triangleCount(),
-        built.fluid.vertex_count,                            out_path,
-        geo.len,                                             arr.layer_count,
+        bounds.count,
+        stats.chunks_loaded,
+        memo.count(),
+        world_raw.items.len - 1,
+        manifest_tiles.items.len,
+        @as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0),
+        @as(f64, @floatFromInt(total_raw_bytes)) / (1024.0 * 1024.0),
+        arr.layer_count,
+        total_solid_verts + total_fluid_verts,
+        total_tris,
+        total_fluid_verts,
+        out_dir,
     });
-    std.debug.print("timings: read {d}ms · light {d}ms · geometry {d}ms · textures {d}ms · serialize {d}ms · write {d}ms\n", .{
-        t0.durationTo(t_read).toMilliseconds(),
-        built.light_ms,
-        t_read.durationTo(t_mesh).toMilliseconds() - built.light_ms,
-        t_mesh.durationTo(t_tex).toMilliseconds(),
-        t_tex.durationTo(t_ser).toMilliseconds(),
-        t_ser.durationTo(t_write).toMilliseconds(),
+    std.debug.print("timings: total {d}ms · read {d}ms · light {d}ms · geometry {d}ms · write {d}ms\n", .{
+        t0.durationTo(t_end).toMilliseconds(), read_ms, light_ms, mesh_ms, write_ms,
     });
-    if (geo.len > 150 * 1024 * 1024) std.debug.print(
-        "  note: large tile — if it's slow in the browser, render less with --radius {d}\n",
-        .{@max(2, @divFloor(radius, 2))},
-    );
+}
+
+/// One rendered tile's manifest record.
+const TileEntry = struct { tx: i32, tz: i32, bytes: usize };
+
+const ManifestInput = struct {
+    tile_chunks: i32,
+    spawn: ?[3]i32,
+    /// Biome display names, id-indexed (index 0 = the "" no-data sentinel).
+    biomes: []const []const u8,
+    tiles: []const TileEntry,
+};
+
+/// Serialize the world manifest — the small JSON the viewer streams tiles from.
+/// Hand-rolled (the shape is tiny and fixed) to stay off the std.json churn.
+fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.print(a, "{{\n  \"format\": 1,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"textures\": \"terrain.vtexarr\",\n", .{
+        m.tile_chunks, m.tile_chunks * 16,
+    });
+    if (m.spawn) |s| try out.print(a, "  \"spawn\": {{ \"x\": {d}, \"y\": {d}, \"z\": {d} }},\n", .{ s[0], s[1], s[2] });
+    try out.appendSlice(a, "  \"biomes\": [");
+    for (m.biomes, 0..) |name, i| {
+        if (i > 0) try out.appendSlice(a, ", ");
+        try appendJsonString(a, &out, name);
+    }
+    try out.appendSlice(a, "],\n  \"tiles\": [\n");
+    for (m.tiles, 0..) |t, i| {
+        try out.print(a, "    {{ \"x\": {d}, \"z\": {d}, \"path\": \"tiles/t.{d}.{d}.vtile\", \"bytes\": {d} }}{s}\n", .{
+            t.tx, t.tz, t.tx, t.tz, t.bytes, if (i + 1 < m.tiles.len) "," else "",
+        });
+    }
+    try out.appendSlice(a, "  ]\n}\n");
+    return out.toOwnedSlice(a);
+}
+
+fn appendJsonString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    try out.append(a, '"');
+    for (s) |ch| switch (ch) {
+        '"' => try out.appendSlice(a, "\\\""),
+        '\\' => try out.appendSlice(a, "\\\\"),
+        '\n' => try out.appendSlice(a, "\\n"),
+        '\r' => try out.appendSlice(a, "\\r"),
+        '\t' => try out.appendSlice(a, "\\t"),
+        else => if (ch < 0x20) {
+            try out.print(a, "\\u{x:0>4}", .{ch});
+        } else {
+            try out.append(a, ch);
+        },
+    };
+    try out.append(a, '"');
 }
 
 /// Auto-detect an extracted `assets/minecraft` under `~/.cache/vantage/assets/<ver>/`,

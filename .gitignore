@@ -10,3 +10,7 @@ zig-out/
 web/node_modules/
 web/dist/
 web/dist-demo/
+
+# Tiled render output (regenerate with `vantage render`)
+web/public/manifest.json
+web/public/tiles/

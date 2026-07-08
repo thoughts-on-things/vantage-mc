@@ -10,6 +10,8 @@ const std = @import("std");
 const region = @import("region.zig");
 const grid = @import("grid.zig");
 const chunk = @import("chunk.zig");
+const compress = @import("compress.zig");
+const nbt = @import("nbt.zig");
 
 pub const LoadedRegion = struct {
     x: i32,
@@ -112,6 +114,50 @@ pub fn populatedBounds(regions: []const LoadedRegion) ChunkBounds {
     }
     if (b.count == 0) b = .{};
     return b;
+}
+
+/// Pack signed chunk coords into one map key.
+pub fn packChunk(cx: i32, cz: i32) u64 {
+    return (@as(u64, @as(u32, @bitCast(cx))) << 32) | @as(u32, @bitCast(cz));
+}
+
+/// The set of populated chunk coords (packed with `packChunk`), read from the
+/// region location tables already in memory — no chunk I/O. Sparse worlds (a
+/// few trails across hundreds of regions) tile-enumerate from this instead of
+/// the bounding box, so empty tiles are never visited.
+pub fn populatedChunks(arena: std.mem.Allocator, regions: []const LoadedRegion) !std.AutoHashMap(u64, void) {
+    var set = std.AutoHashMap(u64, void).init(arena);
+    for (regions) |r| {
+        if (r.bytes.len < region.SECTOR) continue;
+        var i: usize = 0;
+        while (i < 1024) : (i += 1) {
+            const e = i * 4;
+            const off = (@as(u32, r.bytes[e]) << 16) | (@as(u32, r.bytes[e + 1]) << 8) | r.bytes[e + 2];
+            if (off == 0 and r.bytes[e + 3] == 0) continue;
+            const cx = r.x * 32 + @as(i32, @intCast(i % 32));
+            const cz = r.z * 32 + @as(i32, @intCast(i / 32));
+            try set.put(packChunk(cx, cz), {});
+        }
+    }
+    return set;
+}
+
+/// World spawn from `<save>/level.dat` (gzip-wrapped NBT: Data.SpawnX/Y/Z).
+/// Null when the file is absent or unreadable — callers fall back to centring
+/// on the populated bounds.
+pub fn readSpawn(arena: std.mem.Allocator, io: std.Io, save_dir: []const u8) ?[3]i32 {
+    const path = std.fmt.allocPrint(arena, "{s}/level.dat", .{save_dir}) catch return null;
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch return null;
+    const bytes = compress.inflateGzip(arena, raw) catch return null;
+    var parser = nbt.Parser{ .buf = bytes, .arena = arena };
+    const root = parser.parseRoot() catch return null;
+    const data = nbt.get(root, "Data") orelse return null;
+    if (data.* != .compound) return null;
+    const sx = nbt.get(data.compound, "SpawnX") orelse return null;
+    const sy = nbt.get(data.compound, "SpawnY") orelse return null;
+    const sz = nbt.get(data.compound, "SpawnZ") orelse return null;
+    if (sx.* != .int or sy.* != .int or sz.* != .int) return null;
+    return .{ sx.int, sy.int, sz.int };
 }
 
 /// Assemble a grid over the world-chunk window [cx0..cx1] x [cz0..cz1] (inclusive,

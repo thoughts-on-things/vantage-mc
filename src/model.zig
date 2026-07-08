@@ -91,12 +91,31 @@ pub const Resolver = struct {
     io: std.Io,
     /// Absolute path to the `assets/minecraft` directory.
     root: []const u8,
+    /// Optional cross-call memo of resolveBlock results, keyed "name\x00state".
+    /// A tiled render resolves the same (block, state) pairs for every tile;
+    /// with the memo each pair hits the blockstate/model JSON files once per
+    /// run instead of once per tile. Results live in `arena`, so the memo's
+    /// lifetime must not exceed it.
+    memo: ?*std.StringHashMap([]ResolvedModel) = null,
 
     /// Resolve every part of a block into a flat list of ResolvedModels (one per
     /// chosen variant / matching multipart part). `state` is the normalized
     /// block-state key ("axis=x", "facing=north,half=bottom", …); pass "" for the
     /// default. Most blocks yield exactly one model.
     pub fn resolveBlock(self: Resolver, block_name: []const u8, state: []const u8) ![]ResolvedModel {
+        if (self.memo) |memo| {
+            const key = try std.fmt.allocPrint(self.arena, "{s}\x00{s}", .{ block_name, state });
+            const gop = try memo.getOrPut(key);
+            if (gop.found_existing) return gop.value_ptr.*;
+            errdefer _ = memo.remove(key);
+            const parts = try self.resolveBlockUncached(block_name, state);
+            gop.value_ptr.* = parts;
+            return parts;
+        }
+        return self.resolveBlockUncached(block_name, state);
+    }
+
+    fn resolveBlockUncached(self: Resolver, block_name: []const u8, state: []const u8) ![]ResolvedModel {
         const name = stripNs(block_name);
         const path = try std.fmt.allocPrint(self.arena, "{s}/blockstates/{s}.json", .{ self.root, name });
         const v = try self.loadJson(path);

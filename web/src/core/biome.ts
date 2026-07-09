@@ -1,7 +1,7 @@
 // Pure biome helpers shared by the renderer and UI: a categorical colour palette
 // and name formatting. No three.js, no DOM.
 
-import type { DecodedTile } from './tile.js';
+import type { DecodedTile, SurfaceMap } from './tile.js';
 
 /** An RGB triple in 0..1. */
 export type Rgb = readonly [number, number, number];
@@ -71,6 +71,41 @@ export interface BiomeEntry {
  * vertices, so a vertex tally would under-count flat, mergeable biomes. Area is
  * mesh-independent — the share is the same whether or not the faces were merged.
  */
+/** Turn per-biome area counts + a legend into sorted {@link BiomeEntry}s. */
+function toEntries(counts: number[], names: string[], pal: Rgb[]): BiomeEntry[] {
+  const present: BiomeEntry[] = [];
+  let total = 0;
+  for (let id = 0; id < names.length; id++) {
+    const count = counts[id]!;
+    if (count > 0 && names[id]!.length > 0) {
+      present.push({ id, name: names[id]!, label: stripNamespace(names[id]!), color: pal[id] ?? pal[0]!, count, fraction: 0 });
+      total += count;
+    }
+  }
+  present.sort((a, b) => b.count - a.count);
+  const denom = total || 1;
+  for (const e of present) e.fraction = e.count / denom;
+  return present;
+}
+
+/**
+ * Summarize biomes from a tile's top-down surface map: one block² per column,
+ * empty columns skipped. O(columns) instead of O(triangles) — the streaming
+ * path uses this so an arriving tile costs no pass over its mesh; the map-area
+ * share it reports is also the more intuitive number for a map legend.
+ */
+export function summarizeSurfaceBiomes(surface: SurfaceMap, names: string[], palette?: Rgb[]): BiomeEntry[] {
+  const pal = palette ?? biomePalette(names.length);
+  const counts = new Array<number>(names.length).fill(0);
+  const { biome, height } = surface;
+  for (let i = 0; i < biome.length; i++) {
+    if (height[i]! < 1) continue; // empty-column sentinel
+    const id = biome[i]!;
+    if (id < counts.length) counts[id]!++;
+  }
+  return toEntries(counts, names, pal);
+}
+
 export function summarizeBiomes(tile: DecodedTile, palette?: Rgb[]): BiomeEntry[] {
   const names = tile.biomeNames;
   const biome = tile.biome;
@@ -98,17 +133,5 @@ export function summarizeBiomes(tile: DecodedTile, palette?: Rgb[]): BiomeEntry[
     counts[biome[a]! | 0]! += 0.5 * Math.hypot(crx, cry, crz);
   }
 
-  const present: BiomeEntry[] = [];
-  let total = 0;
-  for (let id = 0; id < names.length; id++) {
-    const count = counts[id]!;
-    if (count > 0 && names[id]!.length > 0) {
-      present.push({ id, name: names[id]!, label: stripNamespace(names[id]!), color: pal[id] ?? pal[0]!, count, fraction: 0 });
-      total += count;
-    }
-  }
-  present.sort((a, b) => b.count - a.count);
-  const denom = total || 1;
-  for (const e of present) e.fraction = e.count / denom;
-  return present;
+  return toEntries(counts, names, pal);
 }

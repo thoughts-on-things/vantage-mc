@@ -311,6 +311,7 @@ export class MapControls {
   /** Jump the view to an explicit state and stop all motion (used for framing).
    *  `angle`/`distance` are clamped to the legal tilt envelope. */
   setView(state: { position: THREE.Vector3; distance: number; rotation: number; angle: number; floorY?: number }): void {
+    this.goal = null; // an in-flight animateTo must not drag the view back
     this.position.copy(state.position);
     this.distance = clamp(state.distance, this.minDistance, this.maxDistance);
     this.rotation = state.rotation;

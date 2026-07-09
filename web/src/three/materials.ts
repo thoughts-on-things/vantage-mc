@@ -3,7 +3,7 @@
 // uniforms, and a camera-locked gradient sky dome whose horizon matches the fog.
 
 import * as THREE from 'three';
-import type { DecodedTextureArray } from '../core/index.js';
+import type { DecodedTextureArray, Rgb } from '../core/index.js';
 
 /** Atmosphere palette — a calm Minecraft-ish daytime. Horizon doubles as fog. */
 export const SKY_TOP: readonly [number, number, number] = [0.3, 0.52, 0.84];
@@ -12,9 +12,24 @@ export const SKY_HORIZON: readonly [number, number, number] = [0.72, 0.83, 0.95]
 const VERT = /* glsl */ `
   in float alayer;
   in vec4 atint;
-  in vec3 abcol;
   in float abiome;
+#ifdef QUANTIZED
+  // Streaming fast path: attributes arrive in the tile's on-disk encoding and
+  // are dequantized HERE — u16 positions (world = uPosMin + q · uPosScale),
+  // int8 normal with the packed light byte riding in .w, biome colour looked
+  // up from the world palette texture. Decoding a tile costs the CPU nothing
+  // per vertex, which is what keeps streaming stutter-free.
+  in vec4 anrm;
+  uniform vec3 uPosMin;
+  uniform vec3 uPosScale;
+  uniform sampler2D uPalette;
+#else
+  in vec3 abcol;
   in float alight;                                 // packed (sky<<4)|block, 0..255
+#endif
+  uniform vec2 uFogCenter;                         // streaming focus (world XZ)
+  uniform float uFogRadial;                        // 1 = fog by XZ distance from
+                                                   // uFogCenter, 0 = view depth
   out vec2 vUv;
   out vec4 vTint;
   out vec3 vBcol;
@@ -27,18 +42,33 @@ const VERT = /* glsl */ `
   void main() {
     vUv = uv;
     vTint = atint;
-    vBcol = abcol;
     vLayer = alayer;
     vBiome = abiome;
-    float sky = floor(alight / 16.0);
+#ifdef QUANTIZED
+    vec3 pos = uPosMin + position * uPosScale;
+    vec3 nrm = anrm.xyz;
+    // The light byte was stored as the int8 normal's 4th lane; undo the sign.
+    float light = anrm.w < 0.0 ? anrm.w + 256.0 : anrm.w;
+    vBcol = texelFetch(uPalette, ivec2(int(abiome + 0.5), 0), 0).rgb;
+#else
+    vec3 pos = position;
+    vec3 nrm = normal;
+    float light = alight;
+    vBcol = abcol;
+#endif
+    float sky = floor(light / 16.0);
     vSky = sky / 15.0;
-    vBlk = (alight - sky * 16.0) / 15.0;
+    vBlk = (light - sky * 16.0) / 15.0;
     // Water surface waves come from real mesh geometry (Minecraft flowing-water
     // heights, baked in the mesher) — the normal here carries the slope, so the
     // waves catch light. No vertex animation (BlueMap renders water static too).
-    vN = normalize(mat3(modelMatrix) * normal);
-    vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    vFog = -mv.z;                                  // view-space depth for fog
+    vN = normalize(mat3(modelMatrix) * nrm);
+    vec4 wp = modelMatrix * vec4(pos, 1.0);
+    vec4 mv = viewMatrix * wp;
+    // Streamed worlds fog by horizontal distance from the streaming focus —
+    // exactly the ring where tiles stop — so looking straight down from any
+    // height never hazes the resident map (view-depth fog did).
+    vFog = mix(-mv.z, distance(wp.xz, uFogCenter), uFogRadial);
     gl_Position = projectionMatrix * mv;
   }
 `;
@@ -178,8 +208,37 @@ const FRAG = /* glsl */ `
   }
 `;
 
+/** Options for {@link createTerrainMaterial}. */
+export interface TerrainMaterialOptions {
+  /** Render VTL6 tiles in their on-disk quantized encoding: the vertex shader
+   *  dequantizes u16 positions and int8 normals, and biome colours come from a
+   *  palette texture. Pair with `buildQuantizedTileMeshes` (the streaming path). */
+  quantized?: boolean;
+  /** Biome palette (indexed by biome id) baked into the palette texture.
+   *  Required in spirit when `quantized`; defaults to a generic palette. */
+  palette?: readonly Rgb[];
+}
+
+/** A 1-row RGBA8 texture holding the biome palette, indexed by biome id. */
+function paletteTexture(palette: readonly Rgb[]): THREE.DataTexture {
+  const n = Math.max(1, palette.length);
+  const data = new Uint8Array(4 * n);
+  for (let i = 0; i < palette.length; i++) {
+    const c = palette[i]!;
+    data[i * 4 + 0] = Math.round(c[0] * 255);
+    data[i * 4 + 1] = Math.round(c[1] * 255);
+    data[i * 4 + 2] = Math.round(c[2] * 255);
+    data[i * 4 + 3] = 255;
+  }
+  const tex = new THREE.DataTexture(data, n, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 /** Build the textured terrain material from a decoded texture array. */
-export function createTerrainMaterial(texData: DecodedTextureArray): THREE.ShaderMaterial {
+export function createTerrainMaterial(texData: DecodedTextureArray, opts: TerrainMaterialOptions = {}): THREE.ShaderMaterial {
   const tex = new THREE.DataArrayTexture(texData.pixels, texData.width, texData.height, texData.layers);
   tex.format = THREE.RGBAFormat;
   tex.type = THREE.UnsignedByteType;
@@ -196,8 +255,16 @@ export function createTerrainMaterial(texData: DecodedTextureArray): THREE.Shade
   tex.needsUpdate = true;
   return new THREE.ShaderMaterial({
     glslVersion: THREE.GLSL3,
+    defines: opts.quantized ? { QUANTIZED: '' } : {},
     uniforms: {
       map: { value: tex },
+      // Per-tile dequantization transform, set per-mesh in onBeforeRender
+      // (quantized path only; inert otherwise).
+      uPosMin: { value: new THREE.Vector3() },
+      uPosScale: { value: new THREE.Vector3(1, 1, 1) },
+      uPalette: { value: opts.quantized ? paletteTexture(opts.palette ?? []) : null },
+      uFogCenter: { value: new THREE.Vector2() }, // streaming focus (world XZ)
+      uFogRadial: { value: 0.0 }, // 1 = radial fog around uFogCenter (streaming)
       lightDir: { value: new THREE.Vector3(0.55, 1.0, 0.4).normalize() },
       uBiomeMix: { value: 0 },
       uHi: { value: -1 },
@@ -237,6 +304,7 @@ export function createWaterMaterial(terrain: THREE.ShaderMaterial): THREE.Shader
   u['uWater'] = { value: 1.0 }; // own water flag
   return new THREE.ShaderMaterial({
     glslVersion: THREE.GLSL3,
+    defines: { ...terrain.defines }, // keep QUANTIZED in lock-step
     uniforms: u,
     vertexShader: VERT,
     fragmentShader: FRAG,

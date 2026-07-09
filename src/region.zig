@@ -71,6 +71,7 @@ pub const Region = struct {
 pub fn decompress(allocator: std.mem.Allocator, raw: RawChunk) ![]u8 {
     return switch (raw.compression) {
         .zlib => compress.inflateZlib(allocator, raw.data),
+        .gzip => compress.inflateGzip(allocator, raw.data),
         .none => allocator.dupe(u8, raw.data),
         else => error.UnsupportedCompression,
     };

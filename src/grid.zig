@@ -111,6 +111,26 @@ pub const Stats = struct {
     distinct_biomes: usize = 0,
 };
 
+/// A half-open XZ sub-box of a grid, in grid-local block coords. Tiled renders
+/// assemble each tile with a 1-chunk apron of neighbour data (so culling, AO,
+/// light, and biome blending are seam-free across tile borders) but mesh and
+/// surface-map only the interior — the apron cells belong to adjacent tiles.
+pub const Interior = struct {
+    x0: usize,
+    z0: usize,
+    x1: usize,
+    z1: usize,
+
+    /// The whole grid (no apron).
+    pub fn full(g: Grid) Interior {
+        return .{ .x0 = 0, .z0 = 0, .x1 = g.sx, .z1 = g.sz };
+    }
+
+    pub fn contains(self: Interior, x: usize, z: usize) bool {
+        return x >= self.x0 and x < self.x1 and z >= self.z0 and z < self.z1;
+    }
+};
+
 /// A top-down surface map: per world column, the Y of the topmost non-air block
 /// and the biome there. Drives fast hover-picking in the viewer — it marches
 /// this 2D grid along the camera ray instead of raycasting millions of
@@ -129,17 +149,22 @@ pub const Surface = struct {
 /// Build the surface map by scanning each column from the top down for the first
 /// non-air block. Water/plants count (the hover over an ocean reports the ocean,
 /// not the seabed). Cheap relative to meshing — it stops at the first hit.
-pub fn buildSurface(arena: std.mem.Allocator, g: Grid) !Surface {
-    const n = g.sx * g.sz;
+/// `interior`, if given, restricts the map to that sub-box (a tiled render's
+/// interior, excluding the apron); null covers the whole grid.
+pub fn buildSurface(arena: std.mem.Allocator, g: Grid, interior: ?Interior) !Surface {
+    const in = interior orelse Interior.full(g);
+    const sx = in.x1 - in.x0;
+    const sz = in.z1 - in.z0;
+    const n = sx * sz;
     const biome = try arena.alloc(u16, n);
     const height = try arena.alloc(i16, n);
     @memset(biome, 0);
     const empty: i16 = @intCast(g.min_y - 1);
-    var z: usize = 0;
-    while (z < g.sz) : (z += 1) {
-        var x: usize = 0;
-        while (x < g.sx) : (x += 1) {
-            const ci = z * g.sx + x;
+    var z: usize = in.z0;
+    while (z < in.z1) : (z += 1) {
+        var x: usize = in.x0;
+        while (x < in.x1) : (x += 1) {
+            const ci = (z - in.z0) * sx + (x - in.x0);
             height[ci] = empty;
             var y: usize = g.sy;
             while (y > 0) {
@@ -152,7 +177,14 @@ pub fn buildSurface(arena: std.mem.Allocator, g: Grid) !Surface {
             }
         }
     }
-    return .{ .sx = g.sx, .sz = g.sz, .min_x = g.min_x, .min_z = g.min_z, .biome = biome, .height = height };
+    return .{
+        .sx = sx,
+        .sz = sz,
+        .min_x = g.min_x + @as(i32, @intCast(in.x0)),
+        .min_z = g.min_z + @as(i32, @intCast(in.z0)),
+        .biome = biome,
+        .height = height,
+    };
 }
 
 const Interner = struct {
@@ -419,12 +451,20 @@ test "buildSurface finds the topmost block and its biome per column" {
         .biome_names = &biome_names,
     };
     g.ids[g.index(0, 2, 0)] = 1; // top of column x=0 is y=2
-    const s = try buildSurface(a, g);
+    const s = try buildSurface(a, g, null);
     try std.testing.expectEqual(@as(usize, 2), s.sx);
     try std.testing.expectEqual(@as(i32, 10), s.min_x);
     try std.testing.expectEqual(@as(i16, -64 + 2), s.height[0]); // world Y of the block
     try std.testing.expectEqual(@as(u16, 0), s.biome[0]); // biome cell (0,0,0) is id 0
     try std.testing.expectEqual(@as(i16, -64 - 1), s.height[1]); // empty column
+
+    // Interior restriction: only column x=1 (empty), origin shifts by the apron.
+    const si = try buildSurface(a, g, .{ .x0 = 1, .z0 = 0, .x1 = 2, .z1 = 1 });
+    try std.testing.expectEqual(@as(usize, 1), si.sx);
+    try std.testing.expectEqual(@as(usize, 1), si.sz);
+    try std.testing.expectEqual(@as(i32, 11), si.min_x);
+    try std.testing.expectEqual(@as(i32, 20), si.min_z);
+    try std.testing.expectEqual(@as(i16, -64 - 1), si.height[0]);
 }
 
 test "biomeAt maps blocks to 4x4x4 cells" {

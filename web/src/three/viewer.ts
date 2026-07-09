@@ -6,6 +6,9 @@
 import * as THREE from 'three';
 import { MapControls, type HeightSampler } from './controls.js';
 import {
+  biomePalette,
+  maybeInflate,
+  parseManifest,
   parseTextureArray,
   parseTile,
   summarizeBiomes,
@@ -13,11 +16,13 @@ import {
   type DecodedTextureArray,
   type DecodedTile,
   type SurfaceMap,
+  type WorldManifest,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
-import { createSky, SKY_HORIZON } from './materials.js';
+import { createSky, createTerrainMaterial, createWaterMaterial, SKY_HORIZON } from './materials.js';
 import { pickBiome } from './pick.js';
 import { buildTerrain } from './terrain.js';
+import { TileManager, type TileStats } from './tiles.js';
 
 /** How the camera frames the world on load. */
 export type ViewMode = 'orbit' | 'top';
@@ -74,6 +79,16 @@ const DEFAULT_DISPLAY: Required<DisplaySettings> = { ...VANILLA_DISPLAY };
  *  the horizon. `0` = straight top-down (the "2D" toggle). */
 export const DEFAULT_ORBIT_ANGLE = 0.42;
 
+/** Streaming knobs for tiled worlds (the `world` load source). */
+export interface StreamingSettings {
+  /** Stream-in radius around the camera focus, in blocks. Default `768`. */
+  viewDistance?: number;
+  /** Hard cap on resident tiles (nearest win). Default `96`. */
+  maxTiles?: number;
+  /** Concurrent tile fetches. Default `4`. */
+  concurrency?: number;
+}
+
 export interface VantageViewerOptions {
   /** Initial camera framing. Default `'orbit'`. */
   view?: ViewMode;
@@ -85,6 +100,8 @@ export interface VantageViewerOptions {
   light?: LightSettings;
   /** Initial display fidelity (live-tunable later via {@link VantageViewer.setDisplay}). */
   display?: DisplaySettings;
+  /** Tile-streaming behaviour for `world` sources. */
+  streaming?: StreamingSettings;
 }
 
 /** A tile source: a URL to fetch, a raw buffer, or already-decoded data. */
@@ -92,8 +109,10 @@ export type TileSource = string | ArrayBuffer | DecodedTile;
 export type TextureSource = string | ArrayBuffer | DecodedTextureArray;
 
 export interface LoadOptions {
-  /** The `.vtile` to render. */
-  tile: TileSource;
+  /** A tiled world to stream: the `manifest.json` URL. Takes precedence over `tile`. */
+  world?: string;
+  /** A single `.vtile` to render (the non-streaming path). */
+  tile?: TileSource;
   /** The `.vtexarr` texture array (required for textured tiles). */
   textures?: TextureSource;
   /** Override the initial framing for this load. */
@@ -110,8 +129,12 @@ export interface TileInfo {
 }
 
 interface ViewerEvents extends Record<string, unknown> {
-  /** Fired after a tile is loaded and framed. */
+  /** Fired after a tile/world is loaded and framed. */
   load: TileInfo;
+  /** Streaming totals changed (tiles loaded/unloaded). Streamed worlds only. */
+  stats: TileStats;
+  /** The aggregated biome legend changed as tiles streamed in/out. */
+  biomes: BiomeEntry[];
   /** The biome id under the cursor, or `null` when off-terrain. */
   hover: number | null;
   /** Biome layer state changed. */
@@ -197,12 +220,19 @@ export class VantageViewer {
   private readonly presentCamera = new THREE.Camera();
   private presentMaterial!: THREE.RawShaderMaterial;
 
-  // Current tile state.
+  // Current tile state (single-tile mode).
   private tile: DecodedTile | null = null;
   private shader: THREE.ShaderMaterial | null = null;
   private bounds = new THREE.Box3();
   private current: { terrain: THREE.Mesh; water?: THREE.Mesh } | null = null;
   private _biomes: BiomeEntry[] = [];
+
+  // Streamed-world state (world/manifest mode). `tiles` doubles as the mode flag.
+  private tiles: TileManager | null = null;
+  private manifest: WorldManifest | null = null;
+  private waterShader: THREE.ShaderMaterial | null = null;
+  private tilesUnsub: (() => void) | null = null;
+  private lastBiomesEmit = 0;
 
   // Biome layer state machine.
   private biomeEnabled = false;
@@ -236,6 +266,7 @@ export class VantageViewer {
       maxPixelRatio: options.maxPixelRatio ?? 2,
       light: options.light ?? {},
       display: options.display ?? {},
+      streaming: options.streaming ?? {},
     };
     if (options.light) this.light = { ...this.light, ...options.light };
     if (options.display) this.display = { ...this.display, ...options.display };
@@ -315,11 +346,151 @@ export class VantageViewer {
     return viewer;
   }
 
-  /** Load (fetch/decode as needed), build, and frame a tile. */
+  /** Load (fetch/decode as needed), build, and frame a tile or a streamed world. */
   async load(opts: LoadOptions): Promise<void> {
+    if (opts.world) return this.loadWorld(opts.world, opts.view ?? this.options.view);
+    if (!opts.tile) throw new Error('vantage: load needs a `world` manifest URL or a `tile` source');
     const tile = await resolveTile(opts.tile);
     const textures = opts.textures ? await resolveTextures(opts.textures) : undefined;
     this.setTile(tile, textures, opts.view ?? this.options.view);
+  }
+
+  /** Stream a tiled world render from its `manifest.json`. Tiles load around
+   *  the camera as it moves and unload behind it; the whole world is reachable
+   *  without ever holding more than the streaming budget in memory. */
+  private async loadWorld(url: string, view: ViewMode): Promise<void> {
+    const abs = new URL(url, typeof document !== 'undefined' ? document.baseURI : undefined).toString();
+    const res = await fetch(abs);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${abs}`);
+    const manifest = parseManifest(await res.json());
+    const texData = parseTextureArray(await maybeInflate(await fetchBuffer(new URL(manifest.textures, abs).toString())));
+
+    this.disposeCurrent();
+    const palette = biomePalette(manifest.biomes.length);
+    // Quantized mode: tiles upload their on-disk u16/i8 encoding verbatim and
+    // the shader dequantizes — the decode-stutter fix (see terrain.ts).
+    const shader = createTerrainMaterial(texData, { quantized: true, palette });
+    const waterShader = createWaterMaterial(shader);
+    shader.uniforms['uFogRadial']!.value = 1.0; // fog the streamed ring edge, not view depth
+    this.shader = shader;
+    this.waterShader = waterShader;
+    this.manifest = manifest;
+    this.tile = null;
+    this.tiles = new TileManager({
+      manifest,
+      baseUrl: abs,
+      scene: this.scene,
+      material: shader,
+      waterMaterial: waterShader,
+      palette,
+      ...this.options.streaming,
+    });
+
+    // The pivot rides the streamed terrain; picking and the legend aggregate
+    // across whatever is resident.
+    this.controls.heightAt = this.tiles.heightAt;
+    this.tilesUnsub = this.tiles.on('change', (stats) => {
+      this.emitter.emit('stats', stats);
+      // The legend settles as tiles stream; throttle the churn, then always
+      // emit the final state once the queue drains.
+      const now = performance.now();
+      if (stats.loading === 0 || now - this.lastBiomesEmit > 500) {
+        this.lastBiomesEmit = now;
+        this._biomes = this.tiles!.biomes;
+        this.emitter.emit('biomes', this._biomes);
+      }
+    });
+
+    this.frameWorld(manifest, view);
+    this.applyBiomeUniforms();
+    this.applyLight();
+    this.applyDisplay();
+
+    // Seed streaming at the framed pivot so the first tiles arrive immediately.
+    this.tiles.update(this.controls.position.x, this.controls.position.z);
+
+    const size = new THREE.Vector3();
+    this.bounds.getSize(size);
+    this._biomes = [];
+    this.emitter.emit('load', {
+      magic: 'VTL6',
+      vertexCount: 0,
+      triangleCount: 0,
+      size,
+      biomes: this._biomes,
+    });
+  }
+
+  /** Frame a streamed world: pivot on the spawn point when the manifest has
+   *  one (that's where the builds are), else the centre of the tile extents.
+   *  Distances are tied to the streaming view distance, not the world size —
+   *  a 100k×100k world frames the same as a village. */
+  private frameWorld(manifest: WorldManifest, view: ViewMode): void {
+    const tb = manifest.tileBlocks;
+    let minX = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxZ = -Infinity;
+    for (const t of manifest.tiles) {
+      minX = Math.min(minX, t.x * tb);
+      minZ = Math.min(minZ, t.z * tb);
+      maxX = Math.max(maxX, (t.x + 1) * tb);
+      maxZ = Math.max(maxZ, (t.z + 1) * tb);
+    }
+    if (!Number.isFinite(minX)) {
+      minX = minZ = 0;
+      maxX = maxZ = tb;
+    }
+    this.bounds.set(new THREE.Vector3(minX, -64, minZ), new THREE.Vector3(maxX, 320, maxZ));
+
+    const viewDistance = this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768;
+    const spawn = manifest.spawn;
+    const pivot = spawn
+      ? new THREE.Vector3(spawn.x, spawn.y, spawn.z)
+      : new THREE.Vector3((minX + maxX) / 2, 80, (minZ + maxZ) / 2);
+
+    // Zoom-out is bounded by what streaming can actually keep resident, so the
+    // map never becomes a field of holes.
+    this.controls.maxDistance = viewDistance * 2.2;
+    const span = Math.min(Math.max(maxX - minX, maxZ - minZ), viewDistance * 1.1);
+    let distance: number;
+    let angle: number;
+    if (view === 'top') {
+      distance = this.fitDistance(span) * 1.04;
+      angle = 0;
+    } else {
+      distance = this.fitDistance(Math.min(span, 560)) * 0.72;
+      angle = DEFAULT_ORBIT_ANGLE;
+    }
+    const h = this.controls.heightAt?.(pivot.x, pivot.z);
+    if (h != null) pivot.y = h + 3;
+    this.controls.setView({ position: pivot, distance, rotation: 0, angle, floorY: pivot.y });
+    this.framedState = { position: pivot.clone(), distance, rotation: 0, angle, floorY: pivot.y };
+
+    this.camera.far = Math.max(8000, viewDistance * 6);
+    this.camera.updateProjectionMatrix();
+    this.applyStreamFog();
+  }
+
+  /** The radius tiles are actually guaranteed resident to: the view distance,
+   *  unless the tile budget runs out first (nearest-first fill ⇒ a disc of
+   *  maxTiles tiles ⇒ radius tb·√(maxTiles/π)). Fog is tied to THIS, so it
+   *  hugs the real streamed edge instead of hazing resident terrain. */
+  private streamRadius(): number {
+    const vd = this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768;
+    const mt = this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 96;
+    const tb = this.manifest?.tileBlocks ?? 128;
+    return Math.min(vd, tb * Math.sqrt(mt / Math.PI));
+  }
+
+  /** Radial fog for streamed worlds: clear across the resident disc, fading
+   *  out right at the ring where tiles stop so pop-in stays behind the haze.
+   *  Radial (XZ from the focus) — zooming out or looking down never fogs
+   *  terrain that is actually loaded, unlike view-depth fog. */
+  private applyStreamFog(): void {
+    if (!this.shader || !this.tiles) return;
+    const r = this.streamRadius();
+    this.shader.uniforms['uFog']!.value.set(r * 0.72, r * 1.05);
   }
 
   private setTile(tile: DecodedTile, textures: DecodedTextureArray | undefined, view: ViewMode): void {
@@ -557,6 +728,32 @@ export class VantageViewer {
     this.shader.uniforms['uFogDensity']!.value = d.fog;
   }
 
+  // --- streaming -------------------------------------------------------------
+
+  /** The current streaming settings (view distance, tile budget, concurrency). */
+  get streamingSettings(): Required<StreamingSettings> {
+    return {
+      viewDistance: this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768,
+      maxTiles: this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 96,
+      concurrency: this.options.streaming.concurrency ?? 4,
+    };
+  }
+
+  /** Live-tune streaming: view distance, resident-tile budget, concurrency.
+   *  Applies immediately to a streamed world (tiles re-plan, fog and camera
+   *  range follow) and persists for future loads. The fidelity dial: raise
+   *  viewDistance/maxTiles to see farther, lower them on weak hardware. */
+  setStreaming(settings: StreamingSettings): void {
+    this.options.streaming = { ...this.options.streaming, ...settings };
+    if (!this.tiles) return;
+    this.tiles.configure(settings);
+    const vd = this.tiles.viewDistance;
+    this.controls.maxDistance = vd * 2.2;
+    this.camera.far = Math.max(8000, vd * 6);
+    this.camera.updateProjectionMatrix();
+    this.applyStreamFog();
+  }
+
   // --- camera / navigation ---------------------------------------------------
 
   /** Smoothly zoom by `steps` wheel-notches (positive = in). Drives the same
@@ -662,8 +859,17 @@ export class VantageViewer {
     }
     if (this.dragging || !this.pointerDirty) return; // at most once per frame, never mid-drag
     this.pointerDirty = false;
+    if (!this.pointerInside) {
+      this.emitHover(-1);
+      return;
+    }
+    if (this.tiles) {
+      this.raycaster.setFromCamera(this.ndc, this.camera);
+      this.emitHover(this.tiles.pickBiome(this.raycaster.ray));
+      return;
+    }
     const surface = this.tile?.surface;
-    if (!surface || !this.pointerInside) {
+    if (!surface) {
       this.emitHover(-1);
       return;
     }
@@ -677,6 +883,16 @@ export class VantageViewer {
     this.lastFrameMs = now;
     this.controls.update(dtMs);
     this.sky.position.copy(this.camera.position); // keep the dome centred on the eye
+
+    // Streamed worlds: re-plan tile residency around wherever the user is
+    // looking (the map pivot, or the eye itself in free-flight).
+    if (this.tiles) {
+      const focus = this.controls.flyMode ? this.camera.position : this.controls.position;
+      this.tiles.update(focus.x, focus.z);
+      // Radial fog tracks the same focus streaming plans around, so the clear
+      // disc and the resident disc stay concentric.
+      if (this.shader) (this.shader.uniforms['uFogCenter']!.value as THREE.Vector2).set(focus.x, focus.z);
+    }
 
     // Ease the textured<->biome crossfade, and advance the water-animation clock.
     if (this.shader) {
@@ -706,13 +922,34 @@ export class VantageViewer {
   }
 
   private disposeCurrent(): void {
-    if (!this.current) return;
-    for (const mesh of [this.current.terrain, this.current.water]) {
-      if (!mesh) continue;
-      this.scene.remove(mesh);
-      mesh.geometry.dispose();
+    if (this.current) {
+      for (const mesh of [this.current.terrain, this.current.water]) {
+        if (!mesh) continue;
+        this.scene.remove(mesh);
+        mesh.geometry.dispose();
+      }
+      this.current = null;
     }
-    this.current = null;
+    if (this.tiles) {
+      this.tilesUnsub?.();
+      this.tilesUnsub = null;
+      this.tiles.dispose();
+      this.tiles = null;
+      this.manifest = null;
+    }
+    // Streaming owns its materials (single-tile mode shares them with the
+    // caller via buildTerrain, so those are left alone).
+    if (this.waterShader) {
+      this.waterShader.dispose();
+      this.waterShader = null;
+      if (this.shader) {
+        (this.shader.uniforms['map']!.value as THREE.Texture | null)?.dispose();
+        (this.shader.uniforms['uPalette']!.value as THREE.Texture | null)?.dispose();
+        this.shader.dispose();
+        this.shader = null;
+      }
+    }
+    this.controls.heightAt = null;
   }
 
   /** Tear down the renderer, controls, observers, and remove the canvas. */

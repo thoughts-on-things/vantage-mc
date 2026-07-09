@@ -9,6 +9,7 @@ import {
   type BiomeEntry,
   type DisplaySettings,
   type LightSettings,
+  type StreamingSettings,
   type TextureSource,
   type TileInfo,
   type TileSource,
@@ -18,10 +19,15 @@ import { VantageContext, type VantageContextValue, type VantageStatus } from './
 import { injectStyles } from './styles.js';
 
 export interface VantageViewerProps {
-  /** The `.vtile` to render: a URL, a raw buffer, or already-decoded data. */
-  tile: TileSource;
+  /** A tiled world to stream: the `manifest.json` URL (from `vantage render`).
+   *  Takes precedence over `tile`. */
+  world?: string;
+  /** A single `.vtile` to render: a URL, a raw buffer, or already-decoded data. */
+  tile?: TileSource;
   /** The `.vtexarr` texture array (required for textured tiles). */
   textures?: TextureSource;
+  /** Streaming behaviour for `world` sources (view distance, tile budget). */
+  streaming?: StreamingSettings;
   /** Initial camera framing. Default `'orbit'`. */
   view?: ViewMode;
   /** Antialias the WebGL context. Default `true`. Changing this remounts the canvas. */
@@ -70,8 +76,10 @@ const INITIAL: LiveState = {
 
 export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(function VantageViewer(props, ref) {
   const {
+    world,
     tile,
     textures,
+    streaming,
     view = 'orbit',
     antialias = true,
     maxPixelRatio = 2,
@@ -104,7 +112,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     injectStyles();
     const el = canvasRef.current;
     if (!el) return;
-    const v = new Engine(el, { antialias, maxPixelRatio, view, light, display });
+    const v = new Engine(el, { antialias, maxPixelRatio, view, light, display, streaming });
     engineRef.current = v;
     setEngine(v);
 
@@ -113,6 +121,16 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
         setS((p) => ({ ...p, status: 'ready', info, biomes: info.biomes, error: null }));
         onLoadRef.current?.(info);
       }),
+      // Streamed worlds: keep the HUD's totals and the biome legend live as
+      // tiles come and go.
+      v.on('stats', (stats) =>
+        setS((p) =>
+          p.info
+            ? { ...p, info: { ...p.info, vertexCount: stats.vertexCount, triangleCount: stats.triangleCount } }
+            : p,
+        ),
+      ),
+      v.on('biomes', (biomes) => setS((p) => ({ ...p, biomes }))),
       v.on('hover', (id) => setS((p) => (p.hoveredBiome === id ? p : { ...p, hoveredBiome: id }))),
       v.on('biomelayer', ({ enabled, highlight }) =>
         setS((p) => ({ ...p, biomeLayerEnabled: enabled, highlightedBiome: highlight })),
@@ -134,7 +152,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     let cancelled = false;
     setS((p) => ({ ...p, status: 'loading', error: null }));
     engine
-      .load({ tile, textures, view })
+      .load({ world, tile, textures, view })
       .catch((e: unknown) => {
         if (cancelled) return;
         const err = e instanceof Error ? e : new Error(String(e));
@@ -144,7 +162,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     return () => {
       cancelled = true;
     };
-  }, [engine, tile, textures, view]);
+  }, [engine, world, tile, textures, view]);
 
   // Apply live lighting changes (no remount, no re-load).
   useEffect(() => {

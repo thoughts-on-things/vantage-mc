@@ -1,0 +1,5 @@
+# Vendored third-party dependencies (libdeflate). Marking them vendored +
+# generated makes GitHub collapse them in pull-request diffs, skip them in
+# review by default, and exclude them from the repo's language statistics —
+# the diff you review is only Vantage's own code.
+vendor/** linguist-vendored linguist-generated

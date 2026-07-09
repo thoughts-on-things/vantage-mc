@@ -190,6 +190,9 @@ pub const LightQuality = enum { flat, smooth };
 /// data-pack biome registry used to resolve each tinted face's colour from the
 /// biome at its block position. Water is split into a transparent `fluid` mesh
 /// (see `emitFluid`); everything else goes into the opaque `solid` mesh.
+/// `interior`, if given, meshes only that XZ sub-box — the apron cells outside
+/// it still feed culling/AO/light/biome-blend reads but emit no geometry.
+/// `cave_y` enables cave culling below that world Y (see `MeshCtx.caveCulled`).
 pub fn buildTextured(
     arena: std.mem.Allocator,
     g: grid.Grid,
@@ -199,6 +202,8 @@ pub fn buildTextured(
     reg: *biome.Registry,
     quality: LightQuality,
     blend_biomes: bool,
+    interior: ?grid.Interior,
+    cave_y: ?i32,
     progress: ?std.Progress.Node,
 ) !Built {
     var mesh: Mesh2 = .{}; // opaque terrain
@@ -274,6 +279,8 @@ pub fn buildTextured(
         .blend_biomes = blend_biomes,
         .water_level = water_level,
         .greedy_faces = greedy_faces,
+        .interior = interior orelse grid.Interior.full(g),
+        .cave_y = cave_y,
     };
     const cpu = std.Thread.getCpuCount() catch 1;
     const n_threads = @max(1, @min(cpu, g.sy));
@@ -337,6 +344,30 @@ const MeshCtx = struct {
     /// directions (see `dirIndex`), or -1. The greedy pass uses this to find a
     /// cell's mergeable face; the per-block pass skips faces marked `greedy`.
     greedy_faces: [][6]i16,
+    /// The XZ sub-box to emit geometry for (the whole grid unless this is a
+    /// tiled render with an apron). Cells outside are read but never emitted.
+    interior: grid.Interior,
+    /// Cave culling: when set, faces below this world Y that look into a dark
+    /// cell (sky light 0) are skipped — the BlueMap `remove-caves-below-y`
+    /// mechanic, which cuts the invisible cave geometry that otherwise
+    /// dominates tile size on modern (1.18+) worlds. Faces looking into water
+    /// are always kept, so deep ocean floors survive (sky light attenuates to
+    /// 0 under ~15 blocks of water). Null = render everything.
+    cave_y: ?i32,
+
+    /// Whether cell (x,y,z) is in the dark below the cave-culling horizon.
+    fn caveDark(ctx: *const MeshCtx, x: isize, y: isize, z: isize) bool {
+        const cave_y = ctx.cave_y orelse return false;
+        if (y < 0 or @as(i64, ctx.g.min_y) + @as(i64, y) >= cave_y) return false;
+        return ctx.g.lightAt(x, y, z) >> 4 == 0; // dark = no sky light reaches it
+    }
+
+    /// Whether the face lit by cell (x,y,z) is invisible cave geometry. Faces
+    /// looking into water are never culled (ocean/lake floors).
+    fn caveCulled(ctx: *const MeshCtx, x: isize, y: isize, z: isize) bool {
+        if (!ctx.caveDark(x, y, z)) return false;
+        return !ctx.waterish[ctx.g.at(x, y, z)];
+    }
 };
 
 /// One thread's slice of the mesh: its own arena (page-backed) and Y range.
@@ -362,10 +393,10 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
     const g = ctx.g;
     var y = y0;
     while (y < y1) : (y += 1) {
-        var z: usize = 0;
-        while (z < g.sz) : (z += 1) {
-            var x: usize = 0;
-            while (x < g.sx) : (x += 1) {
+        var z: usize = ctx.interior.z0;
+        while (z < ctx.interior.z1) : (z += 1) {
+            var x: usize = ctx.interior.x0;
+            while (x < ctx.interior.x1) : (x += 1) {
                 const id = g.ids[g.index(x, y, z)];
                 if (id == grid.AIR) continue;
                 const bid: usize = g.biomeAt(x, y, z);
@@ -373,23 +404,26 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
                 const wy: f32 = @floatFromInt(@as(i64, g.min_y) + @as(i64, @intCast(y)));
                 const wz: f32 = @floatFromInt(@as(i64, g.min_z) + @as(i64, @intCast(z)));
 
+                const xi: isize = @intCast(x);
+                const yi: isize = @intCast(y);
+                const zi: isize = @intCast(z);
+
                 // Pure water: transparent pass only (no block model). Boundary
-                // faces, surface lip, depth — see emitFluid.
+                // faces, surface lip, depth — see emitFluid. Dark underground
+                // water below the cave horizon is culled with the caves.
                 if (ctx.is_water[id]) {
-                    try emitFluid(alloc, fluid, ctx, x, y, z, wx, wy, wz, bid);
+                    if (!ctx.caveDark(xi, yi, zi)) try emitFluid(alloc, fluid, ctx, x, y, z, wx, wy, wz, bid);
                     continue;
                 }
 
                 const cb = ctx.cache[id].?; // populated by the occluder pre-pass
-                const xi: isize = @intCast(x);
-                const yi: isize = @intCast(y);
-                const zi: isize = @intCast(z);
                 for (cb.faces) |face| {
                     if (face.greedy) continue; // emitted (merged) by the greedy pass
                     if (face.cull) |c| {
                         const off = dirOffset(c);
                         if (ctx.id_occluder[g.at(xi + off[0], yi + off[1], zi + off[2])]) continue;
-                    }
+                        if (ctx.caveCulled(xi + off[0], yi + off[1], zi + off[2])) continue;
+                    } else if (ctx.caveCulled(xi, yi, zi)) continue;
                     const rgb = ctx.tint_colors[bid * ctx.nkind + @intFromEnum(face.tint)];
                     var ao = [4]u8{ 255, 255, 255, 255 };
                     if (face.ao) {
@@ -413,7 +447,7 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
                 // Waterlogged block (seagrass, kelp, waterlogged stair/…): it just
                 // rendered its model into the opaque mesh; now lay continuous water
                 // over its cell so it sits *in* the water instead of in a shell.
-                if (ctx.waterish[id]) {
+                if (ctx.waterish[id] and !ctx.caveDark(xi, yi, zi)) {
                     try emitFluid(alloc, fluid, ctx, x, y, z, wx, wy, wz, bid);
                 }
             }
@@ -534,19 +568,24 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, di
     const V = dims[gd.vax];
     if (N == 0 or U == 0 or V == 0) return;
 
+    // Interior bounds per axis (Y is never restricted); iteration stays inside
+    // them, so merged rects can't cross into the apron.
+    const lo3 = [3]usize{ ctx.interior.x0, 0, ctx.interior.z0 };
+    const hi3 = [3]usize{ ctx.interior.x1, g.sy, ctx.interior.z1 };
+
     const present = try alloc.alloc(bool, U * V);
     const keys = try alloc.alloc(GKey, U * V);
     const used = try alloc.alloc(bool, U * V);
     var rects: std.ArrayList(Rect) = .empty;
     const noff = gd.n;
 
-    var s: usize = 0;
-    while (s < N) : (s += 1) {
+    var s: usize = lo3[gd.nax];
+    while (s < hi3[gd.nax]) : (s += 1) {
         @memset(present, false);
-        var v: usize = 0;
-        while (v < V) : (v += 1) {
-            var u: usize = 0;
-            while (u < U) : (u += 1) {
+        var v: usize = lo3[gd.vax];
+        while (v < hi3[gd.vax]) : (v += 1) {
+            var u: usize = lo3[gd.uax];
+            while (u < hi3[gd.uax]) : (u += 1) {
                 var cell = [3]usize{ 0, 0, 0 };
                 cell[gd.nax] = s;
                 cell[gd.uax] = u;
@@ -562,6 +601,7 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, di
                 const yi: isize = @intCast(y);
                 const zi: isize = @intCast(z);
                 if (ctx.id_occluder[g.at(xi + noff[0], yi + noff[1], zi + noff[2])]) continue;
+                if (ctx.caveCulled(xi + noff[0], yi + noff[1], zi + noff[2])) continue;
                 const face = ctx.cache[id].?.faces[@intCast(fi)];
                 var ao = [4]u8{ 255, 255, 255, 255 };
                 for (0..4) |ci| ao[ci] = cornerAo(g, ctx.id_occluder, x, y, z, face.ao_off[ci]);
@@ -1045,7 +1085,14 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
                     bf.verts[i] = .{
                         .pos = .{ p[0] + n[0] * nudge, p[1] + n[1] * nudge, p[2] + n[2] * nudge },
                         .uv = .{ u, 1.0 - v },
-                        .n = .{ quantNormal(n[0]), quantNormal(n[1]), quantNormal(n[2]) },
+                        // `shade: false` (vines, cross plants, ladders…): store an
+                        // up normal so the shader's face-direction shading reads
+                        // 1.0 — the game draws these at full brightness, and the
+                        // side-face darkening is why foliage looked muddy.
+                        .n = if (el.shade)
+                            .{ quantNormal(n[0]), quantNormal(n[1]), quantNormal(n[2]) }
+                        else
+                            .{ 0, 1, 0 },
                     };
                 }
                 try list.append(arena, bf);
@@ -1330,17 +1377,21 @@ fn rotAxis(v: *[3]f32, axis: Axis, k: u2, recenter: bool) void {
     var i: u2 = 0;
     while (i < k) : (i += 1) {
         switch (axis) {
-            // +90° about X: (x, y, z) -> (x, -z, y)
+            // Blockstate x+90 tips the model's top toward north: up -> north.
+            // Verified against vanilla assets (barrel facing=up is the default
+            // model, facing=north is x=90): (x, y, z) -> (x, z, -y).
             .x => {
-                const ny = -pz;
-                const nz = py;
+                const ny = pz;
+                const nz = -py;
                 py = ny;
                 pz = nz;
             },
-            // +90° about Y: (x, y, z) -> (z, y, -x)
+            // Blockstate y+90 turns the model clockwise seen from above:
+            // north -> east (ladder facing=east is y=90 on a north-facing
+            // model): (x, y, z) -> (-z, y, x).
             .y => {
-                const nx = pz;
-                const nz = -px;
+                const nx = -pz;
+                const nz = px;
                 px = nx;
                 pz = nz;
             },
@@ -1405,9 +1456,11 @@ test "cornerAoOffsets samples the right in-plane neighbours" {
 }
 
 test "rotateDir matches the geometry/normal rotation convention" {
-    // x=90 about X maps +Y (up) -> +Z (south); identity for zero rotation.
+    // Vanilla conventions: x=90 tips up -> north (barrel facing=up is the
+    // default model, facing=north is x=90); y=90 turns north -> east (ladder).
     try std.testing.expectEqual(model.Dir.up, rotateDir(.up, 0, 0));
-    try std.testing.expectEqual(model.Dir.south, rotateDir(.up, 90, 0));
+    try std.testing.expectEqual(model.Dir.north, rotateDir(.up, 90, 0));
+    try std.testing.expectEqual(model.Dir.east, rotateDir(.north, 0, 90));
     // Cross-check directly against the normal rotation used for geometry.
     for ([_]model.Dir{ .down, .up, .north, .south, .west, .east }) |d| {
         var n = dirVecF(d);
@@ -1554,6 +1607,8 @@ test "blendedTint ramps linearly between two biome cells" {
         .blend_biomes = true,
         .water_level = &.{},
         .greedy_faces = &.{},
+        .interior = grid.Interior.full(g),
+        .cave_y = null,
     };
     // Cell centres sit at block 2 and 6; the midpoint (block 4) is the 50% blend.
     try std.testing.expectEqual(@as(u8, 0), blendedTint(&ctx, .grass, 2, 0, 0)[0]);
@@ -1562,6 +1617,78 @@ test "blendedTint ramps linearly between two biome cells" {
     // Past the edge the nearest cell is held (no bleed to biome 0/black beyond).
     try std.testing.expectEqual(@as(u8, 0), blendedTint(&ctx, .grass, 0, 0, 0)[0]);
     try std.testing.expectEqual(@as(u8, 100), blendedTint(&ctx, .grass, 8, 0, 0)[0]);
+}
+
+test "greedy pass emits only interior cells (apron feeds reads, not geometry)" {
+    // meshGreedyDir allocates scratch it never frees (arena-per-region in prod).
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    // A 4×1×4 slab of one block; interior = the middle 2×2. The up-faces of the
+    // 4 interior cells merge into ONE 2×2 quad positioned inside the interior;
+    // the 12 apron cells emit nothing.
+    var ids = [_]u16{1} ** 16;
+    var names = [_][]const u8{ "", "minecraft:stone" };
+    const g: grid.Grid = .{
+        .sx = 4,
+        .sy = 1,
+        .sz = 4,
+        .min_x = 0,
+        .min_y = 0,
+        .min_z = 0,
+        .ids = &ids,
+        .names = &names,
+    };
+    // Hand-baked full up-face (unit square at y=1), greedy-eligible.
+    const up = dirIndex(.up);
+    var faces_buf = [_]BakedFace{.{
+        .verts = .{
+            .{ .pos = .{ 0, 1, 0 }, .uv = .{ 0, 0 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 0, 1, 1 }, .uv = .{ 0, 1 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 1, 1, 1 }, .uv = .{ 1, 1 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 1, 1, 0 }, .uv = .{ 1, 0 }, .n = .{ 0, 1, 0 } },
+        },
+        .layer = 0,
+        .tint = .none,
+        .cull = .up,
+        .ao = false,
+        .greedy = true,
+        .ao_off = .{.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }} ** 4,
+    }};
+    var cache = [_]?Cached{ null, .{ .faces = &faces_buf, .occluder = true } };
+    var greedy_faces = [_][6]i16{ .{ -1, -1, -1, -1, -1, -1 }, .{ -1, -1, -1, -1, -1, -1 } };
+    greedy_faces[1][up] = 0;
+    const nkind = @as(usize, biome.Tint.count);
+    const tint = try a.alloc([3]u8, 1 * nkind); // only biome id 0 present
+    @memset(tint, .{ 255, 255, 255 });
+    var id_occluder = [_]bool{ false, true };
+    const ctx: MeshCtx = .{
+        .g = g,
+        .cache = &cache,
+        .id_occluder = &id_occluder,
+        .is_water = &.{ false, false },
+        .waterish = &.{ false, false },
+        .tint_colors = tint,
+        .nkind = nkind,
+        .water_layer = 0,
+        .quality = .flat,
+        .blend_biomes = false,
+        .water_level = &.{ -1, -1 },
+        .greedy_faces = &greedy_faces,
+        .interior = .{ .x0 = 1, .z0 = 1, .x1 = 3, .z1 = 3 },
+        .cave_y = null,
+    };
+    var out: Mesh2 = .{};
+    try meshGreedyDir(&ctx, a, &out, up);
+    try std.testing.expectEqual(@as(u32, 4), out.vertex_count); // one merged quad
+    // Every vertex lies within the interior box [1,3]×[1,3] (world == grid here).
+    var i: usize = 0;
+    while (i < out.vertex_count) : (i += 1) {
+        const px = out.positions.items[i * 3 + 0];
+        const pz = out.positions.items[i * 3 + 2];
+        try std.testing.expect(px >= 1 and px <= 3);
+        try std.testing.expect(pz >= 1 and pz <= 3);
+    }
 }
 
 test "fluid level parsing and base height" {

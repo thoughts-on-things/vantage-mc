@@ -23,8 +23,11 @@ See **[DESIGN.md](./DESIGN.md)** for the full architecture, decisions, and roadm
 
 ## Status
 
-Early, but it draws — with real textures **and biome-aware colour, plus an
-interactive biome layer.** **Phases 0–2 (core) and the biome layer are complete.**
+It renders **whole worlds** — real textures, biome-aware colour, an interactive
+biome layer, and **tiled streaming**: the generator bakes every populated chunk
+into gzip-wrapped tiles + a manifest, and the viewer streams them around the
+camera. **Phases 0–2, the biome layer, greedy meshing, and the P4 core
+(tiling + streaming) are complete.**
 
 - **P0 — parsing spike:** reads real Anvil region files, decompresses chunks
   (zlib via C interop), parses NBT, and unpacks the paletted block-state arrays.
@@ -69,8 +72,9 @@ just fmt        # format sources   ·   just ci = fmt-check + test + build
 ### Render your world
 
 One command — point it at a save folder (the one with `level.dat`). It finds the
-region files and the extracted assets, renders the populated area, and shows a
-progress bar:
+region files and the extracted assets, renders **the whole populated world** as
+a grid of streamable tiles (a manifest + gzip-wrapped `.vtile`s + one texture
+array), and shows a progress bar:
 
 ```sh
 just web-install   # once: install the viewer's npm deps (Node 18+)
@@ -78,6 +82,20 @@ just render "~/Library/Application Support/minecraft/saves/My World"
 just serve         # → http://127.0.0.1:8753/   ·  press #top for the map view
 #   drag to orbit · scroll to zoom · B = biome layer · hover to identify
 ```
+
+The viewer streams tiles around the camera (default 768-block ring, 120-tile
+budget — live-tunable from the in-viewer quality panel up to an ultra preset),
+so world size doesn't matter — pan anywhere and it loads under you. Tiles are
+uploaded to the GPU in their on-disk quantized encoding (the vertex shader
+dequantizes), so arriving tiles cost the main thread nearly nothing and
+streaming stays smooth. Useful flags:
+
+- `--tile-chunks <n>` — tile span in chunks (default 8 = 128×128 blocks).
+- `--caves off|<y>` — cave culling horizon (default 55, the BlueMap default):
+  faces that only look into dark sky-light-0 cells below this Y are skipped.
+  Ocean/lake floors are always kept. `off` bakes full cave geometry.
+- `--out <dir>` — output directory (default `web/public`).
+- `--radius <chunks>` — render only a window around spawn (quick previews).
 
 The viewer is a real, installable package — **[`vantage-mc`](./web/README.md)** —
 not just a demo. It exposes three layers (a zero-dep tile decoder, a three.js
@@ -89,9 +107,10 @@ First time, extract the assets a render needs from a client jar (any 1.18+
 version; schema is stable): `just extract <client.jar>`. The renderer reads the
 world directly and never writes to it.
 
-> Large/dense worlds are rendered as a centred window (`--radius <chunks>` to
-> widen) until greedy meshing + LOD land — full-world streaming is the next perf
-> step. `just render "<save>" --radius 8`.
+> Measured on a dense 7,225-chunk 1.21 world (Windows, ReleaseFast): ~20 s
+> end-to-end, 81 tiles, 126 MB on disk (970 MB raw geometry before gzip; cave
+> culling already removed ~40% of triangles). The next size/perf leaps are the
+> LOD pyramid and per-tile lightmaps (which unlock far larger greedy merges).
 
 <details><summary>Lower-level: mesh a single region by hand</summary>
 

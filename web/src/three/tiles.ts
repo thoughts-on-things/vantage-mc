@@ -117,6 +117,10 @@ export class TileManager {
   private readonly tileBlocks: number;
   /** Lowres pyramid levels, finest first ([] when the manifest has none). */
   private readonly lowLevels: LowresLevel[];
+  /** Tile-existence index per lowres level (for the coverage pass). */
+  private readonly lowIndex = new Map<number, Set<string>>();
+  /** Set when residency changed and lowres visibility needs recomputing. */
+  private coverageDirty = false;
 
   private queue: { ref: ManifestTile; level: number }[] = [];
   /** Built tiles awaiting scene insertion — flushed ONE per update() call so
@@ -149,6 +153,9 @@ export class TileManager {
     this.tileBlocks = options.manifest.tileBlocks;
     for (const t of options.manifest.tiles) this.index.set(tileKey(t.x, t.z), t);
     this.lowLevels = this.lowresMaterial ? [...(options.manifest.lowres?.levels ?? [])].sort((a, b) => a.level - b.level) : [];
+    for (const lvl of this.lowLevels) {
+      this.lowIndex.set(lvl.level, new Set(lvl.tiles.map((t) => tileKey(t.x, t.z))));
+    }
   }
 
   /** Tile span in blocks at a pyramid level (0 = hires). */
@@ -170,6 +177,7 @@ export class TileManager {
   update(focusX: number, focusZ: number): void {
     if (this.disposed) return;
     this.flushOne();
+    if (this.coverageDirty) this.applyCoverage();
     // Re-plan only when the focus has moved a quarter tile; otherwise just keep
     // the fetch pipeline full. (The first call always plans: lastFocus = ∞.)
     const moved = Math.hypot(focusX - this.lastFocusX, focusZ - this.lastFocusZ);
@@ -267,9 +275,54 @@ export class TileManager {
       rec.state = 'ready';
       this.opts.scene.add(rec.terrain!);
       if (rec.water) this.opts.scene.add(rec.water);
+      this.coverageDirty = true;
       this.invalidate();
       this.emitter.emit('change', this.stats);
       budget--;
+    }
+  }
+
+  /**
+   * Hide every lowres tile whose footprint is fully SHOWN by finer data.
+   * "Shown" is transitive, computed bottom-up: a hires tile shows its area by
+   * being resident; a lowres tile's area is shown if the tile is resident OR
+   * all of its existing children's areas are shown (so a coarse blanket tile
+   * hides when hires covers it even if the middle rings were never fetched).
+   *
+   * This is what keeps the underlay honest: a smooth interpolated heightfield
+   * coexisting with real voxel terrain leaks through everything hires
+   * deliberately opens — cave-culled pockets, ravines, underwater cliffs,
+   * gaps in tree canopies. Where finer data is on screen, the underlay is
+   * simply switched off; it reappears the moment coverage breaks (unload,
+   * ring edge, loading).
+   */
+  private applyCoverage(): void {
+    this.coverageDirty = false;
+    // Areas shown at the finer level, seeded with resident hires tiles.
+    let shown = new Set<string>();
+    for (const rec of this.records.values()) {
+      if (rec.level === 0 && rec.state === 'ready') shown.add(tileKey(rec.ref.x, rec.ref.z));
+    }
+    let finerIndex: { has(key: string): boolean } = this.index;
+    for (const lvl of this.lowLevels) {
+      const shownHere = new Set<string>();
+      for (const t of lvl.tiles) {
+        let covered = true;
+        for (let dz = 0; dz < 2 && covered; dz++) {
+          for (let dx = 0; dx < 2 && covered; dx++) {
+            const childKey = tileKey(t.x * 2 + dx, t.z * 2 + dz);
+            // A child absent from the manifest is empty terrain — nothing to
+            // cover there.
+            if (finerIndex.has(childKey) && !shown.has(childKey)) covered = false;
+          }
+        }
+        const rec = this.records.get(recKey(lvl.level, t.x, t.z));
+        const ready = rec?.state === 'ready';
+        if (ready && rec!.terrain) rec!.terrain.visible = !covered;
+        if (ready || covered) shownHere.add(tileKey(t.x, t.z));
+      }
+      shown = shownHere;
+      finerIndex = this.lowIndex.get(lvl.level) ?? new Set<string>();
     }
   }
 
@@ -417,6 +470,7 @@ export class TileManager {
       mesh.geometry.dispose();
     }
     this.records.delete(key);
+    this.coverageDirty = true; // an uncovered lowres parent may need to reappear
     this.invalidate();
     this.emitter.emit('change', this.stats);
   }

@@ -19,7 +19,7 @@ import {
   type WorldManifest,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
-import { createSky, createTerrainMaterial, createWaterMaterial, SKY_HORIZON } from './materials.js';
+import { createLowresMaterial, createSky, createTerrainMaterial, createWaterMaterial, SKY_HORIZON } from './materials.js';
 import { pickBiome } from './pick.js';
 import { buildTerrain } from './terrain.js';
 import { TileManager, type TileStats } from './tiles.js';
@@ -231,6 +231,9 @@ export class VantageViewer {
   private tiles: TileManager | null = null;
   private manifest: WorldManifest | null = null;
   private waterShader: THREE.ShaderMaterial | null = null;
+  private lowresShader: THREE.ShaderMaterial | null = null;
+  /** Populated world extent (max of X/Z spans), for whole-world zoom limits. */
+  private worldSpan = 0;
   private tilesUnsub: (() => void) | null = null;
   private lastBiomesEmit = 0;
 
@@ -371,9 +374,12 @@ export class VantageViewer {
     // the shader dequantizes — the decode-stutter fix (see terrain.ts).
     const shader = createTerrainMaterial(texData, { quantized: true, palette });
     const waterShader = createWaterMaterial(shader);
-    shader.uniforms['uFogRadial']!.value = 1.0; // fog the streamed ring edge, not view depth
+    shader.uniforms['uFogRadial']!.value = 1.0; // fog radially from the focus, not by view depth
+    // Lowres pyramid (format 2): coarse whole-world rings under the hires disc.
+    const lowresShader = manifest.lowres ? createLowresMaterial(shader) : undefined;
     this.shader = shader;
     this.waterShader = waterShader;
+    this.lowresShader = lowresShader ?? null;
     this.manifest = manifest;
     this.tile = null;
     this.tiles = new TileManager({
@@ -382,6 +388,7 @@ export class VantageViewer {
       scene: this.scene,
       material: shader,
       waterMaterial: waterShader,
+      ...(lowresShader ? { lowresMaterial: lowresShader } : {}),
       palette,
       ...this.options.streaming,
     });
@@ -442,6 +449,7 @@ export class VantageViewer {
       maxX = maxZ = tb;
     }
     this.bounds.set(new THREE.Vector3(minX, -64, minZ), new THREE.Vector3(maxX, 320, maxZ));
+    this.worldSpan = Math.max(maxX - minX, maxZ - minZ);
 
     const viewDistance = this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768;
     const spawn = manifest.spawn;
@@ -449,9 +457,6 @@ export class VantageViewer {
       ? new THREE.Vector3(spawn.x, spawn.y, spawn.z)
       : new THREE.Vector3((minX + maxX) / 2, 80, (minZ + maxZ) / 2);
 
-    // Zoom-out is bounded by what streaming can actually keep resident, so the
-    // map never becomes a field of holes.
-    this.controls.maxDistance = viewDistance * 2.2;
     const span = Math.min(Math.max(maxX - minX, maxZ - minZ), viewDistance * 1.1);
     let distance: number;
     let angle: number;
@@ -467,15 +472,12 @@ export class VantageViewer {
     this.controls.setView({ position: pivot, distance, rotation: 0, angle, floorY: pivot.y });
     this.framedState = { position: pivot.clone(), distance, rotation: 0, angle, floorY: pivot.y };
 
-    this.camera.far = Math.max(8000, viewDistance * 6);
-    this.camera.updateProjectionMatrix();
-    this.applyStreamFog();
+    this.applyViewLimits();
   }
 
-  /** The radius tiles are actually guaranteed resident to: the view distance,
-   *  unless the tile budget runs out first (nearest-first fill ⇒ a disc of
-   *  maxTiles tiles ⇒ radius tb·√(maxTiles/π)). Fog is tied to THIS, so it
-   *  hugs the real streamed edge instead of hazing resident terrain. */
+  /** The radius hires tiles are actually guaranteed resident to: the view
+   *  distance, unless the tile budget runs out first (nearest-first fill ⇒ a
+   *  disc of maxTiles tiles ⇒ radius tb·√(maxTiles/π)). */
   private streamRadius(): number {
     const vd = this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768;
     const mt = this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 96;
@@ -483,14 +485,31 @@ export class VantageViewer {
     return Math.min(vd, tb * Math.sqrt(mt / Math.PI));
   }
 
-  /** Radial fog for streamed worlds: clear across the resident disc, fading
-   *  out right at the ring where tiles stop so pop-in stays behind the haze.
-   *  Radial (XZ from the focus) — zooming out or looking down never fogs
-   *  terrain that is actually loaded, unlike view-depth fog. */
-  private applyStreamFog(): void {
-    if (!this.shader || !this.tiles) return;
-    const r = this.streamRadius();
-    this.shader.uniforms['uFog']!.value.set(r * 0.72, r * 1.05);
+  /** Zoom range, far plane, and fog for a streamed world.
+   *
+   *  With a lowres pyramid (format 2) the whole world is drawable, so zoom-out
+   *  is bounded by the world extent, the far plane covers it, and the radial
+   *  fog retreats to the world edge — a faint horizon haze, never a wall. The
+   *  hires→lowres seam needs no hiding: finer data simply overlays coarser.
+   *
+   *  Without one (format 1), zoom and fog hug the hires ring so the map never
+   *  becomes a field of holes: solid haze right where tiles stop. */
+  private applyViewLimits(): void {
+    if (!this.tiles || !this.shader) return;
+    const viewDistance = this.tiles.viewDistance;
+    const fog = this.shader.uniforms['uFog']!.value as THREE.Vector2;
+    if (this.manifest?.lowres) {
+      const span = Math.max(this.worldSpan, viewDistance * 2);
+      this.controls.maxDistance = Math.min(Math.max(span * 0.9, viewDistance * 2.2), 60000);
+      this.camera.far = Math.min(Math.max(8000, span * 2.5), 250000);
+      fog.set(span * 0.9, span * 1.8);
+    } else {
+      const r = this.streamRadius();
+      this.controls.maxDistance = viewDistance * 2.2;
+      this.camera.far = Math.max(8000, viewDistance * 6);
+      fog.set(r * 0.72, r * 1.05);
+    }
+    this.camera.updateProjectionMatrix();
   }
 
   private setTile(tile: DecodedTile, textures: DecodedTextureArray | undefined, view: ViewMode): void {
@@ -747,11 +766,7 @@ export class VantageViewer {
     this.options.streaming = { ...this.options.streaming, ...settings };
     if (!this.tiles) return;
     this.tiles.configure(settings);
-    const vd = this.tiles.viewDistance;
-    this.controls.maxDistance = vd * 2.2;
-    this.camera.far = Math.max(8000, vd * 6);
-    this.camera.updateProjectionMatrix();
-    this.applyStreamFog();
+    this.applyViewLimits();
   }
 
   // --- camera / navigation ---------------------------------------------------
@@ -947,6 +962,10 @@ export class VantageViewer {
         (this.shader.uniforms['uPalette']!.value as THREE.Texture | null)?.dispose();
         this.shader.dispose();
         this.shader = null;
+      }
+      if (this.lowresShader) {
+        this.lowresShader.dispose();
+        this.lowresShader = null;
       }
     }
     this.controls.heightAt = null;

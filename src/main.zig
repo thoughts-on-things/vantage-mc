@@ -24,6 +24,7 @@ const texture = @import("texture.zig");
 const biome = @import("biome.zig");
 const lang = @import("lang.zig");
 const world = @import("world.zig");
+const lowres = @import("lowres.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -474,6 +475,13 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
 
     var manifest_tiles: std.ArrayList(TileEntry) = .empty;
 
+    // Lowres LOD source data: every tile also yields a per-column color map
+    // (kept for the whole run — ~80 KB per tile), downsampled into the quadtree
+    // pyramid after the main loop.
+    var surf_colors = lowres.SurfaceColors.init(a, resolver, &builder, maps, &reg);
+    var color_maps = std.AutoHashMap(u64, *lowres.ColorMap).init(a);
+    const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
+
     const tiles_dir = try std.fmt.allocPrint(a, "{s}/tiles", .{out_dir});
     try std.Io.Dir.cwd().createDirPath(init.io, tiles_dir);
 
@@ -558,6 +566,11 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         const surface = try grid.buildSurface(ta, g2, interior);
         const geo = try tile.serializeWithSurfaceQuantized(ta, built.solid, built.fluid, surface, world_display.items);
 
+        // The tile's lowres source map (long-lived: feeds the pyramid later).
+        const cmap = try a.create(lowres.ColorMap);
+        cmap.* = try lowres.buildColorMap(a, g2, interior, &surf_colors, @intCast(bx0), @intCast(bz0), @intCast(tile_blocks));
+        try color_maps.put(key, cmap);
+
         // Tiles ship gzip-wrapped (~8× smaller): any static host can serve
         // them and the viewer inflates via native DecompressionStream.
         const t_w0 = std.Io.Timestamp.now(init.io, .awake);
@@ -575,6 +588,94 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     }
     tiles_node.end();
 
+    // ---- lowres LOD pyramid -------------------------------------------------
+    // Downsample the per-tile color maps 2× per level until the world fits in
+    // one tile. Every level ≥1 ships as gzipped VLR1 tiles; the viewer keeps
+    // coarse levels resident far beyond the hires ring, so zooming out shows
+    // the whole world instead of a fogged edge.
+    const lod_node = root.start("lowres pyramid", 0);
+    var lowres_levels: std.ArrayList(LowresLevel) = .empty;
+    var lowres_count: usize = 0;
+    var lowres_bytes: u64 = 0;
+    {
+        var cur = color_maps;
+        var level: u5 = 1;
+        // Stop once a level fits in ≤4 tiles: an origin-anchored quadtree never
+        // merges tiles straddling (0,0), so "count == 1" may never come — the
+        // 2×2 around the origin is the practical root.
+        while (cur.count() > 4 and level <= 10) : (level += 1) {
+            const lvl_blocks: i64 = tile_blocks << level;
+
+            // Group this level's children under their parent tile (quadrants).
+            var parents = std.AutoHashMap(u64, [2][2]?*const lowres.ColorMap).init(a);
+            var it = cur.iterator();
+            while (it.next()) |e| {
+                const tx: i32 = @bitCast(@as(u32, @truncate(e.key_ptr.* >> 32)));
+                const tz: i32 = @bitCast(@as(u32, @truncate(e.key_ptr.*)));
+                const px = @divFloor(tx, 2);
+                const pz = @divFloor(tz, 2);
+                const qx: usize = @intCast(tx - px * 2);
+                const qz: usize = @intCast(tz - pz * 2);
+                const gop = try parents.getOrPut(world.packChunk(px, pz));
+                if (!gop.found_existing) gop.value_ptr.* = .{ .{ null, null }, .{ null, null } };
+                gop.value_ptr.*[qz][qx] = e.value_ptr.*;
+            }
+
+            var next = std.AutoHashMap(u64, *lowres.ColorMap).init(a);
+            var par_it = parents.iterator();
+            while (par_it.next()) |e| {
+                const px: i32 = @bitCast(@as(u32, @truncate(e.key_ptr.* >> 32)));
+                const pz: i32 = @bitCast(@as(u32, @truncate(e.key_ptr.*)));
+                const m = try a.create(lowres.ColorMap);
+                m.* = try lowres.downsample(
+                    a,
+                    e.value_ptr.*,
+                    @intCast(@as(i64, px) * lvl_blocks),
+                    @intCast(@as(i64, pz) * lvl_blocks),
+                    @as(u32, 1) << level,
+                );
+                try next.put(e.key_ptr.*, m);
+            }
+
+            // Serialize with neighbour aprons (needs the whole level built).
+            var keys: std.ArrayList(u64) = .empty;
+            var kit = next.keyIterator();
+            while (kit.next()) |k| try keys.append(a, k.*);
+            std.mem.sort(u64, keys.items, {}, struct {
+                fn lt(_: void, x: u64, y: u64) bool {
+                    return x < y;
+                }
+            }.lt);
+            var entries: std.ArrayList(LowresTileEntry) = .empty;
+            for (keys.items) |k| {
+                const px: i32 = @bitCast(@as(u32, @truncate(k >> 32)));
+                const pz: i32 = @bitCast(@as(u32, @truncate(k)));
+                const m = next.get(k).?;
+                const blob = try lowres.serialize(
+                    a,
+                    m.*,
+                    if (next.get(world.packChunk(px + 1, pz))) |p| p else null,
+                    if (next.get(world.packChunk(px, pz + 1))) |p| p else null,
+                    if (next.get(world.packChunk(px + 1, pz + 1))) |p| p else null,
+                );
+                const zipped = try compress.gzipCompress(a, blob, 6);
+                const path = try std.fmt.allocPrint(a, "{s}/tiles/l{d}.{d}.{d}.vlr", .{ out_dir, level, px, pz });
+                try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = zipped });
+                try entries.append(a, .{ .x = px, .z = pz, .bytes = zipped.len });
+                lowres_count += 1;
+                lowres_bytes += zipped.len;
+            }
+            try lowres_levels.append(a, .{
+                .level = level,
+                .tile_blocks = lvl_blocks,
+                .span = @as(u32, 1) << level,
+                .tiles = try entries.toOwnedSlice(a),
+            });
+            cur = next;
+        }
+    }
+    lod_node.end();
+
     const tex_node = root.start("writing textures + manifest", 0);
     const arr = try builder.finish();
     const tex_blob = try compress.gzipCompress(a, try texture.serialize(a, arr), 6);
@@ -586,6 +687,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         .spawn = spawn,
         .biomes = world_display.items,
         .tiles = manifest_tiles.items,
+        .lowres = lowres_levels.items,
     });
     const manifest_path = try std.fmt.allocPrint(a, "{s}/manifest.json", .{out_dir});
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = manifest_path, .data = manifest });
@@ -597,6 +699,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         \\chunks:  {d} populated ({d} decodes incl. apron overlap)
         \\blocks:  {d} block states, {d} biomes
         \\tiles:   {d} written ({d:.1} MB gzipped, {d:.1} MB raw) + texture array ({d} layers)
+        \\lowres:  {d} LOD tiles across {d} levels ({d:.1} MB)
         \\mesh:    {d} vertices, {d} triangles ({d} water verts)
         \\out:     {s}/manifest.json
         \\
@@ -611,6 +714,9 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         @as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0),
         @as(f64, @floatFromInt(total_raw_bytes)) / (1024.0 * 1024.0),
         arr.layer_count,
+        lowres_count,
+        lowres_levels.items.len,
+        @as(f64, @floatFromInt(lowres_bytes)) / (1024.0 * 1024.0),
         total_solid_verts + total_fluid_verts,
         total_tris,
         total_fluid_verts,
@@ -624,19 +730,29 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
 /// One rendered tile's manifest record.
 const TileEntry = struct { tx: i32, tz: i32, bytes: usize };
 
+/// One lowres tile / one pyramid level, for the manifest's `lowres` section.
+const LowresTileEntry = struct { x: i32, z: i32, bytes: usize };
+const LowresLevel = struct {
+    level: u5,
+    tile_blocks: i64,
+    span: u32,
+    tiles: []const LowresTileEntry,
+};
+
 const ManifestInput = struct {
     tile_chunks: i32,
     spawn: ?[3]i32,
     /// Biome display names, id-indexed (index 0 = the "" no-data sentinel).
     biomes: []const []const u8,
     tiles: []const TileEntry,
+    lowres: []const LowresLevel = &.{},
 };
 
 /// Serialize the world manifest — the small JSON the viewer streams tiles from.
 /// Hand-rolled (the shape is tiny and fixed) to stay off the std.json churn.
 fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    try out.print(a, "{{\n  \"format\": 1,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"textures\": \"terrain.vtexarr\",\n", .{
+    try out.print(a, "{{\n  \"format\": 2,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"textures\": \"terrain.vtexarr\",\n", .{
         m.tile_chunks, m.tile_chunks * 16,
     });
     if (m.spawn) |s| try out.print(a, "  \"spawn\": {{ \"x\": {d}, \"y\": {d}, \"z\": {d} }},\n", .{ s[0], s[1], s[2] });
@@ -645,7 +761,23 @@ fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
         if (i > 0) try out.appendSlice(a, ", ");
         try appendJsonString(a, &out, name);
     }
-    try out.appendSlice(a, "],\n  \"tiles\": [\n");
+    try out.appendSlice(a, "],\n");
+    if (m.lowres.len > 0) {
+        try out.print(a, "  \"lowres\": {{\n    \"grid\": {d},\n    \"levels\": [\n", .{lowres.CELLS + 1});
+        for (m.lowres, 0..) |lvl, li| {
+            try out.print(a, "      {{ \"level\": {d}, \"tileBlocks\": {d}, \"span\": {d}, \"tiles\": [\n", .{
+                lvl.level, lvl.tile_blocks, lvl.span,
+            });
+            for (lvl.tiles, 0..) |t, i| {
+                try out.print(a, "        {{ \"x\": {d}, \"z\": {d}, \"path\": \"tiles/l{d}.{d}.{d}.vlr\", \"bytes\": {d} }}{s}\n", .{
+                    t.x, t.z, lvl.level, t.x, t.z, t.bytes, if (i + 1 < lvl.tiles.len) "," else "",
+                });
+            }
+            try out.print(a, "      ] }}{s}\n", .{if (li + 1 < m.lowres.len) "," else ""});
+        }
+        try out.appendSlice(a, "    ]\n  },\n");
+    }
+    try out.appendSlice(a, "  \"tiles\": [\n");
     for (m.tiles, 0..) |t, i| {
         try out.print(a, "    {{ \"x\": {d}, \"z\": {d}, \"path\": \"tiles/t.{d}.{d}.vtile\", \"bytes\": {d} }}{s}\n", .{
             t.tx, t.tz, t.tx, t.tz, t.bytes, if (i + 1 < m.tiles.len) "," else "",

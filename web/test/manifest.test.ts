@@ -33,11 +33,29 @@ describe('parseManifest', () => {
     expect(parseManifest(noSpawn).spawn).toBeUndefined();
   });
 
+  it('accepts a format-2 manifest with a lowres pyramid', () => {
+    const m = parseManifest({
+      ...good,
+      format: 2,
+      lowres: {
+        grid: 129,
+        levels: [
+          { level: 1, tileBlocks: 256, span: 2, tiles: [{ x: 0, z: 0, path: 'tiles/l1.0.0.vlr', bytes: 42 }] },
+        ],
+      },
+    });
+    expect(m.format).toBe(2);
+    expect(m.lowres?.grid).toBe(129);
+    expect(m.lowres?.levels[0]?.tiles[0]?.path).toBe('tiles/l1.0.0.vlr');
+  });
+
   it('rejects wrong format versions and malformed shapes', () => {
     expect(() => parseManifest(null)).toThrow(/not an object/);
-    expect(() => parseManifest({ ...good, format: 2 })).toThrow(/format/);
+    expect(() => parseManifest({ ...good, format: 3 })).toThrow(/format/);
     expect(() => parseManifest({ ...good, tiles: [{ x: 0 }] })).toThrow(/tile 0/);
     expect(() => parseManifest({ ...good, biomes: [1] })).toThrow(/biomes/);
+    expect(() => parseManifest({ ...good, format: 2, lowres: { grid: 0, levels: [] } })).toThrow(/lowres/);
+    expect(() => parseManifest({ ...good, format: 2, lowres: { grid: 129, levels: [{ level: 1 }] } })).toThrow(/lowres level/);
   });
 });
 

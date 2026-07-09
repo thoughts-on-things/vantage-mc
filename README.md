@@ -88,7 +88,14 @@ budget — live-tunable from the in-viewer quality panel up to an ultra preset),
 so world size doesn't matter — pan anywhere and it loads under you. Tiles are
 uploaded to the GPU in their on-disk quantized encoding (the vertex shader
 dequantizes), so arriving tiles cost the main thread nearly nothing and
-streaming stays smooth. Useful flags:
+streaming stays smooth.
+
+Beyond the hires ring, a **lowres LOD pyramid** (a quadtree of colored
+heightfields, ~1% of the hires bytes, baked automatically) keeps the *entire
+world* visible: zoom all the way out to a whole-world satellite view, and
+distant terrain is always on screen — never a fog wall. Water composites the
+same translucent look as the close-up shader, so the transition is invisible.
+Useful flags:
 
 - `--tile-chunks <n>` — tile span in chunks (default 8 = 128×128 blocks).
 - `--caves off|<y>` — cave culling horizon (default 55, the BlueMap default):

@@ -314,6 +314,70 @@ export function createWaterMaterial(terrain: THREE.ShaderMaterial): THREE.Shader
 }
 
 /**
+ * The lowres LOD material: a vertex-colored heightfield (lighting and biome
+ * tint are baked into the colors by the generator) that shares the terrain
+ * shader's fog/grade/exposure uniform OBJECTS, so haze, colour grade, and the
+ * radial fog centre track the hires terrain exactly.
+ */
+export function createLowresMaterial(terrain: THREE.ShaderMaterial): THREE.ShaderMaterial {
+  const t = terrain.uniforms;
+  return new THREE.ShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    uniforms: {
+      uFogColor: t['uFogColor']!,
+      uFog: t['uFog']!,
+      uFogCenter: t['uFogCenter']!,
+      uFogRadial: t['uFogRadial']!,
+      uFogDensity: t['uFogDensity']!,
+      uExposure: t['uExposure']!,
+      uSaturation: t['uSaturation']!,
+      uContrast: t['uContrast']!,
+    },
+    vertexShader: /* glsl */ `
+      in vec3 acol;
+      uniform vec2 uFogCenter;
+      uniform float uFogRadial;
+      out vec3 vCol;
+      out float vFog;
+      void main() {
+        vCol = acol;
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vec4 mv = viewMatrix * wp;
+        vFog = mix(-mv.z, distance(wp.xz, uFogCenter), uFogRadial);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      precision highp float;
+      uniform vec3 uFogColor;
+      uniform vec2 uFog;
+      uniform float uFogDensity;
+      uniform float uExposure;
+      uniform float uSaturation;
+      uniform float uContrast;
+      in vec3 vCol;
+      in float vFog;
+      out vec4 frag;
+      vec3 toLinear(vec3 c) {
+        return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+      }
+      vec3 toSRGB(vec3 c) {
+        c = max(c, vec3(0.0));
+        return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+      }
+      void main() {
+        vec3 c = toLinear(vCol) * uExposure;
+        float l = dot(c, vec3(0.299, 0.587, 0.114));
+        c = mix(vec3(l), c, uSaturation);
+        c = max((c - 0.5) * uContrast + 0.5, vec3(0.0));
+        float f = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity;
+        frag = vec4(toSRGB(mix(c, toLinear(uFogColor), f)), 1.0);
+      }
+    `,
+  });
+}
+
+/**
  * A camera-locked gradient sky dome (depth-test off, drawn first) so the
  * background reads as sky from any zoom, with the horizon matching the fog.
  * Keep it centred on the camera each frame (`sky.position.copy(camera.position)`).
@@ -343,7 +407,10 @@ export function createSky(): THREE.Mesh {
     },
   });
   const sky = new THREE.Mesh(new THREE.SphereGeometry(10, 24, 16), mat);
-  sky.renderOrder = -1;
+  // Absolutely first: it depth-tests off and paints the whole screen, so
+  // anything ordered before it (the lowres LOD rings use small negative
+  // renderOrders) would be erased.
+  sky.renderOrder = -1000;
   sky.frustumCulled = false;
   return sky;
 }

@@ -12,9 +12,21 @@ export interface ManifestTile {
   bytes: number;
 }
 
+/** One lowres LOD level: the whole world at 1/2^level detail, in tiles of
+ *  `tileBlocks` blocks (each a fixed cell grid — see {@link WorldManifest.lowres}). */
+export interface LowresLevel {
+  /** Pyramid level (1 = half detail, 2 = quarter, …). */
+  level: number;
+  /** Tile span in blocks per side at this level (hires tileBlocks · 2^level). */
+  tileBlocks: number;
+  /** Blocks per heightfield cell (2^level). */
+  span: number;
+  tiles: ManifestTile[];
+}
+
 /** A parsed `manifest.json` for a tiled world render. */
 export interface WorldManifest {
-  /** Manifest schema version (1). */
+  /** Manifest schema version (1 = hires tiles only, 2 adds `lowres`). */
   format: number;
   /** Tile span in chunks per side. */
   tileChunks: number;
@@ -29,6 +41,13 @@ export interface WorldManifest {
   biomes: string[];
   /** Every rendered tile. */
   tiles: ManifestTile[];
+  /** The lowres LOD pyramid (format 2+): coarse whole-world tiles the viewer
+   *  keeps resident far beyond the hires ring, so zoom-out shows the world. */
+  lowres?: {
+    /** Heightfield samples per lowres tile edge (cells + 1 shared-edge apron). */
+    grid: number;
+    levels: LowresLevel[];
+  };
 }
 
 /** Tile-coordinate key for maps/sets. */
@@ -44,7 +63,10 @@ export function tileKey(x: number, z: number): string {
 export function parseManifest(data: unknown): WorldManifest {
   if (typeof data !== 'object' || data === null) throw new Error('vantage: manifest is not an object');
   const m = data as Record<string, unknown>;
-  if (m['format'] !== 1) throw new Error(`vantage: unsupported manifest format ${String(m['format'])} (expected 1)`);
+  const format = m['format'];
+  if (format !== 1 && format !== 2) {
+    throw new Error(`vantage: unsupported manifest format ${String(format)} (expected 1 or 2)`);
+  }
   const tileChunks = m['tileChunks'];
   const tileBlocks = m['tileBlocks'];
   const textures = m['textures'];
@@ -57,17 +79,48 @@ export function parseManifest(data: unknown): WorldManifest {
     throw new Error('vantage: manifest biomes must be a string array');
   }
   if (!Array.isArray(tiles)) throw new Error('vantage: manifest missing tiles array');
-  const parsedTiles: ManifestTile[] = tiles.map((t: unknown, i: number) => {
-    const o = t as Record<string, unknown>;
-    if (
-      typeof o !== 'object' || o === null ||
-      typeof o['x'] !== 'number' || typeof o['z'] !== 'number' ||
-      typeof o['path'] !== 'string' || typeof o['bytes'] !== 'number'
-    ) {
-      throw new Error(`vantage: manifest tile ${i} is malformed`);
+  const parseTiles = (list: unknown[], what: string): ManifestTile[] =>
+    list.map((t: unknown, i: number) => {
+      const o = t as Record<string, unknown>;
+      if (
+        typeof o !== 'object' || o === null ||
+        typeof o['x'] !== 'number' || typeof o['z'] !== 'number' ||
+        typeof o['path'] !== 'string' || typeof o['bytes'] !== 'number'
+      ) {
+        throw new Error(`vantage: manifest ${what} ${i} is malformed`);
+      }
+      return { x: o['x'], z: o['z'], path: o['path'], bytes: o['bytes'] };
+    });
+  const parsedTiles = parseTiles(tiles, 'tile');
+
+  let lowres: WorldManifest['lowres'];
+  const lr = m['lowres'] as Record<string, unknown> | undefined;
+  if (typeof lr === 'object' && lr !== null) {
+    const grid = lr['grid'];
+    const levels = lr['levels'];
+    if (typeof grid !== 'number' || grid < 2 || !Array.isArray(levels)) {
+      throw new Error('vantage: manifest lowres section is malformed');
     }
-    return { x: o['x'], z: o['z'], path: o['path'], bytes: o['bytes'] };
-  });
+    lowres = {
+      grid,
+      levels: levels.map((lv: unknown, i: number) => {
+        const o = lv as Record<string, unknown>;
+        if (
+          typeof o !== 'object' || o === null ||
+          typeof o['level'] !== 'number' || typeof o['tileBlocks'] !== 'number' ||
+          typeof o['span'] !== 'number' || !Array.isArray(o['tiles'])
+        ) {
+          throw new Error(`vantage: manifest lowres level ${i} is malformed`);
+        }
+        return {
+          level: o['level'],
+          tileBlocks: o['tileBlocks'],
+          span: o['span'],
+          tiles: parseTiles(o['tiles'], `lowres level ${o['level']} tile`),
+        };
+      }),
+    };
+  }
 
   let spawn: WorldManifest['spawn'];
   const s = m['spawn'] as Record<string, unknown> | undefined;
@@ -76,11 +129,12 @@ export function parseManifest(data: unknown): WorldManifest {
   }
 
   return {
-    format: 1,
+    format,
     tileChunks,
     tileBlocks,
     textures,
     ...(spawn ? { spawn } : {}),
+    ...(lowres ? { lowres } : {}),
     biomes: biomes as string[],
     tiles: parsedTiles,
   };

@@ -142,9 +142,10 @@ pub fn populatedChunks(arena: std.mem.Allocator, regions: []const LoadedRegion) 
     return set;
 }
 
-/// World spawn from `<save>/level.dat` (gzip-wrapped NBT: Data.SpawnX/Y/Z).
-/// Null when the file is absent or unreadable — callers fall back to centring
-/// on the populated bounds.
+/// World spawn from `<save>/level.dat` (gzip-wrapped NBT). Modern saves
+/// (1.21.5+) store `Data.spawn.pos` as a 3-int array; older ones store
+/// `Data.SpawnX/Y/Z`. Null when the file is absent or unreadable — callers
+/// fall back to centring on the populated bounds.
 pub fn readSpawn(arena: std.mem.Allocator, io: std.Io, save_dir: []const u8) ?[3]i32 {
     const path = std.fmt.allocPrint(arena, "{s}/level.dat", .{save_dir}) catch return null;
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch return null;
@@ -153,6 +154,19 @@ pub fn readSpawn(arena: std.mem.Allocator, io: std.Io, save_dir: []const u8) ?[3
     const root = parser.parseRoot() catch return null;
     const data = nbt.get(root, "Data") orelse return null;
     if (data.* != .compound) return null;
+
+    // Modern layout: spawn { pos: [x, y, z], dimension, yaw, pitch }.
+    if (nbt.get(data.compound, "spawn")) |sp| {
+        if (sp.* == .compound) {
+            if (nbt.get(sp.compound, "pos")) |pos| {
+                if (pos.* == .int_array and pos.int_array.len >= 3) {
+                    return .{ pos.int_array[0], pos.int_array[1], pos.int_array[2] };
+                }
+            }
+        }
+    }
+
+    // Legacy layout: SpawnX / SpawnY / SpawnZ ints.
     const sx = nbt.get(data.compound, "SpawnX") orelse return null;
     const sy = nbt.get(data.compound, "SpawnY") orelse return null;
     const sz = nbt.get(data.compound, "SpawnZ") orelse return null;

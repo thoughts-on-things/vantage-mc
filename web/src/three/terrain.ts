@@ -67,6 +67,44 @@ function baseGeometry(section: MeshSection): THREE.BufferGeometry {
 
 const WATER_FALLBACK: Rgb = [0.3, 0.5, 0.85];
 
+/** The meshes built from one tile with caller-provided (shared) materials. */
+export interface TileMeshes {
+  terrain: THREE.Mesh;
+  water?: THREE.Mesh;
+  bounds: THREE.Box3;
+}
+
+/**
+ * Build a tile's meshes against EXISTING materials — the streaming path, where
+ * every tile shares one terrain shader + one water shader (one program, two
+ * draw calls per tile, uniforms in lock-step). For a one-shot single tile with
+ * its own materials, use {@link buildTerrain}.
+ */
+export function buildTileMeshes(
+  tile: DecodedTile,
+  palette: Rgb[],
+  material: THREE.ShaderMaterial,
+  waterMaterial: THREE.ShaderMaterial,
+): TileMeshes {
+  const geom = baseGeometry(tile);
+  applyTexturedAttributes(geom, tile, palette, WATER_FALLBACK);
+  geom.computeBoundingBox();
+  const terrain = new THREE.Mesh(geom, material);
+  const bounds = geom.boundingBox!.clone();
+
+  let water: THREE.Mesh | undefined;
+  if (tile.fluid && tile.fluid.vertexCount > 0) {
+    const wg = baseGeometry(tile.fluid);
+    applyTexturedAttributes(wg, tile.fluid, palette, WATER_FALLBACK);
+    wg.computeBoundingBox();
+    bounds.union(wg.boundingBox!); // water can sit above the highest solid block
+    water = new THREE.Mesh(wg, waterMaterial);
+    water.renderOrder = 1; // after opaque
+  }
+
+  return { terrain, water, bounds };
+}
+
 /**
  * Build renderable three.js objects from a decoded tile.
  *
@@ -80,21 +118,7 @@ export function buildTerrain(tile: DecodedTile, texData?: DecodedTextureArray): 
   if (tile.textured) {
     if (!texData) throw new Error('vantage: textured tile requires a texture array');
     const shader = createTerrainMaterial(texData);
-
-    const geom = baseGeometry(tile);
-    applyTexturedAttributes(geom, tile, palette, WATER_FALLBACK);
-    geom.computeBoundingBox();
-    const terrain = new THREE.Mesh(geom, shader);
-    const bounds = geom.boundingBox!.clone();
-
-    let water: THREE.Mesh | undefined;
-    if (tile.fluid && tile.fluid.vertexCount > 0) {
-      const wg = baseGeometry(tile.fluid);
-      applyTexturedAttributes(wg, tile.fluid, palette, WATER_FALLBACK);
-      water = new THREE.Mesh(wg, createWaterMaterial(shader));
-      water.renderOrder = 1; // after opaque
-    }
-
+    const { terrain, water, bounds } = buildTileMeshes(tile, palette, shader, createWaterMaterial(shader));
     return { terrain, water, material: shader, shader, bounds, palette, requiresSceneLights: false };
   }
 

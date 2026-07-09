@@ -24,8 +24,10 @@ npm install react react-dom           # if you use vantage-mc/react
 
 ## Quick start (React)
 
-The whole map in one component. Point it at the tiles the generator produced
-(`just render <save>` writes them to `web/public/`).
+The whole map in one component. Point it at the manifest the generator produced
+(`just render <save>` writes `manifest.json` + `tiles/` + the texture array to
+`web/public/`). Tiles stream in around the camera as the user pans — world size
+doesn't matter.
 
 ```tsx
 import { VantageViewer, BiomeLayer } from 'vantage-mc/react';
@@ -33,7 +35,7 @@ import { VantageViewer, BiomeLayer } from 'vantage-mc/react';
 export function Map() {
   return (
     <div style={{ width: '100%', height: '100vh' }}>
-      <VantageViewer tile="/terrain.vtile" textures="/terrain.vtexarr">
+      <VantageViewer world="/manifest.json">
         <BiomeLayer legend hover />
       </VantageViewer>
     </div>
@@ -41,9 +43,17 @@ export function Map() {
 }
 ```
 
-`<VantageViewer>` fills its parent, loads and frames the tile, and provides the
-engine state to children via context. `<BiomeLayer>` adds the interactive biome
-legend (click to isolate, hover the map to identify, press `B` to toggle).
+`<VantageViewer>` fills its parent, frames the world at its spawn point, and
+provides the engine state to children via context. `<BiomeLayer>` adds the
+interactive biome legend (click to isolate, hover the map to identify, press
+`B` to toggle) — aggregated live across whatever tiles are resident. Tune the
+streaming ring with `streaming={{ viewDistance: 1024, maxTiles: 128 }}`.
+
+A single standalone tile (from `vantage meshtex`) still works:
+
+```tsx
+<VantageViewer tile="/terrain.vtile" textures="/terrain.vtexarr" />
+```
 
 Reach the engine for custom UI with the `useVantage()` hook or a `ref`:
 
@@ -62,11 +72,11 @@ Skip the engine and drop Vantage meshes into a scene you control (your own
 camera, lighting, post-processing):
 
 ```ts
-import { parseTile, parseTextureArray } from 'vantage-mc/core';
+import { maybeInflate, parseTile, parseTextureArray } from 'vantage-mc/core';
 import { buildTerrain } from 'vantage-mc/three';
 
-const tile = parseTile(await (await fetch('/terrain.vtile')).arrayBuffer());
-const tex = parseTextureArray(await (await fetch('/terrain.vtexarr')).arrayBuffer());
+const tile = parseTile(await maybeInflate(await (await fetch('/tiles/t.0.0.vtile')).arrayBuffer()));
+const tex = parseTextureArray(await maybeInflate(await (await fetch('/terrain.vtexarr')).arrayBuffer()));
 
 const { terrain, water, bounds, shader } = buildTerrain(tile, tex);
 scene.add(terrain);
@@ -76,17 +86,37 @@ if (water) scene.add(water);
 shader!.uniforms.uBiomeMix.value = 1; // recolour by biome
 ```
 
+Or stream a whole world into your scene with `TileManager` (shared materials,
+nearest-first fetch queue, distance-based unload, height/biome queries):
+
+```ts
+import { biomePalette, maybeInflate, parseManifest, parseTextureArray } from 'vantage-mc/core';
+import { createTerrainMaterial, createWaterMaterial, TileManager } from 'vantage-mc/three';
+
+const manifest = parseManifest(await (await fetch('/manifest.json')).json());
+const tex = parseTextureArray(await maybeInflate(await (await fetch(manifest.textures)).arrayBuffer()));
+const material = createTerrainMaterial(tex);
+const tiles = new TileManager({
+  manifest,
+  baseUrl: location.origin + '/',
+  scene,
+  material,
+  waterMaterial: createWaterMaterial(material),
+  palette: biomePalette(manifest.biomes.length),
+});
+// each frame: keep the resident set centred on your camera
+tiles.update(camera.position.x, camera.position.z);
+```
+
 Or the batteries-included engine without React:
 
 ```ts
 import { VantageViewer } from 'vantage-mc/three';
 
-const viewer = await VantageViewer.mount('#app', {
-  tile: '/terrain.vtile',
-  textures: '/terrain.vtexarr',
-});
+const viewer = await VantageViewer.mount('#app', { world: '/manifest.json' });
 viewer.setBiomeLayer(true);
 viewer.on('hover', (biomeId) => { /* ... */ });
+viewer.on('stats', ({ loaded, triangleCount }) => { /* streaming HUD */ });
 ```
 
 ## Just the format
@@ -102,20 +132,25 @@ console.log(tile.magic, tile.vertexCount, tile.indexCount / 3, 'tris');
 for (const b of summarizeBiomes(tile)) console.log(b.label, `${Math.round(b.fraction * 100)}%`);
 ```
 
-The decoder handles every tile version the generator emits (`VTL1`–`VTL5`) and
+The decoder handles every tile version the generator emits (`VTL1`–`VTL6`) and
 returns only the fields a given version carries (`textured`, `hasBiome`, `fluid`,
-`surface`).
+`surface`). Tiles and the texture array ship gzip-wrapped on disk (~8× smaller);
+`maybeInflate` sniffs the magic and inflates via the platform's native
+`DecompressionStream` — a no-op when the server already handled it.
 
 ## API surface
 
-**`vantage-mc/core`** — `parseTile`, `parseTextureArray`, `summarizeBiomes`,
-`biomePalette`, `stripNamespace`, `ByteReader`; types `DecodedTile`, `MeshSection`,
-`SurfaceMap`, `DecodedTextureArray`, `BiomeEntry`, `Rgb`.
+**`vantage-mc/core`** — `parseTile`, `parseTextureArray`, `parseManifest`,
+`maybeInflate`, `isGzip`, `tileKey`, `summarizeBiomes`, `biomePalette`,
+`stripNamespace`, `ByteReader`; types `DecodedTile`, `MeshSection`,
+`SurfaceMap`, `DecodedTextureArray`, `WorldManifest`, `ManifestTile`,
+`BiomeEntry`, `Rgb`.
 
-**`vantage-mc/three`** — `buildTerrain`, `createTerrainMaterial`,
-`createWaterMaterial`, `createSky`, `pickBiome`, `VantageViewer` (engine);
-types `TerrainObjects`, `VantageViewerOptions`, `LoadOptions`, `TileInfo`,
-`ViewMode`. Re-exports all of `core`.
+**`vantage-mc/three`** — `buildTerrain`, `buildTileMeshes`, `TileManager`,
+`createTerrainMaterial`, `createWaterMaterial`, `createSky`, `pickBiome`,
+`VantageViewer` (engine); types `TerrainObjects`, `TileMeshes`,
+`TileManagerOptions`, `TileStats`, `VantageViewerOptions`, `LoadOptions`,
+`StreamingSettings`, `TileInfo`, `ViewMode`. Re-exports all of `core`.
 
 **`vantage-mc/react`** — `<VantageViewer>`, `<BiomeLayer>`, `useVantage`,
 `injectStyles`; types `VantageViewerProps`, `BiomeLayerProps`,

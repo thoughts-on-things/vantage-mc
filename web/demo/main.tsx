@@ -67,13 +67,18 @@ function Hud() {
   );
 }
 
-function App() {
+function App({ streamed }: { streamed: boolean }) {
   // Dev-only: expose the engine for manual poking in the console.
   const ref = (e: import('../src/three/index.js').VantageViewer | null) => {
     (window as unknown as { __vantage?: unknown }).__vantage = e;
   };
+  // Streamed world (manifest.json from `vantage render`) when present; else the
+  // classic single tile (`vantage meshtex`).
+  const source = streamed
+    ? ({ world: '/manifest.json' } as const)
+    : ({ tile: '/terrain.vtile', textures: '/terrain.vtexarr' } as const);
   return (
-    <VantageViewer ref={ref} tile="/terrain.vtile" textures="/terrain.vtexarr" view={view}>
+    <VantageViewer ref={ref} {...source} view={view}>
       <Hud />
       <Reticle />
       <BiomeLayer legend hover defaultEnabled={biomeOpen} />
@@ -83,8 +88,19 @@ function App() {
   );
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
+function mount(streamed: boolean): void {
+  // Survive Vite HMR re-evaluation: reuse the root instead of re-creating it.
+  const holder = window as unknown as { __vantageRoot?: ReturnType<typeof createRoot> };
+  holder.__vantageRoot ??= createRoot(document.getElementById('root')!);
+  holder.__vantageRoot.render(
+    <StrictMode>
+      <App streamed={streamed} />
+    </StrictMode>,
+  );
+}
+
+// Prefer the streamed world when a manifest exists next to the demo.
+void fetch('/manifest.json', { method: 'HEAD' }).then(
+  (r) => mount(r.ok && (r.headers.get('content-type') ?? '').includes('json')),
+  () => mount(false),
 );

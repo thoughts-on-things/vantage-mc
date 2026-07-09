@@ -2,7 +2,8 @@
 // engine. Use `buildTerrain` to drop Vantage meshes into your own scene, or
 // `VantageViewer` for a batteries-included orbiting viewer.
 
-export { buildTerrain, type TerrainObjects } from './terrain.js';
+export { buildTerrain, buildTileMeshes, type TerrainObjects, type TileMeshes } from './terrain.js';
+export { TileManager, type TileManagerOptions, type TileStats } from './tiles.js';
 export {
   createTerrainMaterial,
   createWaterMaterial,
@@ -16,6 +17,7 @@ export {
   VantageViewer,
   type VantageViewerOptions,
   type LoadOptions,
+  type StreamingSettings,
   type TileSource,
   type TextureSource,
   type TileInfo,

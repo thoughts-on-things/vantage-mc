@@ -6,6 +6,7 @@ export {
   buildTerrain,
   buildTileMeshes,
   buildQuantizedTileMeshes,
+  buildLowresMesh,
   type TerrainObjects,
   type TileMeshes,
 } from './terrain.js';
@@ -14,6 +15,7 @@ export {
   createTerrainMaterial,
   createWaterMaterial,
   createSky,
+  createLowresMaterial,
   SKY_TOP,
   SKY_HORIZON,
   type TerrainMaterialOptions,

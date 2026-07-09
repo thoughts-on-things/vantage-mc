@@ -52,6 +52,11 @@ presets plus view-distance, tile-budget, render-scale, and haze sliders, all
 applied live (`viewer.setStreaming` re-plans in place, no reload). Or set the
 ring up-front with `streaming={{ viewDistance: 1024, maxTiles: 128 }}`.
 
+Format-2 manifests carry a **lowres LOD pyramid** (`.vlr` colored
+heightfields): the viewer keeps coarse rings resident far beyond the hires
+disc — level 1 also underlays it as a loading placeholder — so the whole world
+stays visible at any zoom, right out to a satellite view.
+
 A single standalone tile (from `vantage meshtex`) still works:
 
 ```tsx

@@ -5,8 +5,10 @@
 import * as THREE from 'three';
 import {
   biomePalette,
+  LOWRES_EMPTY,
   type DecodedTextureArray,
   type DecodedTile,
+  type LowresTile,
   type MeshSection,
   type QuantizedSection,
   type QuantizedTile,
@@ -203,4 +205,86 @@ export function buildTerrain(tile: DecodedTile, texData?: DecodedTextureArray): 
   const material = new THREE.MeshLambertMaterial({ vertexColors: true });
   const terrain = new THREE.Mesh(geom, material);
   return { terrain, material, bounds: geom.boundingBox!.clone(), palette, requiresSceneLights: true };
+}
+
+/**
+ * Build a lowres LOD tile's heightfield mesh: one vertex per sample (heights
+ * from the generator, colors with lighting/tint baked in), two triangles per
+ * cell whose four corners all have terrain. Adjacent tiles share edge samples
+ * (the +1 apron in the format), so the field is seamless across tiles.
+ *
+ * The surface is dipped slightly below the real terrain height — deeper for
+ * coarser levels — so wherever hires tiles (or finer lowres rings) are
+ * resident they win the depth test cleanly instead of z-fighting.
+ *
+ * Returns `null` for an all-empty tile.
+ */
+export function buildLowresMesh(tile: LowresTile, material: THREE.ShaderMaterial): THREE.Mesh | null {
+  const { width, depth, heights, rgb, originX, originZ, span } = tile;
+  const n = width * depth;
+  const dipBase = Math.min(0.5 + 0.25 * span, 4);
+
+  const pos = new Float32Array(3 * n);
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (let j = 0; j < depth; j++) {
+    for (let i = 0; i < width; i++) {
+      const s = j * width + i;
+      const h = heights[s]!;
+      let y = 0;
+      if (h !== LOWRES_EMPTY) {
+        // The dip grows with the local slope: a smooth interpolated surface
+        // cuts through hires voxel stair-steps on hillsides, so sloped
+        // vertices sink below the steps. Flat ground keeps the minimal dip
+        // and hires terrain covers the underlay exactly.
+        let slope = 0;
+        if (i > 0 && heights[s - 1]! !== LOWRES_EMPTY) slope = Math.max(slope, Math.abs(h - heights[s - 1]!));
+        if (i + 1 < width && heights[s + 1]! !== LOWRES_EMPTY) slope = Math.max(slope, Math.abs(h - heights[s + 1]!));
+        if (j > 0 && heights[s - width]! !== LOWRES_EMPTY) slope = Math.max(slope, Math.abs(h - heights[s - width]!));
+        if (j + 1 < depth && heights[s + width]! !== LOWRES_EMPTY) slope = Math.max(slope, Math.abs(h - heights[s + width]!));
+        y = h + 1 - dipBase - Math.min(slope, 12);
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+      pos[3 * s + 0] = originX + (i + 0.5) * span;
+      pos[3 * s + 1] = y;
+      pos[3 * s + 2] = originZ + (j + 0.5) * span;
+    }
+  }
+  if (!Number.isFinite(minY)) return null;
+
+  // Two CCW-from-above triangles per fully-populated cell.
+  const idx: number[] = [];
+  for (let j = 0; j + 1 < depth; j++) {
+    for (let i = 0; i + 1 < width; i++) {
+      const a = j * width + i;
+      const b = a + 1;
+      const c = a + width;
+      const d = c + 1;
+      if (
+        heights[a] === LOWRES_EMPTY || heights[b] === LOWRES_EMPTY ||
+        heights[c] === LOWRES_EMPTY || heights[d] === LOWRES_EMPTY
+      ) continue;
+      idx.push(a, c, d, a, d, b);
+    }
+  }
+  if (idx.length === 0) return null;
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geom.setAttribute('acol', new THREE.BufferAttribute(rgb, 3, true));
+  const IndexArray = n > 65535 ? Uint32Array : Uint16Array;
+  geom.setIndex(new THREE.BufferAttribute(new IndexArray(idx), 1));
+
+  // Bounds from the loop above — no extra pass over the vertices.
+  const box = new THREE.Box3(
+    new THREE.Vector3(originX, minY, originZ),
+    new THREE.Vector3(originX + width * span, maxY, originZ + depth * span),
+  );
+  geom.boundingBox = box;
+  const sphere = new THREE.Sphere();
+  box.getBoundingSphere(sphere);
+  geom.boundingSphere = sphere;
+
+  return new THREE.Mesh(geom, material);
 }

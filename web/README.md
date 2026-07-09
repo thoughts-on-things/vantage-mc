@@ -46,8 +46,11 @@ export function Map() {
 `<VantageViewer>` fills its parent, frames the world at its spawn point, and
 provides the engine state to children via context. `<BiomeLayer>` adds the
 interactive biome legend (click to isolate, hover the map to identify, press
-`B` to toggle) — aggregated live across whatever tiles are resident. Tune the
-streaming ring with `streaming={{ viewDistance: 1024, maxTiles: 128 }}`.
+`B` to toggle) — aggregated live across whatever tiles are resident. Add
+`<SettingsPanel />` for a BlueMap-style quality menu: low/med/high/ultra
+presets plus view-distance, tile-budget, render-scale, and haze sliders, all
+applied live (`viewer.setStreaming` re-plans in place, no reload). Or set the
+ring up-front with `streaming={{ viewDistance: 1024, maxTiles: 128 }}`.
 
 A single standalone tile (from `vantage meshtex`) still works:
 

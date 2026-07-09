@@ -6,7 +6,7 @@
 
 import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BiomeLayer, LightPanel, MapNav, Reticle, useVantage, VantageViewer } from '../src/react/index.js';
+import { BiomeLayer, LightPanel, MapNav, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
@@ -83,6 +83,7 @@ function App({ streamed }: { streamed: boolean }) {
       <Reticle />
       <BiomeLayer legend hover defaultEnabled={biomeOpen} />
       <LightPanel />
+      <SettingsPanel />
       <MapNav />
     </VantageViewer>
   );

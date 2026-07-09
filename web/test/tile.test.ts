@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseTextureArray, parseTile, summarizeBiomes } from '../src/core/index.js';
+import { parseTextureArray, parseTile, parseTileQuantized, summarizeBiomes, summarizeSurfaceBiomes } from '../src/core/index.js';
 import {
   encodeTextureArray,
   encodeVTL1,
@@ -100,6 +100,33 @@ describe('parseTile', () => {
     const buf = new ArrayBuffer(16);
     new Uint8Array(buf).set([88, 88, 88, 88]); // "XXXX"
     expect(() => parseTile(buf)).toThrow(/unrecognized tile magic/);
+  });
+});
+
+describe('parseTileQuantized', () => {
+  it('keeps VTL6 sections in their on-disk encoding (GPU dequantizes)', () => {
+    const q = parseTileQuantized(encodeVTL6());
+    expect(q).not.toBeNull();
+    const s = q!.solid;
+    expect(s.vertexCount).toBe(3);
+    // Positions stay u16; the transform reconstructs what parseTile expands to.
+    expect(s.positions).toBeInstanceOf(Uint16Array);
+    expect(s.posMin[0] + s.positions[0]! * s.posScale[0]!).toBeCloseTo(-100, 3);
+    expect(s.posMin[0] + s.positions[3]! * s.posScale[0]!).toBeCloseTo(200, 2);
+    // Layer/biome stay u16 ids; normals keep the packed light byte in .w.
+    expect(Array.from(s.layer)).toEqual([3, 3, 3]);
+    expect(Array.from(s.biome)).toEqual([1, 2, 1]);
+    expect(s.normals.length).toBe(4 * 3);
+    expect(q!.biomeNames).toEqual(LEGEND);
+    expect(Array.from(q!.surface.height)).toEqual([64, 65, 66, 67]);
+    // The summary path streamed tiles use: counts surface columns.
+    const entries = summarizeSurfaceBiomes(q!.surface, q!.biomeNames);
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries.every((e) => e.id !== 0)).toBe(true);
+  });
+
+  it('returns null for non-VTL6 tiles (caller falls back to parseTile)', () => {
+    expect(parseTileQuantized(encodeVTL5())).toBeNull();
   });
 });
 

@@ -83,9 +83,12 @@ just serve         # → http://127.0.0.1:8753/   ·  press #top for the map vie
 #   drag to orbit · scroll to zoom · B = biome layer · hover to identify
 ```
 
-The viewer streams tiles around the camera (default 768-block ring, ~96-tile
-budget), so world size doesn't matter — pan anywhere and it loads under you.
-Useful flags:
+The viewer streams tiles around the camera (default 768-block ring, 120-tile
+budget — live-tunable from the in-viewer quality panel up to an ultra preset),
+so world size doesn't matter — pan anywhere and it loads under you. Tiles are
+uploaded to the GPU in their on-disk quantized encoding (the vertex shader
+dequantizes), so arriving tiles cost the main thread nearly nothing and
+streaming stays smooth. Useful flags:
 
 - `--tile-chunks <n>` — tile span in chunks (default 8 = 128×128 blocks).
 - `--caves off|<y>` — cave culling horizon (default 55, the BlueMap default):

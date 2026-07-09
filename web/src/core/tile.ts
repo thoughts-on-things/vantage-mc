@@ -68,6 +68,47 @@ export interface DecodedTile extends MeshSection {
   surface?: SurfaceMap;
 }
 
+/**
+ * A VTL6 mesh section kept in its on-disk quantized encoding: every array is a
+ * zero-copy view into the tile buffer, ready to hand straight to the GPU. The
+ * dequantization (`world = posMin + q * posScale`) happens in the vertex
+ * shader, so decoding a tile costs no per-vertex CPU work at all — the fix for
+ * decode-time frame stutter while streaming.
+ */
+export interface QuantizedSection {
+  vertexCount: number;
+  indexCount: number;
+  /** `3 * vertexCount` quantized u16 positions. */
+  positions: Uint16Array;
+  /** World-space position of quantized (0,0,0). */
+  posMin: [number, number, number];
+  /** World units per quantization step, per axis. */
+  posScale: [number, number, number];
+  /** `2 * vertexCount` texture coordinates. */
+  uv: Float32Array;
+  /** `4 * vertexCount` RGBA: tint RGB + packed AO/alpha. */
+  colors: Uint8Array;
+  /** `4 * vertexCount` int8: xyz normal + the packed light byte as the 4th
+   *  component (bit pattern; recover unsigned in-shader). */
+  normals: Int8Array;
+  /** `vertexCount` u16 texture-array layer indices. */
+  layer: Uint16Array;
+  /** `vertexCount` u16 biome ids. */
+  biome: Uint16Array;
+  /** `indexCount` triangle indices. */
+  indices: Uint32Array;
+}
+
+/** A VTL6 tile decoded without dequantization (see {@link QuantizedSection}). */
+export interface QuantizedTile {
+  magic: 'VTL6';
+  version: number;
+  solid: QuantizedSection;
+  fluid: QuantizedSection;
+  surface: SurfaceMap;
+  biomeNames: string[];
+}
+
 /** Expand packed int8 `xyzw` normals into float `xyz`. */
 function expandNormals(packed: Int8Array, vertexCount: number): Float32Array {
   const out = new Float32Array(3 * vertexCount);
@@ -142,6 +183,42 @@ function readQuantizedSection(r: ByteReader): MeshSection {
     light: extractLight(normalsI8, vertexCount),
     indices,
   };
+}
+
+/** Read a VTL6 section WITHOUT dequantizing — all fields stay zero-copy views. */
+function readQuantizedSectionRaw(r: ByteReader): QuantizedSection {
+  const vertexCount = r.u32();
+  const indexCount = r.u32();
+  const uv = r.f32(2 * vertexCount);
+  const colors = r.u8a(4 * vertexCount);
+  const normals = r.i8a(4 * vertexCount);
+  const indices = r.u32a(indexCount);
+  const bbox = r.f32(6); // min xyz, scale xyz
+  const posMin: [number, number, number] = [bbox[0]!, bbox[1]!, bbox[2]!];
+  const posScale: [number, number, number] = [bbox[3]!, bbox[4]!, bbox[5]!];
+  const positions = r.u16a(3 * vertexCount);
+  const layer = r.u16a(vertexCount);
+  const biome = r.u16a(vertexCount);
+  r.align4(); // skip the section's tail padding
+  return { vertexCount, indexCount, positions, posMin, posScale, uv, colors, normals, layer, biome, indices };
+}
+
+/**
+ * Decode a VTL6 `.vtile` in its quantized on-disk encoding: every array is a
+ * zero-copy view and positions/layer/biome stay u16 for the vertex shader to
+ * dequantize (the streaming fast path — no per-vertex CPU work). Returns `null`
+ * for any other tile version; callers fall back to {@link parseTile}.
+ */
+export function parseTileQuantized(buffer: ArrayBuffer): QuantizedTile | null {
+  const r = new ByteReader(buffer);
+  if (r.magic() !== TILE_MAGIC.VTL6) return null;
+  r.off = 4;
+  const version = r.u32();
+  const solid = readQuantizedSectionRaw(r);
+  const fluid = readQuantizedSectionRaw(r);
+  const surface = readSurface(r);
+  const biomeNames = readLegend(r);
+  return { magic: TILE_MAGIC.VTL6, version, solid, fluid, surface, biomeNames };
 }
 
 /** Read the VTL5 surface map at the reader's cursor. */

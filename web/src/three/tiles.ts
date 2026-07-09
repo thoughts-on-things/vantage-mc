@@ -14,7 +14,9 @@ import * as THREE from 'three';
 import {
   maybeInflate,
   parseTile,
+  parseTileQuantized,
   summarizeBiomes,
+  summarizeSurfaceBiomes,
   tileKey,
   type BiomeEntry,
   type ManifestTile,
@@ -23,7 +25,7 @@ import {
   type WorldManifest,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
-import { buildTileMeshes } from './terrain.js';
+import { buildQuantizedTileMeshes, buildTileMeshes, type TileMeshes } from './terrain.js';
 
 export interface TileManagerOptions {
   manifest: WorldManifest;
@@ -65,7 +67,8 @@ interface TileEvents extends Record<string, unknown> {
 
 interface Record_ {
   ref: ManifestTile;
-  state: 'loading' | 'ready' | 'failed';
+  /** `built` = decoded and meshed, queued for its staggered scene insertion. */
+  state: 'loading' | 'built' | 'ready' | 'failed';
   abort?: AbortController;
   terrain?: THREE.Mesh;
   water?: THREE.Mesh;
@@ -96,6 +99,9 @@ export class TileManager {
   private readonly tileBlocks: number;
 
   private queue: ManifestTile[] = [];
+  /** Built tiles awaiting scene insertion — flushed ONE per update() call so
+   *  multi-MB GPU uploads never pile into a single frame (the stutter fix). */
+  private pendingAdd: string[] = [];
   private inFlight = 0;
   private lastFocusX = Infinity;
   private lastFocusZ = Infinity;
@@ -111,7 +117,10 @@ export class TileManager {
   constructor(options: TileManagerOptions) {
     this.opts = {
       viewDistance: 768,
-      maxTiles: 96,
+      // Sized to fill the whole view-distance disc for 128-block tiles
+      // (π·(768/128)² ≈ 113) with a little slack — and to match the settings
+      // panel's "med" preset exactly.
+      maxTiles: 120,
       concurrency: 4,
       ...options,
     };
@@ -136,6 +145,7 @@ export class TileManager {
    */
   update(focusX: number, focusZ: number): void {
     if (this.disposed) return;
+    this.flushOne();
     // Re-plan only when the focus has moved a quarter tile; otherwise just keep
     // the fetch pipeline full. (The first call always plans: lastFocus = ∞.)
     const moved = Math.hypot(focusX - this.lastFocusX, focusZ - this.lastFocusZ);
@@ -164,12 +174,10 @@ export class TileManager {
     for (const [key, rec] of this.records) {
       if (desiredKeys.has(key)) continue;
       const d = this.distTo(rec.ref, focusX, focusZ);
-      if (rec.state === 'loading') {
-        // No longer wanted at all -> abort the fetch outright.
-        if (d > keepDistance) this.unload(key, rec);
-      } else if (rec.state === 'ready' && d > keepDistance) {
-        this.unload(key, rec);
-      }
+      // Beyond the hysteresis ring nothing is worth keeping: abort in-flight
+      // fetches, drop built-but-not-inserted tiles, unload resident ones (and
+      // forget failures so they retry if the focus ever returns).
+      if (d > keepDistance) this.unload(key, rec);
     }
 
     // Queue what's missing, nearest first.
@@ -184,6 +192,42 @@ export class TileManager {
     }
   }
 
+  /** Insert at most ONE built tile into the scene (per frame, via update()) so
+   *  GPU buffer uploads are spread across frames instead of bursting. */
+  private flushOne(): void {
+    while (this.pendingAdd.length > 0) {
+      const key = this.pendingAdd.shift()!;
+      const rec = this.records.get(key);
+      if (!rec || rec.state !== 'built') continue; // unloaded while queued
+      rec.state = 'ready';
+      this.opts.scene.add(rec.terrain!);
+      if (rec.water) this.opts.scene.add(rec.water);
+      this.invalidate();
+      this.emitter.emit('change', this.stats);
+      return;
+    }
+  }
+
+  /** Live-tune streaming (view distance, tile budget, fetch concurrency).
+   *  Takes effect on the next update(): the plan is recomputed from scratch. */
+  configure(settings: { viewDistance?: number; maxTiles?: number; concurrency?: number }): void {
+    if (settings.viewDistance !== undefined) this.opts.viewDistance = settings.viewDistance;
+    if (settings.maxTiles !== undefined) this.opts.maxTiles = settings.maxTiles;
+    if (settings.concurrency !== undefined) this.opts.concurrency = settings.concurrency;
+    this.lastFocusX = Infinity; // force a re-plan on the next update()
+    this.lastFocusZ = Infinity;
+  }
+
+  /** The current stream-in radius, in blocks. */
+  get viewDistance(): number {
+    return this.opts.viewDistance;
+  }
+
+  /** The current resident-tile budget. */
+  get maxTiles(): number {
+    return this.opts.maxTiles;
+  }
+
   private async loadTile(ref: ManifestTile): Promise<void> {
     const key = tileKey(ref.x, ref.z);
     if (this.records.has(key)) return;
@@ -195,34 +239,47 @@ export class TileManager {
       const url = new URL(ref.path, this.opts.baseUrl).toString();
       const res = await fetch(url, { signal: abort.signal });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
-      const tile = parseTile(await maybeInflate(await res.arrayBuffer()));
+      const buffer = await maybeInflate(await res.arrayBuffer());
       if (this.disposed || rec.state !== 'loading') return; // unloaded mid-fetch
 
-      // Summaries and bounds read the CPU arrays; do it all before the first
-      // render so releaseAfterUpload can drop those arrays at upload time.
-      rec.biomes = summarizeBiomes(tile, this.opts.palette);
-      // Copy the (small) surface arrays out of the decoded buffer — as
-      // zero-copy views they would pin the tile's entire multi-MB ArrayBuffer
-      // in the JS heap for as long as the tile is resident.
-      rec.surface = tile.surface
-        ? { ...tile.surface, biome: tile.surface.biome.slice(), height: tile.surface.height.slice() }
-        : undefined;
-      const { terrain, water, bounds } = buildTileMeshes(tile, this.opts.palette, this.opts.material, this.opts.waterMaterial);
-      terrain.geometry.computeBoundingSphere();
-      releaseAfterUpload(terrain.geometry);
-      if (water) {
-        water.geometry.computeBoundingSphere();
-        releaseAfterUpload(water.geometry);
+      // VTL6 fast path: keep the on-disk quantized encoding as zero-copy views
+      // and let the shared QUANTIZED shader dequantize — no per-vertex CPU work
+      // at all, so decoding never causes a frame hitch. Older tile versions
+      // take the classic expand-on-CPU path.
+      let meshes: TileMeshes;
+      const q = parseTileQuantized(buffer);
+      if (q) {
+        rec.biomes = summarizeSurfaceBiomes(q.surface, q.biomeNames, this.opts.palette);
+        rec.surface = { ...q.surface, biome: q.surface.biome.slice(), height: q.surface.height.slice() };
+        meshes = buildQuantizedTileMeshes(q, this.opts.material, this.opts.waterMaterial);
+        rec.vertexCount = q.solid.vertexCount + q.fluid.vertexCount;
+        rec.triangleCount = (q.solid.indexCount + q.fluid.indexCount) / 3;
+      } else {
+        const tile = parseTile(buffer);
+        rec.biomes = summarizeBiomes(tile, this.opts.palette);
+        // Copy the (small) surface arrays out of the decoded buffer — as
+        // zero-copy views they would pin the tile's entire multi-MB ArrayBuffer
+        // in the JS heap for as long as the tile is resident.
+        rec.surface = tile.surface
+          ? { ...tile.surface, biome: tile.surface.biome.slice(), height: tile.surface.height.slice() }
+          : undefined;
+        meshes = buildTileMeshes(tile, this.opts.palette, this.opts.material, this.opts.waterMaterial);
+        meshes.terrain.geometry.computeBoundingSphere();
+        meshes.water?.geometry.computeBoundingSphere();
+        rec.vertexCount = tile.vertexCount + (tile.fluid?.vertexCount ?? 0);
+        rec.triangleCount = (tile.indexCount + (tile.fluid?.indexCount ?? 0)) / 3;
       }
-      rec.terrain = terrain;
-      rec.water = water;
-      rec.vertexCount = tile.vertexCount + (tile.fluid?.vertexCount ?? 0);
-      rec.triangleCount = (tile.indexCount + (tile.fluid?.indexCount ?? 0)) / 3;
-      rec.state = 'ready';
-      this.minY = Math.min(this.minY, bounds.min.y);
-      this.maxY = Math.max(this.maxY, bounds.max.y);
-      this.opts.scene.add(terrain);
-      if (water) this.opts.scene.add(water);
+      releaseAfterUpload(meshes.terrain.geometry);
+      if (meshes.water) releaseAfterUpload(meshes.water.geometry);
+      rec.terrain = meshes.terrain;
+      rec.water = meshes.water;
+      this.minY = Math.min(this.minY, meshes.bounds.min.y);
+      this.maxY = Math.max(this.maxY, meshes.bounds.max.y);
+      // Don't insert into the scene here: adds are staggered one per frame so
+      // several tiles finishing together can't stack their GPU uploads into a
+      // single frame. update() flushes the queue.
+      rec.state = 'built';
+      this.pendingAdd.push(key);
       this.invalidate();
       this.emitter.emit('change', this.stats);
     } catch (e) {
@@ -269,7 +326,7 @@ export class TileManager {
         vertexCount += rec.vertexCount;
         triangleCount += rec.triangleCount;
         bytes += rec.ref.bytes;
-      } else if (rec.state === 'loading') loading++;
+      } else if (rec.state === 'loading' || rec.state === 'built') loading++;
     }
     this.statsCache = { loaded, loading, total: this.index.size, vertexCount, triangleCount, bytes };
     return this.statsCache;
@@ -358,6 +415,7 @@ export class TileManager {
   dispose(): void {
     this.disposed = true;
     this.queue = [];
+    this.pendingAdd = [];
     for (const [key, rec] of [...this.records]) this.unload(key, rec);
     this.emitter.clear();
   }

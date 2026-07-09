@@ -10,6 +10,7 @@ export { VantageViewer, type VantageViewerProps } from './VantageViewer.js';
 export { Panel, type PanelProps } from './Panel.js';
 export { BiomeLayer, type BiomeLayerProps } from './BiomeLayer.js';
 export { LightPanel, type LightPanelProps } from './LightPanel.js';
+export { SettingsPanel, QUALITY_PRESETS, type SettingsPanelProps, type QualityPreset } from './SettingsPanel.js';
 export { MapNav, type MapNavProps } from './MapNav.js';
 export { Reticle, type ReticleProps } from './Reticle.js';
 export { useVantage, type VantageContextValue, type VantageStatus } from './context.js';
@@ -24,6 +25,7 @@ export type {
   ViewMode,
   LightSettings,
   DisplaySettings,
+  StreamingSettings,
   BiomeEntry,
   DecodedTile,
 } from '../three/index.js';

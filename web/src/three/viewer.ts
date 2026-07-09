@@ -366,9 +366,12 @@ export class VantageViewer {
     const texData = parseTextureArray(await maybeInflate(await fetchBuffer(new URL(manifest.textures, abs).toString())));
 
     this.disposeCurrent();
-    const shader = createTerrainMaterial(texData);
-    const waterShader = createWaterMaterial(shader);
     const palette = biomePalette(manifest.biomes.length);
+    // Quantized mode: tiles upload their on-disk u16/i8 encoding verbatim and
+    // the shader dequantizes — the decode-stutter fix (see terrain.ts).
+    const shader = createTerrainMaterial(texData, { quantized: true, palette });
+    const waterShader = createWaterMaterial(shader);
+    shader.uniforms['uFogRadial']!.value = 1.0; // fog the streamed ring edge, not view depth
     this.shader = shader;
     this.waterShader = waterShader;
     this.manifest = manifest;
@@ -440,7 +443,7 @@ export class VantageViewer {
     }
     this.bounds.set(new THREE.Vector3(minX, -64, minZ), new THREE.Vector3(maxX, 320, maxZ));
 
-    const viewDistance = this.options.streaming?.viewDistance ?? 768;
+    const viewDistance = this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768;
     const spawn = manifest.spawn;
     const pivot = spawn
       ? new THREE.Vector3(spawn.x, spawn.y, spawn.z)
@@ -466,10 +469,28 @@ export class VantageViewer {
 
     this.camera.far = Math.max(8000, viewDistance * 6);
     this.camera.updateProjectionMatrix();
+    this.applyStreamFog();
+  }
 
-    // Fog carries the streamed edge into the horizon: solid haze just inside
-    // the ring where tiles stop, so pop-in happens behind it.
-    if (this.shader) this.shader.uniforms['uFog']!.value.set(viewDistance * 0.55, viewDistance * 1.3);
+  /** The radius tiles are actually guaranteed resident to: the view distance,
+   *  unless the tile budget runs out first (nearest-first fill ⇒ a disc of
+   *  maxTiles tiles ⇒ radius tb·√(maxTiles/π)). Fog is tied to THIS, so it
+   *  hugs the real streamed edge instead of hazing resident terrain. */
+  private streamRadius(): number {
+    const vd = this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768;
+    const mt = this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 96;
+    const tb = this.manifest?.tileBlocks ?? 128;
+    return Math.min(vd, tb * Math.sqrt(mt / Math.PI));
+  }
+
+  /** Radial fog for streamed worlds: clear across the resident disc, fading
+   *  out right at the ring where tiles stop so pop-in stays behind the haze.
+   *  Radial (XZ from the focus) — zooming out or looking down never fogs
+   *  terrain that is actually loaded, unlike view-depth fog. */
+  private applyStreamFog(): void {
+    if (!this.shader || !this.tiles) return;
+    const r = this.streamRadius();
+    this.shader.uniforms['uFog']!.value.set(r * 0.72, r * 1.05);
   }
 
   private setTile(tile: DecodedTile, textures: DecodedTextureArray | undefined, view: ViewMode): void {
@@ -707,6 +728,32 @@ export class VantageViewer {
     this.shader.uniforms['uFogDensity']!.value = d.fog;
   }
 
+  // --- streaming -------------------------------------------------------------
+
+  /** The current streaming settings (view distance, tile budget, concurrency). */
+  get streamingSettings(): Required<StreamingSettings> {
+    return {
+      viewDistance: this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768,
+      maxTiles: this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 96,
+      concurrency: this.options.streaming.concurrency ?? 4,
+    };
+  }
+
+  /** Live-tune streaming: view distance, resident-tile budget, concurrency.
+   *  Applies immediately to a streamed world (tiles re-plan, fog and camera
+   *  range follow) and persists for future loads. The fidelity dial: raise
+   *  viewDistance/maxTiles to see farther, lower them on weak hardware. */
+  setStreaming(settings: StreamingSettings): void {
+    this.options.streaming = { ...this.options.streaming, ...settings };
+    if (!this.tiles) return;
+    this.tiles.configure(settings);
+    const vd = this.tiles.viewDistance;
+    this.controls.maxDistance = vd * 2.2;
+    this.camera.far = Math.max(8000, vd * 6);
+    this.camera.updateProjectionMatrix();
+    this.applyStreamFog();
+  }
+
   // --- camera / navigation ---------------------------------------------------
 
   /** Smoothly zoom by `steps` wheel-notches (positive = in). Drives the same
@@ -842,6 +889,9 @@ export class VantageViewer {
     if (this.tiles) {
       const focus = this.controls.flyMode ? this.camera.position : this.controls.position;
       this.tiles.update(focus.x, focus.z);
+      // Radial fog tracks the same focus streaming plans around, so the clear
+      // disc and the resident disc stay concentric.
+      if (this.shader) (this.shader.uniforms['uFogCenter']!.value as THREE.Vector2).set(focus.x, focus.z);
     }
 
     // Ease the textured<->biome crossfade, and advance the water-animation clock.
@@ -894,6 +944,7 @@ export class VantageViewer {
       this.waterShader = null;
       if (this.shader) {
         (this.shader.uniforms['map']!.value as THREE.Texture | null)?.dispose();
+        (this.shader.uniforms['uPalette']!.value as THREE.Texture | null)?.dispose();
         this.shader.dispose();
         this.shader = null;
       }

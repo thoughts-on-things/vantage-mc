@@ -69,6 +69,9 @@ pub const Element = struct {
     to: [3]f64,
     faces: []Face,
     rotation: ?Rotation = null,
+    /// `"shade": false` (vines, cross plants, ladders…) disables the per-face
+    /// direction shading — the game renders these at full top-face brightness.
+    shade: bool = true,
 };
 
 pub const ResolvedModel = struct {
@@ -249,6 +252,7 @@ pub const Resolver = struct {
                 .to = to,
                 .faces = try faces.toOwnedSlice(self.arena),
                 .rotation = readRotation(eo.get("rotation")),
+                .shade = asBool(eo.get("shade"), true),
             });
         }
         return elements.toOwnedSlice(self.arena);

@@ -1085,7 +1085,14 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
                     bf.verts[i] = .{
                         .pos = .{ p[0] + n[0] * nudge, p[1] + n[1] * nudge, p[2] + n[2] * nudge },
                         .uv = .{ u, 1.0 - v },
-                        .n = .{ quantNormal(n[0]), quantNormal(n[1]), quantNormal(n[2]) },
+                        // `shade: false` (vines, cross plants, ladders…): store an
+                        // up normal so the shader's face-direction shading reads
+                        // 1.0 — the game draws these at full brightness, and the
+                        // side-face darkening is why foliage looked muddy.
+                        .n = if (el.shade)
+                            .{ quantNormal(n[0]), quantNormal(n[1]), quantNormal(n[2]) }
+                        else
+                            .{ 0, 1, 0 },
                     };
                 }
                 try list.append(arena, bf);
@@ -1370,17 +1377,21 @@ fn rotAxis(v: *[3]f32, axis: Axis, k: u2, recenter: bool) void {
     var i: u2 = 0;
     while (i < k) : (i += 1) {
         switch (axis) {
-            // +90° about X: (x, y, z) -> (x, -z, y)
+            // Blockstate x+90 tips the model's top toward north: up -> north.
+            // Verified against vanilla assets (barrel facing=up is the default
+            // model, facing=north is x=90): (x, y, z) -> (x, z, -y).
             .x => {
-                const ny = -pz;
-                const nz = py;
+                const ny = pz;
+                const nz = -py;
                 py = ny;
                 pz = nz;
             },
-            // +90° about Y: (x, y, z) -> (z, y, -x)
+            // Blockstate y+90 turns the model clockwise seen from above:
+            // north -> east (ladder facing=east is y=90 on a north-facing
+            // model): (x, y, z) -> (-z, y, x).
             .y => {
-                const nx = pz;
-                const nz = -px;
+                const nx = -pz;
+                const nz = px;
                 px = nx;
                 pz = nz;
             },
@@ -1445,9 +1456,11 @@ test "cornerAoOffsets samples the right in-plane neighbours" {
 }
 
 test "rotateDir matches the geometry/normal rotation convention" {
-    // x=90 about X maps +Y (up) -> +Z (south); identity for zero rotation.
+    // Vanilla conventions: x=90 tips up -> north (barrel facing=up is the
+    // default model, facing=north is x=90); y=90 turns north -> east (ladder).
     try std.testing.expectEqual(model.Dir.up, rotateDir(.up, 0, 0));
-    try std.testing.expectEqual(model.Dir.south, rotateDir(.up, 90, 0));
+    try std.testing.expectEqual(model.Dir.north, rotateDir(.up, 90, 0));
+    try std.testing.expectEqual(model.Dir.east, rotateDir(.north, 0, 90));
     // Cross-check directly against the normal rotation used for geometry.
     for ([_]model.Dir{ .down, .up, .north, .south, .west, .east }) |d| {
         var n = dirVecF(d);

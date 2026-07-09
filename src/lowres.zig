@@ -148,7 +148,7 @@ fn isWaterish(name: []const u8) bool {
 /// hires terrain while distant forests still read green.
 fn isFoliage(name: []const u8) bool {
     const needles = [_][]const u8{
-        "leaves", "log", "_wood", "mushroom", "bamboo", "vine",
+        "leaves", "log",       "_wood",   "mushroom", "bamboo", "vine",
         "azalea", "propagule", "sapling", "cocoa",
     };
     for (needles) |nd| {

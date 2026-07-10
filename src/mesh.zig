@@ -847,7 +847,7 @@ fn emitFluid(
             const pyw = wy + py;
             const pz = wz + @as(f32, @floatFromInt(cs[2]));
             try mesh.positions.appendSlice(arena, &.{ px, pyw, pz });
-            try mesh.uv.appendSlice(arena, &.{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(1 - tf.uvsel[i][1]) });
+            try mesh.uv.appendSlice(arena, &.{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(tf.uvsel[i][1]) });
             try mesh.layer.append(arena, layer);
             const col = if (blend) blendedTint(ctx, .water, px - min_xf, pyw - min_yf, pz - min_zf) else base_rgb;
             try mesh.color.appendSlice(arena, &.{ col[0], col[1], col[2], depth });
@@ -1082,7 +1082,11 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
                     const v: f32 = @floatCast((if (uvsel[1] == 1) mf.uv[3] else mf.uv[1]) / 16.0);
                     bf.verts[i] = .{
                         .pos = .{ p[0] + n[0] * nudge, p[1] + n[1] * nudge, p[2] + n[2] * nudge },
-                        .uv = .{ u, 1.0 - v },
+                        // Model uv and the uploaded texture rows share the same
+                        // origin (v=0 = top texel row), so v passes through
+                        // unflipped — flipping here turns every asymmetric
+                        // texture (flowers, grass side overlay) upside down.
+                        .uv = .{ u, v },
                         // `shade: false` (vines, cross plants, ladders…): store an
                         // up normal so the shader's face-direction shading reads
                         // 1.0 — the game draws these at full brightness, and the
@@ -1183,7 +1187,7 @@ fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer
             bf.ao_off[i] = cornerAoOffsets(n, p);
             bf.verts[i] = .{
                 .pos = p,
-                .uv = .{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(1 - tf.uvsel[i][1]) },
+                .uv = .{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(tf.uvsel[i][1]) },
                 .n = tf.n,
             };
         }

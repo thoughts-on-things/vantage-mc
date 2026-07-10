@@ -38,15 +38,18 @@ versioned binary tile contract, so each can evolve independently.
   "just works".
 - **Interactive layers** — biome layer with a clickable legend, lighting panel,
   quality presets, free-flight camera.
+- **Shareable views** — the camera lives in the URL hash, so any view of the
+  map is a deep link you can paste to someone.
 
 | Whole-world satellite view (LOD pyramid) | Biome layer |
 | --- | --- |
 | ![Zoomed out to a whole-world satellite view](./docs/render-world.jpg) | ![The biome layer with its legend](./docs/render-biomes.jpg) |
 
-Measured on a dense 7,225-chunk 1.21 world (Windows, ReleaseFast): **~23 s**
-end-to-end for 81 tiles + a 3-level LOD pyramid, 125 MB on disk (970 MB of raw
-geometry before cave culling and gzip), streaming at 120+ FPS with ~16M
-triangles resident.
+Measured on a dense 7,225-chunk 1.21 world (Windows, 16 threads, ReleaseFast):
+**~4.5 s** end-to-end for 81 tiles + a 3-level LOD pyramid (22 s on one
+thread), 125 MB on disk (970 MB of raw geometry before cave culling and gzip),
+streaming at 120+ FPS with ~16M triangles resident. Tiles render in parallel
+across all cores by default.
 
 ## Quick start
 
@@ -92,6 +95,9 @@ The renderer only ever reads the world — it never writes to it. Useful flags:
   into dark, sky-light-0 cells below this Y are skipped. Ocean and lake floors
   are always kept. `off` bakes full cave geometry.
 - `--tile-chunks <n>` — tile span in chunks (default 8 = 128×128 blocks).
+- `--threads <n>` — tile-render parallelism (default: all logical cores).
+  Peak memory is roughly one tile's working set per thread; lower it on
+  RAM-constrained machines.
 
 ### 3. Deploy anywhere
 

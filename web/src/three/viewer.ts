@@ -102,6 +102,12 @@ export interface VantageViewerOptions {
   display?: DisplaySettings;
   /** Tile-streaming behaviour for `world` sources. */
   streaming?: StreamingSettings;
+  /** Keep the camera state in the URL hash (`#@x,y,z,dist,rot,tilt`) so any
+   *  view is a shareable deep link: the hash updates (debounced, via
+   *  `history.replaceState`) as the camera moves, and a hash present at load —
+   *  or pasted into the address bar — is applied to the camera. Default `false`
+   *  (the React `<VantageViewer>` turns it on). */
+  urlState?: boolean;
 }
 
 /** A tile source: a URL to fetch, a raw buffer, or already-decoded data. */
@@ -261,6 +267,12 @@ export class VantageViewer {
   // The framing the current tile loaded into, so the UI can re-home to it.
   private framedState: { position: THREE.Vector3; distance: number; rotation: number; angle: number; floorY: number } | null = null;
 
+  // URL-hash deep links (urlState option): debounce handle for hash writes and
+  // the last hash we wrote (so a hashchange we caused isn't re-applied).
+  private hashTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastWrittenHash = '';
+  private urlUnsub: (() => void) | null = null;
+
   constructor(container: HTMLElement | string, options: VantageViewerOptions = {}) {
     this.container = resolveContainer(container);
     this.options = {
@@ -270,6 +282,7 @@ export class VantageViewer {
       light: options.light ?? {},
       display: options.display ?? {},
       streaming: options.streaming ?? {},
+      urlState: options.urlState ?? false,
     };
     if (options.light) this.light = { ...this.light, ...options.light };
     if (options.display) this.display = { ...this.display, ...options.display };
@@ -301,6 +314,7 @@ export class VantageViewer {
     this.controls = new MapControls(this.camera, this.renderer.domElement, { minDistance: 3 });
 
     this.bindInput();
+    if (this.options.urlState) this.bindUrlState();
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.container);
     this.resize();
@@ -409,6 +423,9 @@ export class VantageViewer {
     });
 
     this.frameWorld(manifest, view);
+    // A deep link overrides the default framing (the home button still returns
+    // to the framed view). Applied before seeding so tiles stream in there.
+    if (this.options.urlState) this.applyViewHash(window.location.hash);
     this.applyBiomeUniforms();
     this.applyLight();
     this.applyDisplay();
@@ -535,6 +552,7 @@ export class VantageViewer {
     this.controls.heightAt = makeHeightSampler(tile.surface);
     this._biomes = summarizeBiomes(tile, built.palette);
     this.frameCamera(view);
+    if (this.options.urlState) this.applyViewHash(window.location.hash);
     this.applyBiomeUniforms();
     this.applyLight();
     this.applyDisplay();
@@ -769,6 +787,62 @@ export class VantageViewer {
     this.applyViewLimits();
   }
 
+  // --- URL-hash deep links ----------------------------------------------------
+
+  /** The current view serialized as a `#@x,y,z,dist,rot,tilt` hash fragment —
+   *  paste-able into any URL serving the same world. */
+  getViewHash(): string {
+    const p = this.controls.position;
+    const r1 = (v: number) => Math.round(v * 10) / 10;
+    const r3 = (v: number) => Math.round(v * 1000) / 1000;
+    return `#@${r1(p.x)},${r1(p.y)},${r1(p.z)},${r1(this.controls.distance)},${r3(this.controls.rotation)},${r3(this.controls.angle)}`;
+  }
+
+  /** Apply a `#@x,y,z,dist,rot,tilt` hash to the camera (leading `#` optional).
+   *  Returns whether the hash parsed. */
+  applyViewHash(hash: string): boolean {
+    const m = /^#?@(-?[\d.]+),(-?[\d.]+),(-?[\d.]+),([\d.]+),(-?[\d.]+),(-?[\d.]+)$/.exec(hash);
+    if (!m) return false;
+    const [x, y, z, distance, rotation, angle] = m.slice(1).map(Number);
+    if (![x, y, z, distance, rotation, angle].every(Number.isFinite)) return false;
+    this.controls.setView({
+      position: new THREE.Vector3(x, y, z),
+      distance: distance!,
+      rotation: rotation!,
+      angle: angle!,
+      floorY: y!,
+    });
+    return true;
+  }
+
+  /** Debounced camera→hash sync plus hashchange→camera (pasted links apply
+   *  live). `history.replaceState` avoids history spam and hashchange echo. */
+  private bindUrlState(): void {
+    const onChange = () => {
+      if (this.hashTimer !== null) clearTimeout(this.hashTimer);
+      this.hashTimer = setTimeout(() => this.writeHash(), 250);
+    };
+    this.controls.addEventListener('change', onChange);
+    const onHash = () => {
+      if (window.location.hash === this.lastWrittenHash) return;
+      this.applyViewHash(window.location.hash);
+    };
+    window.addEventListener('hashchange', onHash);
+    this.urlUnsub = () => {
+      this.controls.removeEventListener('change', onChange);
+      window.removeEventListener('hashchange', onHash);
+      if (this.hashTimer !== null) clearTimeout(this.hashTimer);
+      this.hashTimer = null;
+    };
+  }
+
+  private writeHash(): void {
+    const hash = this.getViewHash();
+    if (hash === this.lastWrittenHash) return;
+    this.lastWrittenHash = hash;
+    history.replaceState(null, '', hash);
+  }
+
   // --- camera / navigation ---------------------------------------------------
 
   /** Smoothly zoom by `steps` wheel-notches (positive = in). Drives the same
@@ -975,6 +1049,8 @@ export class VantageViewer {
   dispose(): void {
     this.renderer.setAnimationLoop(null);
     this.resizeObserver.disconnect();
+    this.urlUnsub?.();
+    this.urlUnsub = null;
     this.controls.dispose();
     this.disposeCurrent();
     this.present.traverse((o) => {

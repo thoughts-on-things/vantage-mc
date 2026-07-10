@@ -40,6 +40,9 @@ export interface VantageViewerProps {
   /** Live display fidelity (sharpness, AO, saturation, contrast, fog, render
    *  scale). Applied on change without re-baking — drive it from sliders. */
   display?: DisplaySettings;
+  /** Keep the camera in the URL hash so any view is a shareable deep link.
+   *  Default `true` — pass `false` if the page owns its hash (e.g. a router). */
+  urlState?: boolean;
   className?: string;
   style?: CSSProperties;
   /** Called once a tile has loaded and been framed. */
@@ -85,6 +88,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     maxPixelRatio = 2,
     light,
     display,
+    urlState = true,
     className,
     style,
     onLoad,
@@ -112,7 +116,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     injectStyles();
     const el = canvasRef.current;
     if (!el) return;
-    const v = new Engine(el, { antialias, maxPixelRatio, view, light, display, streaming });
+    const v = new Engine(el, { antialias, maxPixelRatio, view, light, display, streaming, urlState });
     engineRef.current = v;
     setEngine(v);
 

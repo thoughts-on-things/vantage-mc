@@ -99,12 +99,17 @@ pub const Resolver = struct {
     /// run instead of once per tile. Results live in `arena`, so the memo's
     /// lifetime must not exceed it.
     memo: ?*std.StringHashMap([]ResolvedModel) = null,
+    /// Guards `memo` and `arena` when tiles are meshed on multiple threads.
+    /// Shared by every copy of the resolver (the struct is passed by value).
+    lock: ?*std.Io.Mutex = null,
 
     /// Resolve every part of a block into a flat list of ResolvedModels (one per
     /// chosen variant / matching multipart part). `state` is the normalized
     /// block-state key ("axis=x", "facing=north,half=bottom", …); pass "" for the
     /// default. Most blocks yield exactly one model.
     pub fn resolveBlock(self: Resolver, block_name: []const u8, state: []const u8) ![]ResolvedModel {
+        if (self.lock) |l| l.lockUncancelable(self.io);
+        defer if (self.lock) |l| l.unlock(self.io);
         if (self.memo) |memo| {
             const key = try std.fmt.allocPrint(self.arena, "{s}\x00{s}", .{ block_name, state });
             const gop = try memo.getOrPut(key);

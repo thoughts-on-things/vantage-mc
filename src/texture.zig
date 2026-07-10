@@ -35,6 +35,10 @@ pub const Builder = struct {
     root: []const u8,
     layers: std.ArrayList([]u8) = .empty,
     map: std.StringHashMap(u32),
+    /// Guards `layers`/`map` — tiles mesh on multiple threads and each new
+    /// texture appends a layer. `arena` must be thread-safe too (the render
+    /// path hands in a locked allocator).
+    mutex: std.Io.Mutex = .init,
 
     pub fn init(arena: std.mem.Allocator, io: std.Io, root: []const u8) !Builder {
         var self: Builder = .{
@@ -51,14 +55,26 @@ pub const Builder = struct {
     /// first use; returns 0 (the missing checker) for any unreadable/undecodable
     /// texture so meshing never fails on a bad asset.
     pub fn layerFor(self: *Builder, path: []const u8) u32 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         if (self.map.get(path)) |i| return i;
         const idx = self.load(path) catch return 0;
         return idx;
     }
 
+    /// A layer's RGBA pixels, fetched under the lock (a concurrent append can
+    /// move the `layers` backing array; the pixel buffers themselves are stable).
+    pub fn layerPixels(self: *Builder, idx: u32) []const u8 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.layers.items[idx];
+    }
+
     /// Layer index for a flat solid color (used by the mesher's fallback path
     /// for blocks with no resolvable model — fluids, unknowns). Cached by color.
     pub fn solidLayer(self: *Builder, rgb: [3]u8) !u32 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const key = try std.fmt.allocPrint(self.arena, "#solid:{x:0>2}{x:0>2}{x:0>2}", .{ rgb[0], rgb[1], rgb[2] });
         if (self.map.get(key)) |i| return i;
         const buf = try self.arena.alloc(u8, BYTES_PER_LAYER);

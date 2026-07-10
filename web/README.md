@@ -52,6 +52,13 @@ presets plus view-distance, tile-budget, render-scale, and haze sliders, all
 applied live (`viewer.setStreaming` re-plans in place, no reload). Or set the
 ring up-front with `streaming={{ viewDistance: 1024, maxTiles: 128 }}`.
 
+The camera also lives in the URL hash (`#@x,y,z,dist,rot,tilt`), so **every
+view is a shareable deep link**: the hash follows the camera (debounced,
+`history.replaceState` — no history spam), a link opens at its saved view, and
+pasting a new hash into the address bar pans there live. Pass
+`urlState={false}` if your page owns its hash (e.g. a router); the plain
+engine keeps it opt-in (`new VantageViewer(el, { urlState: true })`).
+
 Format-2 manifests carry a **lowres LOD pyramid** (`.vlr` colored
 heightfields): the viewer keeps coarse rings resident far beyond the hires
 disc — level 1 also underlays it as a loading placeholder — so the whole world

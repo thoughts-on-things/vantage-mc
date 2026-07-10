@@ -1,8 +1,8 @@
 //! Computed sky + block light (flood fill).
 //!
-//! Minecraft region files frequently omit saved `SkyLight`/`BlockLight` — it's
-//! common for tool-generated or externally-processed worlds (our test world has
-//! none). So, like BlueMap, we compute light ourselves rather than read it.
+//! Minecraft region files frequently omit saved `SkyLight`/`BlockLight` —
+//! common for tool-generated or externally-processed worlds. So we compute
+//! light ourselves rather than read it.
 //!
 //! Two breadth-first passes over the dense block grid:
 //!  - **Sky**: every cell with an open vertical path to the top starts at 15;
@@ -27,8 +27,8 @@ pub const MAX: u8 = 15;
 /// `attenuate[id]` (optional, parallel to `occluder`) marks blocks that dim sky
 /// light as it passes down through them — water — so the seabed darkens with
 /// depth instead of staying full-bright. With the surface drawn semi-transparent,
-/// that depth gradient is what reads as deep vs. shallow water (the way BlueMap
-/// renders it), rather than fading the water itself to opaque.
+/// that depth gradient is what reads as deep vs. shallow water, rather than
+/// fading the water itself to opaque.
 pub fn compute(arena: std.mem.Allocator, g: grid.Grid, occluder: []const bool, emission: []const u8, attenuate: ?[]const bool) !void {
     const n = g.sx * g.sy * g.sz;
     if (n == 0 or g.light.len != n) return;

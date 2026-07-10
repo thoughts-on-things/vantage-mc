@@ -1,5 +1,5 @@
-// <SettingsPanel> — the fidelity/performance dial, BlueMap's quality menu done
-// as a drop-in panel. Presets (potato → ultra) set streaming range + render
+// <SettingsPanel> — the fidelity/performance dial, a quality menu done
+// as a drop-in panel. Presets (low → ultra) set streaming range + render
 // scale together; individual sliders expose the same knobs for fine-tuning.
 // Everything applies live: streaming re-plans in place, no reload.
 

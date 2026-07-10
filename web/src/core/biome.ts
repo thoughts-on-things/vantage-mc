@@ -61,16 +61,6 @@ export interface BiomeEntry {
   fraction: number;
 }
 
-/**
- * Summarize the biomes actually present in a tile, most common first. Returns an
- * empty list for tiles without biome data. Pass a `palette` to reuse one already
- * built for rendering; otherwise one is derived from the legend length.
- *
- * Biomes are weighted by exposed triangle *area*, not vertex count: greedy
- * meshing merges a run of identical faces into one big quad with the same 4
- * vertices, so a vertex tally would under-count flat, mergeable biomes. Area is
- * mesh-independent — the share is the same whether or not the faces were merged.
- */
 /** Turn per-biome area counts + a legend into sorted {@link BiomeEntry}s. */
 function toEntries(counts: number[], names: string[], pal: Rgb[]): BiomeEntry[] {
   const present: BiomeEntry[] = [];
@@ -106,6 +96,16 @@ export function summarizeSurfaceBiomes(surface: SurfaceMap, names: string[], pal
   return toEntries(counts, names, pal);
 }
 
+/**
+ * Summarize the biomes actually present in a tile, most common first. Returns an
+ * empty list for tiles without biome data. Pass a `palette` to reuse one already
+ * built for rendering; otherwise one is derived from the legend length.
+ *
+ * Biomes are weighted by exposed triangle *area*, not vertex count: greedy
+ * meshing merges a run of identical faces into one big quad with the same 4
+ * vertices, so a vertex tally would under-count flat, mergeable biomes. Area is
+ * mesh-independent — the share is the same whether or not the faces were merged.
+ */
 export function summarizeBiomes(tile: DecodedTile, palette?: Rgb[]): BiomeEntry[] {
   const names = tile.biomeNames;
   const biome = tile.biome;

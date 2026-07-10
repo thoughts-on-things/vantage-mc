@@ -3,24 +3,25 @@
 # Install just: https://just.systems  (`brew install just`).
 # List recipes:  `just`   ·   run one:  `just test`
 #
-# Paths default to this machine's layout but are overridable, e.g.
+# Paths are overridable per-invocation or via env vars, e.g.
 #   just region=/path/to/r.0.0.mca demo
 #   VANTAGE_CACHE=/somewhere just mesh
 # A render needs extracted assets + biome data; see `just extract`.
 
 # Extracted client assets+data (resource pack, biome data pack, lang). See README.
-cache  := env_var_or_default('VANTAGE_CACHE', env_var('HOME') / '.cache/vantage/assets/26.2')
+cache  := env_var_or_default('VANTAGE_CACHE', env_var('HOME') / '.cache/vantage/assets/default')
 assets := cache / 'assets/minecraft'
 
 # Test world region file (override with VANTAGE_REGION or `just region=...`).
-region := env_var_or_default('VANTAGE_REGION', env_var('HOME') / 'Development/beacon/data/world/region/r.0.0.mca')
+region := env_var_or_default('VANTAGE_REGION', 'path/to/world/region/r.0.0.mca')
 
 # Chunk rectangle for demo renders: cx0 cz0 cx1 cz1 (region-local, 0..31).
 range := '0 0 10 15'
 
 bin    := 'zig-out/bin/vantage'
 port   := '8753'
-chrome := '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+# Chrome binary for the headless `shot` recipe (override with VANTAGE_CHROME).
+chrome := env_var_or_default('VANTAGE_CHROME', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
 
 # Print the recipe list (default when running `just`).
 _default:

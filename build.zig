@@ -10,10 +10,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            // C interop for the vendored decompressor + image decoder — the
-            // DESIGN.md pillar: vendor the fastest C libraries rather than
-            // depend on system libs (absent on Windows) or the churning
-            // std.compress. No system dependencies ⇒ one static binary per OS.
+            // C interop for the vendored decompressor + image decoder: vendor
+            // the fastest C libraries rather than depend on system libs (absent
+            // on Windows) or the churning std.compress. No system dependencies
+            // ⇒ one static binary per OS.
             .link_libc = true,
         }),
     });
@@ -35,8 +35,8 @@ pub fn build(b: *std.Build) void {
         },
         .flags = &.{"-std=c99"},
     });
-    // Vendored stb_image (PNG decode) — C interop, the path DESIGN endorses over
-    // a churning std image decoder. PNG-only, decode-from-memory (see the impl TU).
+    // Vendored stb_image (PNG decode) — C interop. PNG-only, decode-from-memory
+    // (see the impl TU).
     exe.root_module.addIncludePath(b.path("vendor/stb"));
     exe.root_module.addCSourceFile(.{
         .file = b.path("vendor/stb/stb_image_impl.c"),
@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run the world-parsing spike");
+    const run_step = b.step("run", "Run the vantage CLI");
     run_step.dependOn(&run_cmd.step);
 
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });

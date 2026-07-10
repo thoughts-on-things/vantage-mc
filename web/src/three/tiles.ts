@@ -124,7 +124,7 @@ export class TileManager {
 
   private queue: { ref: ManifestTile; level: number }[] = [];
   /** Built tiles awaiting scene insertion — flushed ONE per update() call so
-   *  multi-MB GPU uploads never pile into a single frame (the stutter fix). */
+   *  multi-MB GPU uploads never pile into a single frame. */
   private pendingAdd: string[] = [];
   private inFlight = 0;
   private lastFocusX = Infinity;

@@ -1,9 +1,9 @@
 //! Chunk decompression via vendored libdeflate (see vendor/libdeflate, MIT).
 //!
-//! DESIGN.md §11 calls for vendoring the fastest C decompressors over both the
-//! system zlib (not present on Windows) and the churning std.compress. Anvil
-//! chunk payloads are whole-buffer decompressions with a known-ish growth
-//! factor — exactly libdeflate's fast path (~2-3× system zlib). Zlib covers
+//! We vendor the fastest C decompressor rather than depend on the system zlib
+//! (not present on Windows) or the churning std.compress. Anvil chunk payloads
+//! are whole-buffer decompressions with a known-ish growth factor — exactly
+//! libdeflate's fast path (~2-3× system zlib). Zlib covers
 //! chunks (compression type 2); gzip covers type 1 and `level.dat`.
 
 const std = @import("std");

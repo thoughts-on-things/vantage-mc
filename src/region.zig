@@ -1,6 +1,6 @@
 //! Anvil region (.mca) reader.
 //!
-//! Layout (see DESIGN.md / minecraft.wiki "Region file format"):
+//! Layout (see minecraft.wiki "Region file format"):
 //!   0x0000..0x0FFF  location table: 1024 x 4-byte BE entries
 //!                   [3-byte sector offset][1-byte sector count]
 //!   0x1000..0x1FFF  timestamp table (ignored here)
@@ -55,8 +55,8 @@ pub const Region = struct {
         if (start + 5 > self.bytes.len) return error.Truncated;
         const len = std.mem.readInt(u32, self.bytes[start..][0..4], .big);
         if (len == 0) return null;
-        // High bit of the compression byte marks an external .mcc chunk; the
-        // spike does not handle those yet.
+        // High bit of the compression byte marks an external .mcc chunk,
+        // which is not supported.
         const comp_byte = self.bytes[start + 4];
         if (comp_byte & 0x80 != 0) return error.ExternalChunk;
         const comp: Compression = @enumFromInt(comp_byte);

@@ -1,7 +1,6 @@
 //! Dense block grid spanning a rectangular range of chunks.
 //!
-//! P1 used a dense voxel grid for simplicity over the chunk+neighbor streaming
-//! the production mesher will eventually use; P2 keeps it. Each voxel stores an
+//! A dense voxel grid is the simplest structure the meshers can share. Each voxel stores an
 //! interned block id (0 = air) into a per-grid `names` table, so both the
 //! flat-color mesher and the textured mesher can recover the block name (and
 //! resolve its model) without re-reading NBT. ~2 bytes/voxel.
@@ -30,7 +29,7 @@ pub const Grid = struct {
     ids: []u16,
     /// Packed light per voxel: `(sky << 4) | block`, each 0..15. Allocated here
     /// but flood-filled by the mesher's light pass (see `light.zig`) — Minecraft
-    /// worlds frequently omit saved light, so we compute it the way BlueMap does.
+    /// worlds frequently omit saved light, so we compute it ourselves.
     /// Filled for *every* cell including air, because a face's brightness comes
     /// from the light of the air cell it faces, not the block it belongs to.
     /// Cells start at open sky (0xF0) before the light pass runs.

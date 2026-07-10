@@ -1,10 +1,9 @@
-//! Naive culled cube mesher (P1).
+//! Meshers: culled cubes, textured block models, and greedy plane-merging.
 //!
-//! For every solid cell, emit each of its 6 faces only when the neighbor in that
-//! direction is non-solid. This is the simplest mesh that already does the most
-//! important thing BlueMap does — hide interior faces — without yet doing greedy
-//! merging (P3). Output is indexed (4 verts + 6 indices per quad), the first
-//! step away from BlueMap's vertex-duplicating non-indexed PRBM.
+//! The baseline pass emits, for every solid cell, each of its 6 faces only when
+//! the neighbor in that direction is non-solid — hiding interior faces, the most
+//! important thing any Minecraft mesher does. Output is indexed (4 verts +
+//! 6 indices per quad).
 //!
 //! Faces carry flat per-face normals (for lighting) and the cell's flat color.
 
@@ -108,7 +107,7 @@ fn emitQuad(
 }
 
 // ---------------------------------------------------------------------------
-// Textured mesher (P2.3): emits geometry from resolved block models with UVs,
+// Textured mesher: emits geometry from resolved block models with UVs,
 // a texture-array layer per face, and a per-vertex tint multiply.
 // ---------------------------------------------------------------------------
 
@@ -183,7 +182,7 @@ pub const Built = struct { solid: Mesh2 = .{}, fluid: Mesh2 = .{}, light_ms: i64
 
 /// Baked-light quality. `flat` lights each face by the single cell it faces (hard
 /// per-face steps). `smooth` averages the four cells around each vertex (the AO
-/// neighbourhood) for soft, BlueMap-grade gradients. Set at bake time (`--light`).
+/// neighbourhood) for soft gradients. Set at bake time (`--light`).
 pub const LightQuality = enum { flat, smooth };
 
 /// Build the textured mesh. `maps` are the biome colormaps and `reg` the
@@ -251,8 +250,8 @@ pub fn buildTextured(
     }
 
     // Compute sky + block light and flood-fill it into the grid, so each face can
-    // read the light of the cell it faces (see light.zig). This world — like many
-    // — saves no light in its region files, so we derive it the way BlueMap does.
+    // read the light of the cell it faces (see light.zig). Many worlds save no
+    // light in their region files, so we derive it ourselves.
     const emission = try arena.alloc(u8, g.names.len);
     for (emission, 0..) |*e, id| e.* = if (id == 0) 0 else lighting.emissionOf(g.nameOf(@intCast(id)));
     const t_light0 = std.Io.Timestamp.now(resolver.io, .awake);
@@ -348,9 +347,8 @@ const MeshCtx = struct {
     /// tiled render with an apron). Cells outside are read but never emitted.
     interior: grid.Interior,
     /// Cave culling: when set, faces below this world Y that look into a dark
-    /// cell (sky light 0) are skipped — the BlueMap `remove-caves-below-y`
-    /// mechanic, which cuts the invisible cave geometry that otherwise
-    /// dominates tile size on modern (1.18+) worlds. Faces looking into water
+    /// cell (sky light 0) are skipped — cutting the invisible cave geometry
+    /// that otherwise dominates tile size on modern (1.18+) worlds. Faces looking into water
     /// are always kept, so deep ocean floors survive (sky light attenuates to
     /// 0 under ~15 blocks of water). Null = render everything.
     cave_y: ?i32,
@@ -470,7 +468,7 @@ fn appendMesh(alloc: std.mem.Allocator, dst: *Mesh2, src: *const Mesh2) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Greedy plane-merging (P3): full-cube occluder faces (marked `greedy` at bake
+// Greedy plane-merging: full-cube occluder faces (marked `greedy` at bake
 // time) are merged into big quads with repeat-wrapped, tiled UV — one quad for a
 // run of identical adjacent faces instead of one per block. The merge key folds
 // in block id, biome and the per-vertex AO + light, so only locally-uniform runs
@@ -725,7 +723,7 @@ fn parseLevel(state: []const u8) u8 {
     return v;
 }
 
-/// Fluid "own" surface height (0..1) for a level, matching Minecraft/BlueMap:
+/// Fluid "own" surface height (0..1) for a level, matching the game:
 /// source (0) → 14/16, flowing 1..7 → (14 − level·1.9)/16, falling (≥8) → full.
 fn liquidBaseHeight(level: i16) f32 {
     if (level >= 8) return 1.0;
@@ -733,8 +731,8 @@ fn liquidBaseHeight(level: i16) f32 {
 }
 
 /// One top corner's surface height (0..1) for the water cell at (x,y,z), averaged
-/// over the 2×2 of cells meeting at the corner (`xo`,`zo` ∈ {−1,0}). Mirrors
-/// BlueMap's LiquidModelRenderer: a same-liquid block directly above any of the
+/// over the 2×2 of cells meeting at the corner (`xo`,`zo` ∈ {−1,0}). Mirrors the
+/// game's liquid renderer: a same-liquid block directly above any of the
 /// 2×2 forces a full corner; a source neighbour pins it to 14/16; otherwise it is
 /// the average base height, with air cells counting as 0 (pulling the corner down)
 /// and solid cells ignored. Deterministic per world corner, so adjacent cells
@@ -765,7 +763,7 @@ fn liquidCornerHeight(ctx: *const MeshCtx, x: isize, y: isize, z: isize, xo: isi
             }
         }
     }
-    if (sum == 0 or count == 0) return 3.0 / 16.0; // BlueMap's "shouldn't happen" fallback
+    if (sum == 0 or count == 0) return 3.0 / 16.0; // "shouldn't happen" fallback
     return sum / count;
 }
 

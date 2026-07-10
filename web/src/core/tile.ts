@@ -72,8 +72,8 @@ export interface DecodedTile extends MeshSection {
  * A VTL6 mesh section kept in its on-disk quantized encoding: every array is a
  * zero-copy view into the tile buffer, ready to hand straight to the GPU. The
  * dequantization (`world = posMin + q * posScale`) happens in the vertex
- * shader, so decoding a tile costs no per-vertex CPU work at all — the fix for
- * decode-time frame stutter while streaming.
+ * shader, so decoding a tile costs no per-vertex CPU work at all and streaming
+ * never stutters on decode.
  */
 export interface QuantizedSection {
   vertexCount: number;

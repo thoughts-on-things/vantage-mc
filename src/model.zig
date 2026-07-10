@@ -1,4 +1,4 @@
-//! Block model resolver — the heart of P2.
+//! Block model resolver.
 //!
 //! Turns a block name into renderable geometry by walking the vanilla resource
 //! pipeline exactly as the game does:
@@ -9,11 +9,10 @@
 //!     -> resolve `#texture` variable references to real texture paths
 //!     -> per-element, per-face: texture, uv, cullface, rotation, tintindex
 //!
-//! P2.1 scope: full variant + parent + texture + element/face resolution,
-//! ignoring block-state property matching (picks the default/first variant) and
-//! treating multipart as "apply all parts" (ignoring `when`). State-accurate
-//! variant selection, real multipart `when` matching, and uv defaults per face
-//! orientation are P2.4 hardening. All allocations come from `arena`.
+//! Covers variant + parent + texture + element/face resolution, state-accurate
+//! variant selection (block-state Properties -> normalized key), multipart
+//! `when` matching, and per-face-orientation uv defaults. All allocations come
+//! from `arena`.
 
 const std = @import("std");
 const json = std.json;

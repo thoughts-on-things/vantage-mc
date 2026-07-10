@@ -47,7 +47,7 @@ export function Map() {
 provides the engine state to children via context. `<BiomeLayer>` adds the
 interactive biome legend (click to isolate, hover the map to identify, press
 `B` to toggle) — aggregated live across whatever tiles are resident. Add
-`<SettingsPanel />` for a BlueMap-style quality menu: low/med/high/ultra
+`<SettingsPanel />` for a quality menu: low/med/high/ultra
 presets plus view-distance, tile-budget, render-scale, and haze sliders, all
 applied live (`viewer.setStreaming` re-plans in place, no reload). Or set the
 ring up-front with `streaming={{ viewDistance: 1024, maxTiles: 128 }}`.

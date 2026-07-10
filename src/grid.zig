@@ -1,7 +1,6 @@
 //! Dense block grid spanning a rectangular range of chunks.
 //!
-//! P1 used a dense voxel grid for simplicity over the chunk+neighbor streaming
-//! the production mesher will eventually use; P2 keeps it. Each voxel stores an
+//! A dense voxel grid is the simplest structure the meshers can share. Each voxel stores an
 //! interned block id (0 = air) into a per-grid `names` table, so both the
 //! flat-color mesher and the textured mesher can recover the block name (and
 //! resolve its model) without re-reading NBT. ~2 bytes/voxel.

@@ -1,16 +1,15 @@
-//! P1 block appearance table.
+//! Flat-color block appearance table.
 //!
-//! A *temporary* stand-in for the full model/texture resolver (P2). It maps a
-//! block name to a single average sRGB color and a `solid` flag used purely for
-//! face culling. Every non-air block is treated as a full opaque cube — good
-//! enough to get recognizable terrain into a browser, and thrown away wholesale
-//! once the real resource-pack resolver lands.
+//! A lightweight alternative to the full model/texture resolver: maps a block
+//! name to a single average sRGB color and a `solid` flag used purely for face
+//! culling. Every non-air block is treated as a full opaque cube — enough for
+//! the asset-free `mesh` path to produce recognizable terrain.
 //!
 //! Lookup rules:
 //!   * air variants            -> not solid, never drawn
 //!   * known names (table)     -> solid, curated average color
 //!   * unknown non-air names    -> solid, deterministic hash color (so nothing
-//!                                is silently invisible while we build out P2)
+//!                                is silently invisible)
 
 const std = @import("std");
 
@@ -58,7 +57,7 @@ fn hashColor(base: []const u8) [3]u8 {
 
 /// Curated average colors for common overworld blocks (keys are namespace-stripped).
 /// Values are eyeballed averages of the vanilla textures; biome tint is ignored
-/// for P1 (grass/leaves/water use a representative plains/temperate color).
+/// (grass/leaves/water use a representative plains/temperate color).
 const table = std.StaticStringMap([3]u8).initComptime(.{
     // stone family
     .{ "stone", [3]u8{ 127, 127, 127 } },

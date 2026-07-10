@@ -1,10 +1,9 @@
 //! Vantage binary tile format v1 (`.vtile`).
 //!
-//! A deliberately minimal, versioned, indexed geometry blob — the first concrete
+//! A deliberately minimal, versioned, indexed geometry blob — the simplest
 //! instance of the "documented, versioned binary contract" decoupling generator
-//! from frontend (DESIGN.md §6). It is NOT the final format: quantized positions,
-//! packed normal/light, and a texture-array layer index all land in P2–P4. v1
-//! exists to get pixels into a browser and to pin the encode/decode handshake.
+//! from frontend (DESIGN.md §6). Later versions add textures (v3), fluids, and
+//! quantized attributes (v6); v1 remains the asset-free flat-color format.
 //!
 //! All little-endian (matches x86/arm64 and the browser). Arrays are laid out so
 //! every f32/u32 block stays 4-byte aligned for zero-copy typed-array views.

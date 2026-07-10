@@ -4,10 +4,10 @@
 //!   vantage mesh  <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
 //!       Decode a rectangular range of chunks (region-local coords 0..31,
 //!       inclusive; default 0 0 0 0 = one chunk), build a culled cube mesh, and
-//!       write a v1 `.vtile`. This is the P1 vertical slice: world file -> tile.
+//!       write a v1 `.vtile` — the asset-free flat-color path.
 //!
 //!   vantage histo <region.mca> [localX localZ]
-//!       P0-style block histogram for one chunk (default 0 0). Also runs when no
+//!       Block histogram for one chunk (default 0 0). Also runs when no
 //!       subcommand is given, for back-compat: `vantage <region.mca> [lx lz]`.
 
 const std = @import("std");
@@ -355,7 +355,7 @@ fn dataRootFromAssets(a: std.mem.Allocator, assets: []const u8) []const u8 {
 
 /// `vantage render <save-dir>` — the friendly entry point: auto-discover the
 /// world's region directory and the extracted assets, then render the WHOLE
-/// populated world as a grid of streamable tiles + a manifest (P4). Each tile
+/// populated world as a grid of streamable tiles + a manifest. Each tile
 /// spans `--tile-chunks`² chunks and is meshed with a 1-chunk apron of
 /// neighbour data, so culling, AO, light (range 15 < 16-block apron), and
 /// biome blending are seam-free across tile borders.

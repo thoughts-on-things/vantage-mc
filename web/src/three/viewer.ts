@@ -371,7 +371,7 @@ export class VantageViewer {
     this.disposeCurrent();
     const palette = biomePalette(manifest.biomes.length);
     // Quantized mode: tiles upload their on-disk u16/i8 encoding verbatim and
-    // the shader dequantizes — the decode-stutter fix (see terrain.ts).
+    // the shader dequantizes, so decode costs no main-thread time (see terrain.ts).
     const shader = createTerrainMaterial(texData, { quantized: true, palette });
     const waterShader = createWaterMaterial(shader);
     shader.uniforms['uFogRadial']!.value = 1.0; // fog radially from the focus, not by view depth

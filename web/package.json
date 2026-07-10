@@ -4,6 +4,9 @@
   "description": "Render a Minecraft (Java) world as a fast, beautiful 3D web map. The web frontend for the Vantage generator.",
   "type": "module",
   "license": "MIT",
+  "author": "Luis Padron",
+  "homepage": "https://github.com/thoughts-on-things/vantage-mc#readme",
+  "bugs": "https://github.com/thoughts-on-things/vantage-mc/issues",
   "repository": {
     "type": "git",
     "url": "https://github.com/thoughts-on-things/vantage-mc.git",

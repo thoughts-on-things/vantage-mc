@@ -201,17 +201,18 @@ Direction (to be specified concretely in P1–P4):
 Tracer-bullet phases; each ends in something runnable and verifiable.
 
 - **P0 — Parsing spike. ✅ DONE.** Read region → decompress (zlib/C interop) →
-  parse NBT → unpack paletted block-states → block histogram. Validated on Paper
-  1.21.4 (`DataVersion 4189`, 24 sections, correct distribution). Locked Zig 0.16.
+  parse NBT → unpack paletted block-states → block histogram. Validated on a
+  Paper 1.21.4 world (`DataVersion 4189`, 24 sections, correct distribution).
+  Locked Zig 0.16.
 - **P1 — Vertical slice (pixels). ✅ DONE.** Dense block-grid assembler (multi-
   chunk, cross-chunk culling) → naive culled **indexed** cube mesh → versioned
   binary tile (`VTL1`: positions, RGBA, normals, u32 indices) → three.js viewer.
   Block appearance is a curated per-block average-color table (a deliberate
-  stand-in; the real vanilla-asset/texture resolver is P2). Validated on the
-  beacon 1.21.4 world: a 176-chunk patch renders as recognizable terrain (grass/
+  stand-in; the real vanilla-asset/texture resolver is P2). Validated on a
+  Paper 1.21.4 world: a 176-chunk patch renders as recognizable terrain (grass/
   dirt/stone strata, acacia trees, caves, bedrock floor) matching the histogram.
-  See `docs/p1-render.png`. New modules: `blocks.zig`, `chunk.zig`, `grid.zig`,
-  `mesh.zig`, `tile.zig`; `web/` viewer.
+  New modules: `blocks.zig`, `chunk.zig`, `grid.zig`, `mesh.zig`, `tile.zig`;
+  `web/` viewer.
 - **P2 — Full model resolver. ✅ CORE + accuracy done.** Implemented (`model.zig`,
   `texture.zig`, textured path in `mesh.zig`, `VTL3` tile + `VTA1` texture array,
   `sampler2DArray` viewer shader): blockstate variants, **state-accurate variant
@@ -222,7 +223,7 @@ Tracer-bullet phases; each ends in something runnable and verifiable.
   defaults, `#texture` var resolution, cullface culling (rotation-correct),
   **leaf occlusion** (clean canopies), PNG decode (vendored stb_image),
   normalized texture-array build, and per-vertex ambient occlusion.
-  Validated on the beacon world: acacia trees, grass/plants (diagonal crosses),
+  Validated on a Paper 1.21.4 world: acacia trees, grass/plants (diagonal crosses),
   axis-oriented logs all render correctly. *Remaining hardening:* uvlock, fluids/
   waterlogging, KTX2/Basis supercompression, and **asset auto-download** (today:
   manual jar extract via `just extract`; Zig 0.16 has `std.http.Client.fetch` +
@@ -244,12 +245,15 @@ Tracer-bullet phases; each ends in something runnable and verifiable.
   a biome, legend-hover preview, and hover-to-identify. First interactive map
   layer — biome borders read at a glance. *Later:* per-block height-adjusted
   temperature, a 2D top-down biome map, and a natural-colour biome mode.
-- **P3 — Mesher hardening.** Hybrid greedy meshing; AO + light bake; fluids,
-  waterlogging, transparency sorting; block-entity placeholders. *Done = a full
-  region renders correctly vs in-game / BlueMap reference.*
-- **P4 — Tiling, LOD, incremental.** Quadtree pyramid; multi-layer heightmap
-  lowres; fine-grained change detection + incremental re-mesh; storage + manifest.
-  *Done = a large world streams with working LOD.*
+- **P3 — Mesher hardening. ✅ CORE DONE.** Hybrid greedy meshing, AO + computed
+  sky/block light bake, fluids and waterlogging all landed. *Remaining:*
+  transparency sorting edge cases; block-entity placeholders.
+- **P4 — Tiling, LOD, incremental. ✅ CORE DONE.** The whole populated world
+  bakes into gzip-wrapped quantized tiles + a manifest; the viewer streams them
+  around the camera with GPU dequantization; a quadtree lowres pyramid (colored
+  heightfields, ~1% of hires bytes) keeps the entire world visible out to a
+  satellite view. *Remaining:* fine-grained change detection + incremental
+  re-mesh.
 - **P5 — Frontend maturity.** SSE LOD + geomorph; frustum cull; WebGPU tier;
   post-FX (SSAO, shadows, atmosphere, water); markers/UI.
 - **P5.5 — Live actors (Tier 1).** Daemon websocket spine + interpolated player/
@@ -290,5 +294,5 @@ Tracer-bullet phases; each ends in something runnable and verifiable.
   `max(4, ceil(log2(len)))`, so a ≤16-entry palette is **4** bits, not 5.
 - **Decompression**: system zlib via C interop today; vendor **libdeflate** /
   **zstd** for the production decode path. We deliberately avoid `std.compress`.
-- **Test data**: the local `beacon` Paper 1.21.4 server world (which also has
-  BlueMap installed) is a convenient correctness + visual-comparison reference.
+- **Test data**: a Paper server world with BlueMap installed makes a convenient
+  correctness + visual-comparison reference.

@@ -1,8 +1,8 @@
 //! Computed sky + block light (flood fill).
 //!
-//! Minecraft region files frequently omit saved `SkyLight`/`BlockLight` — it's
-//! common for tool-generated or externally-processed worlds (our test world has
-//! none). So, like BlueMap, we compute light ourselves rather than read it.
+//! Minecraft region files frequently omit saved `SkyLight`/`BlockLight` —
+//! common for tool-generated or externally-processed worlds. So, like BlueMap,
+//! we compute light ourselves rather than read it.
 //!
 //! Two breadth-first passes over the dense block grid:
 //!  - **Sky**: every cell with an open vertical path to the top starts at 15;

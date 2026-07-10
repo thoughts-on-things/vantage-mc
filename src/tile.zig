@@ -1,8 +1,8 @@
 //! Vantage binary tile format v1 (`.vtile`).
 //!
 //! A deliberately minimal, versioned, indexed geometry blob — the simplest
-//! instance of the "documented, versioned binary contract" decoupling generator
-//! from frontend (DESIGN.md §6). Later versions add textures (v3), fluids, and
+//! instance of the documented, versioned binary contract decoupling generator
+//! from frontend. Later versions add textures (v3), fluids, and
 //! quantized attributes (v6); v1 remains the asset-free flat-color format.
 //!
 //! All little-endian (matches x86/arm64 and the browser). Arrays are laid out so

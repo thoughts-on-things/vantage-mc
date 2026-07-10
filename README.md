@@ -6,8 +6,7 @@
 A high-performance Minecraft (Java Edition) world → 3D web map renderer, written in Zig.
 
 Vantage turns a Minecraft world into a fast, beautiful, navigable 3D map in the
-browser — a from-scratch reimagining of [BlueMap](https://github.com/BlueMap-Minecraft/BlueMap)
-with four ordered goals:
+browser, built around four ordered goals:
 
 1. **Performance** — generate maps of large worlds as fast as possible, using as
    little CPU, RAM, and disk as possible.
@@ -48,8 +47,6 @@ Measured on a dense 7,225-chunk 1.21 world (Windows, ReleaseFast): **~23 s**
 end-to-end for 81 tiles + a 3-level LOD pyramid, 125 MB on disk (970 MB of raw
 geometry before cave culling and gzip), streaming at 120+ FPS with ~16M
 triangles resident.
-
-See **[DESIGN.md](./DESIGN.md)** for the full architecture, decisions, and roadmap.
 
 ## Quick start
 

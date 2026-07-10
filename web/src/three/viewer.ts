@@ -62,7 +62,7 @@ export interface DisplaySettings {
 }
 
 /** The single, vanilla-faithful display look: neutral grade, full haze, native
- *  scale — clean flat-lit colours that read like the game / a BlueMap render. */
+ *  scale — clean flat-lit colours that read like the game. */
 export const VANILLA_DISPLAY: Required<DisplaySettings> = {
   sharpness: 0,
   ao: 1,
@@ -290,11 +290,11 @@ export class VantageViewer {
     this.sky = createSky();
     this.scene.add(this.sky);
 
-    // FOV 75 matches BlueMap — a wider lens than a "photographic" 60° gives the
+    // FOV 75 — a wider lens than a "photographic" 60° gives the
     // perspective convergence that reads as a real 3D view over the world rather
     // than a flat isometric map. Framing compensates (see fitDistance).
     this.camera = new THREE.PerspectiveCamera(75, 1, 0.5, 8000);
-    // BlueMap-faithful map navigation: left-drag grabs and pans the ground,
+    // Map navigation: left-drag grabs and pans the ground,
     // right-drag (or alt+left) orbits — horizontal rotates, vertical tilts —
     // wheel zooms. Everything carries inertia; tilt auto-flattens to top-down as
     // you zoom out, and the pivot rides the terrain surface. See controls.ts.
@@ -530,7 +530,7 @@ export class VantageViewer {
       this.scene.add(sun);
     }
 
-    // Let the controls' pivot ride the terrain surface (BlueMap's feel), from
+    // Let the controls' pivot ride the terrain surface, from
     // the same top-down heightmap the biome picker uses.
     this.controls.heightAt = makeHeightSampler(tile.surface);
     this._biomes = summarizeBiomes(tile, built.palette);

@@ -29,7 +29,7 @@ pub const Grid = struct {
     ids: []u16,
     /// Packed light per voxel: `(sky << 4) | block`, each 0..15. Allocated here
     /// but flood-filled by the mesher's light pass (see `light.zig`) — Minecraft
-    /// worlds frequently omit saved light, so we compute it the way BlueMap does.
+    /// worlds frequently omit saved light, so we compute it ourselves.
     /// Filled for *every* cell including air, because a face's brightness comes
     /// from the light of the air cell it faces, not the block it belongs to.
     /// Cells start at open sky (0xF0) before the light pass runs.

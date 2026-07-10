@@ -10,7 +10,6 @@ reports, and PRs are all welcome.
 | `src/` | The native generator (Zig): region/NBT parsing, model resolver, mesher, tile encoder |
 | `web/` | The `vantage-mc` npm package (tile decoder, three.js renderer, React components) and its demo app |
 | `vendor/` | Vendored C libraries (libdeflate, stb_image) — don't edit, update wholesale |
-| `DESIGN.md` | Architecture, locked decisions, and the roadmap — read this first for anything non-trivial |
 
 ## Dev setup
 

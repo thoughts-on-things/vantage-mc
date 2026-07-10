@@ -83,7 +83,7 @@ fn parseLightQuality(args: []const []const u8) mesh.LightQuality {
     return .smooth;
 }
 
-/// Scan args for `--caves off|<y>` (default `55`, the BlueMap default). Faces
+/// Scan args for `--caves off|<y>` (default `55`). Faces
 /// below this world Y that only look into dark (sky-light-0) cells are culled —
 /// they are invisible from any above-ground view and dominate tile size on
 /// modern worlds. `off` renders full cave geometry.

@@ -3,7 +3,7 @@
 //! Collects the block textures referenced by resolved models, decodes each PNG
 //! (vendored stb_image, C interop), normalizes it to a fixed TILE×TILE RGBA
 //! layer, and packs them into a single layered array. This is the data behind a
-//! WebGL2 **texture array** (DESIGN §6) — not a 2D atlas, so greedy-quad UV
+//! WebGL2 **texture array** — not a 2D atlas, so greedy-quad UV
 //! repeat and NEAREST sampling work without the Minecraft mip/seam bug.
 //!
 //! Layer 0 is always a magenta/black "missing" checker, so an unresolved or

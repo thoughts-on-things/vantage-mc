@@ -1,6 +1,6 @@
 //! Anvil region (.mca) reader.
 //!
-//! Layout (see DESIGN.md / minecraft.wiki "Region file format"):
+//! Layout (see minecraft.wiki "Region file format"):
 //!   0x0000..0x0FFF  location table: 1024 x 4-byte BE entries
 //!                   [3-byte sector offset][1-byte sector count]
 //!   0x1000..0x1FFF  timestamp table (ignored here)

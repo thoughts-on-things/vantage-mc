@@ -2,9 +2,9 @@
 //!
 //! NBT is big-endian. We parse a decompressed chunk into an arena-backed tree
 //! and provide small typed accessors — intentionally simple; a streaming/visitor
-//! parser that avoids the intermediate tree is a possible future optimization
-//! (see DESIGN.md). All allocations come from a caller-provided arena, so there
-//! is no per-tag free.
+//! parser that avoids the intermediate tree is a possible future optimization.
+//! All allocations come from a caller-provided arena, so there is no per-tag
+//! free.
 
 const std = @import("std");
 

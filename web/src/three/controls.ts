@@ -1,5 +1,4 @@
-// Map navigation controls, reimplemented faithfully from BlueMap's map controls
-// (BlueMap-Minecraft/BlueMap, `common/webapp/src/js/controls/map`). Unlike
+// Map navigation controls. Unlike
 // three.js Orbit/MapControls, the camera is never driven directly: the controls
 // own a small state model — a look-at `position` (pivot), a `distance` (the
 // zoom), an azimuth `rotation`, and a top-down-relative `angle` (pitch) — and
@@ -9,7 +8,7 @@
 // into a per-motion buffer; each frame a fraction `smoothing` of the buffer is
 // applied to the state and the remainder decays. With no fresh input the leftover
 // buffer keeps applying and decaying, so releases glide to a stop — the momentum
-// that makes BlueMap feel good. Tilt is clamped to a zoom-dependent maximum, so
+// that makes a map feel good. Tilt is clamped to a zoom-dependent maximum, so
 // the view auto-flattens to top-down as you zoom out, and tilting in pulls the
 // camera closer (a coupled dolly). An optional terrain-height sampler lets the
 // pivot ride the surface so panning a tilted view stays "on" the ground.
@@ -36,7 +35,7 @@ function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-// BlueMap's springy bounds: instead of a hard clamp, pull a fraction `k` toward
+// Springy bounds: instead of a hard clamp, pull a fraction `k` toward
 // the bound each frame so corrections ease in rather than snap.
 function softMin(v: number, min: number, k: number): number {
   return v >= min ? v : v + (min - v) * k;
@@ -67,8 +66,8 @@ export class MapControls {
 
   /** Active control scheme. `'map'` orbits/pans a ground pivot (distance > 0);
    *  `'fly'` is a free-flight spectator camera — the eye sits AT `position`
-   *  (distance 0), full perspective, pitch free across the whole sky. This is
-   *  BlueMap's two-mode model over one shared camera state. */
+   *  (distance 0), full perspective, pitch free across the whole sky. Both
+   *  modes share one camera state. */
   mode: 'map' | 'fly' = 'map';
   /** Free-flight move speed; the wheel scales it (0.05‥5) while in `'fly'`. */
   moveSpeed = 0.5;
@@ -123,10 +122,10 @@ export class MapControls {
 
   private readonly keys = new Set<string>();
 
-  // dt smoothing (BlueMap clamps spikes and EMAs the frame time).
+  // dt smoothing: clamp spikes and EMA the frame time.
   private avgDt = 16;
 
-  // Terrain-follow state (BlueMap's MapHeightControls), temporally smoothed: the
+  // Terrain-follow state, temporally smoothed: the
   // surface height under the pivot, and the surface height under the camera (for
   // the min-camera-height clearance term).
   private targetHeight = 0;
@@ -328,8 +327,8 @@ export class MapControls {
   /** Advance the simulation by `deltaMs` and update the camera. Returns whether
    *  anything moved this frame. */
   update(deltaMs: number): boolean {
-    // Clamp lag spikes (min 20 UPS) and EMA the frame time, exactly as BlueMap,
-    // so smoothing stays stable through jank.
+    // Clamp lag spikes (min 20 UPS) and EMA the frame time, so smoothing stays
+    // stable through jank.
     const dt = deltaMs > 50 ? 50 : deltaMs <= 0 ? 16 : deltaMs;
     this.avgDt = this.avgDt * 0.9 + dt * 0.1;
     const d = this.avgDt;
@@ -378,17 +377,16 @@ export class MapControls {
 
   // --- per-frame smoothing factor --------------------------------------------
 
-  /** BlueMap's smoothing: `stiffness` is the per-frame lerp at 60fps, scaled by
+  /** `stiffness` is the per-frame lerp at 60fps, scaled by
    *  the (averaged) frame time so feel is frame-rate independent. */
   private smoothing(stiffness: number, dt: number): number {
     return clamp(stiffness / (16.666 / dt), 0, 1);
   }
 
-  /** Max tilt (radians from top-down) allowed at a dolly distance — BlueMap's
-   *  curve, but scaled to *this* world's zoom range: full tilt up close, eased to
-   *  a flat top-down exactly at `maxDistance`. (BlueMap hardcodes the flatten
-   *  point at ~2005 blocks, which our smaller windows never reach, so zooming out
-   *  could never level the view — the scaling fixes that.) */
+  /** Max tilt (radians from top-down) allowed at a dolly distance, scaled to
+   *  *this* world's zoom range: full tilt up close, eased to a flat top-down
+   *  exactly at `maxDistance` — so zooming all the way out always levels the
+   *  view, whatever the world's size. */
   private maxAngleForDistance(distance: number): number {
     const span = Math.max(this.maxDistance - this.minDistance, 1);
     const t = clamp((distance - this.minDistance) / span, 0, 1);
@@ -445,8 +443,8 @@ export class MapControls {
   }
 
   /** While orbiting from a close-in view, tilting toward the horizon also dollies
-   *  the camera in so the requested tilt becomes legal — BlueMap's coupled
-   *  dolly+pitch. A wheel event cancels it (you asked for a specific distance). */
+   *  the camera in so the requested tilt becomes legal (a coupled dolly+pitch).
+   *  A wheel event cancels it (you asked for a specific distance). */
   private applyDynamicDistance(): void {
     if (!this.orbiting || !this.dynamicDistance) return;
     let target = Math.min(this.startDistance, this.maxDistanceForAngle(this.angle));
@@ -467,14 +465,14 @@ export class MapControls {
     }
     const s = this.smoothing(0.5, dt);
     const h = this.domElement.clientHeight || 1;
-    const k = (1.5 / h) * s; // BlueMap-ish sensitivity, normalized to height
+    const k = (1.5 / h) * s; // sensitivity, normalized to viewport height
     this.rotation += this.lookBuf.x * k; // mouse right → turn right
     this.angle -= this.lookBuf.y * k; // mouse up (movementY < 0) → look up (angle→π)
     this.lookBuf.multiplyScalar(1 - s);
   }
 
   /** Drain the move buffer into the eye position: WASD strafes/advances on the
-   *  heading plane (yaw only, BlueMap-faithful — looking down doesn't sink you),
+   *  heading plane (yaw only — looking down doesn't sink you),
    *  space/shift raise/lower. The `dt·0.06` factor makes the steady-state speed
    *  frame-rate independent. */
   private applyFlyMove(dt: number): void {
@@ -541,18 +539,14 @@ export class MapControls {
   }
 
   /** Keep the orbit pivot on the terrain surface so the view rotates and tilts
-   *  about the ground under the screen centre — modelled on BlueMap's
-   *  MapHeightControls, adapted to our (small, finite) world.
+   *  about the ground under the screen centre.
    *
    *  The pivot Y rides the single-column surface height + 3, temporally smoothed
    *  (so panning over uneven ground glides, doesn't bob). A `minCameraHeight`
    *  term lifts the pivot just enough that the orbiting camera clears the terrain
    *  it hovers over at steep tilt (no dipping below ground / staring into the
-   *  void). BlueMap also relaxes the pivot toward y=0 by `distance/500`; we drop
-   *  that — calibrated for 1500-block default zoom on huge worlds, at our zoom
-   *  range it sank the pivot well below the surface right where you tilt. Riding
-   *  the surface is harmless zoomed out, where the view is forced near top-down
-   *  (insensitive to pivot Y). */
+   *  void). Riding the surface is harmless zoomed out, where the view is forced
+   *  near top-down (insensitive to pivot Y). */
   private applyHeight(dt: number): void {
     if (!this.heightAt) return;
 
@@ -847,7 +841,7 @@ export class MapControls {
     if (e.deltaMode === 1) delta *= 16; // lines → ~pixels
     else if (e.deltaMode === 2) delta *= 100; // pages
     if (this.mode === 'fly') {
-      // In free-flight the wheel trims fly speed (BlueMap), not the dolly.
+      // In free-flight the wheel trims fly speed, not the dolly.
       this.moveSpeed = clamp(this.moveSpeed * Math.pow(1.0016, -delta), 0.05, 5);
       return;
     }

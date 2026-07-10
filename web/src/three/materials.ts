@@ -61,7 +61,7 @@ const VERT = /* glsl */ `
     vBlk = (light - sky * 16.0) / 15.0;
     // Water surface waves come from real mesh geometry (Minecraft flowing-water
     // heights, baked in the mesher) — the normal here carries the slope, so the
-    // waves catch light. No vertex animation (BlueMap renders water static too).
+    // waves catch light. No vertex animation — the water is static.
     vN = normalize(mat3(modelMatrix) * nrm);
     vec4 wp = modelMatrix * vec4(pos, 1.0);
     vec4 mv = viewMatrix * wp;
@@ -164,8 +164,8 @@ const FRAG = /* glsl */ `
     vec3 fogCol = toLinear(uFogColor);
     vec3 N = normalize(vN);
 
-    // Water pass: a semi-transparent blue tint over the normally-lit seabed —
-    // BlueMap-style. The depth read comes from the SEABED darkening (sky light is
+    // Water pass: a semi-transparent blue tint over the normally-lit seabed.
+    // The depth read comes from the SEABED darkening (sky light is
     // attenuated through water in the light pass), seen through the clear surface,
     // NOT from fading the water to opaque. So keep the surface fairly transparent
     // so sand/gravel/seagrass show through; the wave look is the real flowing-water
@@ -176,7 +176,7 @@ const FRAG = /* glsl */ `
       wcol = mix(wcol, wcol * vec3(0.55, 0.66, 0.85), depth * 0.7); // deep water cools + deepens
       vec3 Nw = normalize(vN);
       float ndl2 = max(dot(Nw, normalize(lightDir)), 0.0);
-      // Flat-lit like BlueMap (mostly the water colour × baked light); only a small
+      // Flat-lit (mostly the water colour × baked light); only a small
       // directional term so the wave-slope normals read, no blown-out sun sheen.
       vec3 wlit = grade(wcol * (0.62 + 0.28 * SUN * ndl2) * lightAmt * lightCol * uExposure);
       float wf = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity;

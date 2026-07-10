@@ -73,12 +73,16 @@ pub const Registry = struct {
     data_root: []const u8,
     cache: std.StringHashMap(BiomeInfo),
     missing: usize = 0,
+    /// Guards `cache`/`missing` when tiles are meshed on multiple threads.
+    mutex: std.Io.Mutex = .init,
 
     pub fn init(arena: std.mem.Allocator, io: std.Io, data_root: []const u8) Registry {
         return .{ .arena = arena, .io = io, .data_root = data_root, .cache = std.StringHashMap(BiomeInfo).init(arena) };
     }
 
     pub fn lookup(self: *Registry, name: []const u8) BiomeInfo {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const base = stripNs(name);
         if (self.cache.get(base)) |b| return b;
         const info = self.load(base) catch blk: {

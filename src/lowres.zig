@@ -56,6 +56,8 @@ pub const SurfaceColors = struct {
     maps: biome.Colormaps,
     reg: *biome.Registry,
     memo: std.StringHashMap(Base),
+    /// Guards `memo` when tiles build color maps on multiple threads.
+    mutex: std.Io.Mutex = .init,
 
     pub const Base = struct { rgb: [3]u8, tint: biome.Tint };
 
@@ -80,6 +82,8 @@ pub const SurfaceColors = struct {
     /// tint it), from its resolved model's up face. Falls back to any face,
     /// then to the curated flat block color, so it never fails.
     pub fn baseFor(self: *SurfaceColors, name: []const u8, state: []const u8) Base {
+        self.mutex.lockUncancelable(self.resolver.io);
+        defer self.mutex.unlock(self.resolver.io);
         const key = std.fmt.allocPrint(self.arena, "{s}\x00{s}", .{ name, state }) catch return fallbackBase(name);
         const gop = self.memo.getOrPut(key) catch return fallbackBase(name);
         if (gop.found_existing) return gop.value_ptr.*;
@@ -104,7 +108,7 @@ pub const SurfaceColors = struct {
         }
         const face = chosen orelse return fallbackBase(name);
         const layer = self.tex.layerFor(face.texture);
-        const avg = averageLayer(self.tex.layers.items[layer]) orelse return fallbackBase(name);
+        const avg = averageLayer(self.tex.layerPixels(layer)) orelse return fallbackBase(name);
         const tint: biome.Tint = if (face.tintindex >= 0) biome.blockTint(name) else .none;
         return .{ .rgb = avg, .tint = tint };
     }

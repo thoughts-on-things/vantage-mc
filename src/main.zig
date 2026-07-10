@@ -57,6 +57,7 @@ fn usage() error{MissingArgument} {
         \\usage:
         \\  vantage render  <world-save-dir> [--assets <dir>] [--out <dir>] [--tile-chunks <n>]
         \\                  [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off] [--caves off|<y>]
+        \\                  [--threads <n>]
         \\      Render the whole populated world as streamable tiles + manifest.json
         \\      (default out: web/public). --radius caps to a window around spawn.
         \\  vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
@@ -95,6 +96,17 @@ fn parseCaveY(args: []const []const u8) ?i32 {
         return std.fmt.parseInt(i32, args[i + 1], 10) catch 55;
     }
     return 55;
+}
+
+/// Scan args for `--threads <n>`. Null means "not given" — the render defaults
+/// to the logical CPU count. `--threads 1` renders tiles serially.
+fn parseThreads(args: []const []const u8) ?usize {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--threads")) continue;
+        return std.fmt.parseInt(usize, args[i + 1], 10) catch null;
+    }
+    return null;
 }
 
 /// Scan args for `--biome-blend on|off` (default `on`). When on, biome tint
@@ -397,7 +409,8 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         return error.NoRegions;
     };
 
-    const home = init.environ_map.get("HOME") orelse "";
+    const home = init.environ_map.get("HOME") orelse
+        init.environ_map.get("USERPROFILE") orelse ""; // Windows has no HOME
     const assets = assets_opt orelse (try findAssets(a, init.io, home)) orelse {
         std.debug.print(
             \\no extracted assets found. Get them from a client jar first:
@@ -458,27 +471,34 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     // Long-lived shared state: the model resolver (+ cross-tile memo), texture
     // builder (one texture array for every tile), biome registry/colormaps/lang,
     // and the world-level biome table that keeps per-vertex biome ids globally
-    // consistent across tiles.
-    var memo = std.StringHashMap([]model.ResolvedModel).init(a);
-    const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = assets, .memo = &memo };
-    var builder = try texture.Builder.init(a, init.io, assets);
+    // consistent across tiles. Tiles render on worker threads, so everything
+    // long-lived allocates through `sa` — a mutex-guarded view of the run arena
+    // — and each shared cache takes its own lock around structural mutation.
+    var locked: LockedAllocator = .{ .child = a, .io = init.io };
+    const sa = locked.allocator();
+
+    var resolver_lock: std.Io.Mutex = .init;
+    var memo = std.StringHashMap([]model.ResolvedModel).init(sa);
+    const resolver: model.Resolver = .{ .arena = sa, .io = init.io, .root = assets, .memo = &memo, .lock = &resolver_lock };
+    var builder = try texture.Builder.init(sa, init.io, assets);
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
-    var reg = biome.Registry.init(a, init.io, data_root);
+    var reg = biome.Registry.init(sa, init.io, data_root);
     const names = lang.Lang.load(a, init.io, assets);
 
+    var world_mutex: std.Io.Mutex = .init;
     var world_raw: std.ArrayList([]const u8) = .empty; // biome resource names, id-indexed
     var world_display: std.ArrayList([]const u8) = .empty; // legend labels, id-indexed
-    var world_biome_ids = std.StringHashMap(u16).init(a);
-    try world_raw.append(a, "");
-    try world_display.append(a, "");
+    var world_biome_ids = std.StringHashMap(u16).init(sa);
+    try world_raw.append(sa, "");
+    try world_display.append(sa, "");
 
     var manifest_tiles: std.ArrayList(TileEntry) = .empty;
 
     // Lowres LOD source data: every tile also yields a per-column color map
     // (kept for the whole run — ~80 KB per tile), downsampled into the quadtree
     // pyramid after the main loop.
-    var surf_colors = lowres.SurfaceColors.init(a, resolver, &builder, maps, &reg);
+    var surf_colors = lowres.SurfaceColors.init(sa, resolver, &builder, maps, &reg);
     var color_maps = std.AutoHashMap(u64, *lowres.ColorMap).init(a);
     const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
 
@@ -489,6 +509,59 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     defer root.end();
     const tiles_node = root.start("rendering tiles", tile_keys.len);
 
+    const t0 = std.Io.Timestamp.now(init.io, .awake);
+
+    // ---- parallel tile rendering --------------------------------------------
+    // Workers pull tile indices from an atomic counter; each renders into its
+    // own slot of `results`, so the manifest keeps its deterministic (z,x)
+    // order no matter how tiles interleave. Peak memory is one tile's working
+    // set per thread (each worker keeps a reusable arena).
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const thread_count = @max(1, @min(parseThreads(args) orelse cpu_count, tile_keys.len));
+
+    const results = try a.alloc(TileResult, tile_keys.len);
+    for (results) |*r| r.* = .{};
+    var next_tile = std.atomic.Value(usize).init(0);
+
+    var ctx: RenderCtx = .{
+        .io = init.io,
+        .sa = sa,
+        .loaded = loaded,
+        .tile_keys = tile_keys,
+        .tile_chunks = tile_chunks,
+        .out_dir = out_dir,
+        .quality = quality,
+        .blend_biomes = blend_biomes,
+        .cave_y = cave_y,
+        .resolver = resolver,
+        .builder = &builder,
+        .maps = maps,
+        .reg = &reg,
+        .names = &names,
+        .surf_colors = &surf_colors,
+        .world_mutex = &world_mutex,
+        .world_raw = &world_raw,
+        .world_display = &world_display,
+        .world_biome_ids = &world_biome_ids,
+        .results = results,
+        .next = &next_tile,
+        .progress = tiles_node,
+    };
+
+    {
+        var group: std.Io.Group = .init;
+        for (0..thread_count - 1) |_| {
+            // If a helper can't get a thread, the remaining workers cover it.
+            group.concurrent(init.io, tileWorker, .{&ctx}) catch break;
+        }
+        tileWorker(&ctx); // the calling thread is worker 0
+        group.await(init.io) catch |err| switch (err) {
+            error.Canceled => unreachable, // nothing cancels the render
+        };
+    }
+    tiles_node.end();
+
+    // Merge per-tile results in key order (deterministic manifest).
     var stats: grid.Stats = .{};
     var total_solid_verts: u64 = 0;
     var total_fluid_verts: u64 = 0;
@@ -499,94 +572,28 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var light_ms: i64 = 0;
     var mesh_ms: i64 = 0;
     var write_ms: i64 = 0;
-    const t0 = std.Io.Timestamp.now(init.io, .awake);
-
-    // Per-tile arena, reset (capacity retained) between tiles so peak memory is
-    // one tile's working set, not the whole world's.
-    var tile_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer tile_arena.deinit();
-
-    for (tile_keys) |key| {
-        defer tiles_node.completeOne();
-        _ = tile_arena.reset(.retain_capacity);
-        const ta = tile_arena.allocator();
-        const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
-        const tz: i32 = @bitCast(@as(u32, @truncate(key)));
-
-        // Window = the tile's chunks plus a 1-chunk apron on every side.
-        const cx0 = tx * tile_chunks - 1;
-        const cz0 = tz * tile_chunks - 1;
-        const cx1 = (tx + 1) * tile_chunks;
-        const cz1 = (tz + 1) * tile_chunks;
-
-        const t_r0 = std.Io.Timestamp.now(init.io, .awake);
-        const g = try world.assembleWindow(ta, loaded, cx0, cz0, cx1, cz1, &stats, null);
-        read_ms += t_r0.durationTo(std.Io.Timestamp.now(init.io, .awake)).toMilliseconds();
-        if (g.ids.len == 0) continue;
-
-        // Remap this grid's interned biome ids onto the world-level table so
-        // every tile's vertex biome ids agree (and one legend serves them all).
-        const remap = try ta.alloc(u16, g.biome_names.len);
-        if (remap.len > 0) remap[0] = 0;
-        for (g.biome_names[1..], 1..) |bn, gi| {
-            const gop = try world_biome_ids.getOrPut(bn);
-            if (!gop.found_existing) {
-                const dup = try a.dupe(u8, bn); // bn lives in the tile arena
-                gop.key_ptr.* = dup;
-                const id: u16 = @intCast(world_raw.items.len);
-                try world_raw.append(a, dup);
-                try world_display.append(a, names.biomeName(a, dup));
-                gop.value_ptr.* = id;
-            }
-            remap[gi] = gop.value_ptr.*;
+    for (results, tile_keys) |*r, key| {
+        if (r.err) |e| {
+            const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+            const tz: i32 = @bitCast(@as(u32, @truncate(key)));
+            std.debug.print("tile ({d},{d}) failed: {s}\n", .{ tx, tz, @errorName(e) });
+            return e;
         }
-        for (g.biome_ids) |*b| b.* = remap[b.*];
-        var g2 = g;
-        g2.biome_names = world_raw.items;
-
-        // The tile's interior (its own chunks, apron excluded) in grid coords.
-        const bx0 = @as(i64, tx) * tile_chunks * 16;
-        const bz0 = @as(i64, tz) * tile_chunks * 16;
-        const bx1 = bx0 + @as(i64, tile_chunks) * 16;
-        const bz1 = bz0 + @as(i64, tile_chunks) * 16;
-        const interior: grid.Interior = .{
-            .x0 = @intCast(std.math.clamp(bx0 - g2.min_x, 0, @as(i64, @intCast(g2.sx)))),
-            .z0 = @intCast(std.math.clamp(bz0 - g2.min_z, 0, @as(i64, @intCast(g2.sz)))),
-            .x1 = @intCast(std.math.clamp(bx1 - g2.min_x, 0, @as(i64, @intCast(g2.sx)))),
-            .z1 = @intCast(std.math.clamp(bz1 - g2.min_z, 0, @as(i64, @intCast(g2.sz)))),
-        };
-        if (interior.x0 >= interior.x1 or interior.z0 >= interior.z1) continue;
-
-        const t_m0 = std.Io.Timestamp.now(init.io, .awake);
-        const built = try mesh.buildTextured(ta, g2, resolver, &builder, maps, &reg, quality, blend_biomes, interior, cave_y, null);
-        light_ms += built.light_ms;
-        mesh_ms += t_m0.durationTo(std.Io.Timestamp.now(init.io, .awake)).toMilliseconds() - built.light_ms;
-        if (built.solid.vertex_count == 0 and built.fluid.vertex_count == 0) continue;
-
-        const surface = try grid.buildSurface(ta, g2, interior);
-        const geo = try tile.serializeWithSurfaceQuantized(ta, built.solid, built.fluid, surface, world_display.items);
-
-        // The tile's lowres source map (long-lived: feeds the pyramid later).
-        const cmap = try a.create(lowres.ColorMap);
-        cmap.* = try lowres.buildColorMap(a, g2, interior, &surf_colors, @intCast(bx0), @intCast(bz0), @intCast(tile_blocks));
-        try color_maps.put(key, cmap);
-
-        // Tiles ship gzip-wrapped (~8× smaller): any static host can serve
-        // them and the viewer inflates via native DecompressionStream.
-        const t_w0 = std.Io.Timestamp.now(init.io, .awake);
-        const zipped = try compress.gzipCompress(ta, geo, 6);
-        const tile_path = try std.fmt.allocPrint(ta, "{s}/tiles/t.{d}.{d}.vtile", .{ out_dir, tx, tz });
-        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = tile_path, .data = zipped });
-        write_ms += t_w0.durationTo(std.Io.Timestamp.now(init.io, .awake)).toMilliseconds();
-
-        try manifest_tiles.append(a, .{ .tx = tx, .tz = tz, .bytes = zipped.len });
-        total_solid_verts += built.solid.vertex_count;
-        total_fluid_verts += built.fluid.vertex_count;
-        total_tris += built.solid.triangleCount() + built.fluid.triangleCount();
-        total_bytes += zipped.len;
-        total_raw_bytes += geo.len;
+        stats.chunks_loaded += r.stats.chunks_loaded;
+        stats.chunks_missing += r.stats.chunks_missing;
+        read_ms += r.read_ms;
+        light_ms += r.light_ms;
+        mesh_ms += r.mesh_ms;
+        write_ms += r.write_ms;
+        if (!r.written) continue;
+        try manifest_tiles.append(a, r.entry);
+        if (r.cmap) |cm| try color_maps.put(key, cm);
+        total_solid_verts += r.solid_verts;
+        total_fluid_verts += r.fluid_verts;
+        total_tris += r.tris;
+        total_bytes += r.entry.bytes;
+        total_raw_bytes += r.raw_bytes;
     }
-    tiles_node.end();
 
     // ---- lowres LOD pyramid -------------------------------------------------
     // Downsample the per-tile color maps 2× per level until the world fits in
@@ -722,9 +729,214 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         total_fluid_verts,
         out_dir,
     });
-    std.debug.print("timings: total {d}ms · read {d}ms · light {d}ms · geometry {d}ms · write {d}ms\n", .{
-        t0.durationTo(t_end).toMilliseconds(), read_ms, light_ms, mesh_ms, write_ms,
+    std.debug.print("timings: wall {d}ms on {d} thread(s) · cpu: read {d}ms · light {d}ms · geometry {d}ms · write {d}ms\n", .{
+        t0.durationTo(t_end).toMilliseconds(), thread_count, read_ms, light_ms, mesh_ms, write_ms,
     });
+}
+
+/// Mutex-guarded view of a non-thread-safe allocator (the run arena), for
+/// allocations that outlive one tile while tiles render on worker threads.
+/// Everything still lives — and is freed — with the arena.
+const LockedAllocator = struct {
+    child: std.mem.Allocator,
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
+
+    fn allocator(self: *LockedAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *LockedAllocator = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.child.vtable.alloc(self.child.ptr, len, alignment, ret_addr);
+    }
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *LockedAllocator = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.child.vtable.resize(self.child.ptr, memory, alignment, new_len, ret_addr);
+    }
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *LockedAllocator = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.child.vtable.remap(self.child.ptr, memory, alignment, new_len, ret_addr);
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *LockedAllocator = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.child.vtable.free(self.child.ptr, memory, alignment, ret_addr);
+    }
+};
+
+/// Everything the tile workers share. Fields are either immutable for the
+/// duration of the parallel section or guarded by the lock noted on their type
+/// (resolver memo, texture builder, biome registry, surface-color memo) or by
+/// `world_mutex` (the world-level biome table).
+const RenderCtx = struct {
+    io: std.Io,
+    /// Locked view of the run arena — safe for cross-thread allocations.
+    sa: std.mem.Allocator,
+    loaded: []const world.LoadedRegion,
+    tile_keys: []const u64,
+    tile_chunks: i32,
+    out_dir: []const u8,
+    quality: mesh.LightQuality,
+    blend_biomes: bool,
+    cave_y: ?i32,
+    resolver: model.Resolver,
+    builder: *texture.Builder,
+    maps: biome.Colormaps,
+    reg: *biome.Registry,
+    names: *const lang.Lang,
+    surf_colors: *lowres.SurfaceColors,
+    world_mutex: *std.Io.Mutex,
+    world_raw: *std.ArrayList([]const u8),
+    world_display: *std.ArrayList([]const u8),
+    world_biome_ids: *std.StringHashMap(u16),
+    results: []TileResult,
+    next: *std.atomic.Value(usize),
+    progress: std.Progress.Node,
+};
+
+/// One tile's outcome, written only by the worker that owns the slot.
+const TileResult = struct {
+    err: ?anyerror = null,
+    /// False for empty tiles (nothing meshed) — skipped in the manifest.
+    written: bool = false,
+    entry: TileEntry = .{ .tx = 0, .tz = 0, .bytes = 0 },
+    cmap: ?*lowres.ColorMap = null,
+    solid_verts: u64 = 0,
+    fluid_verts: u64 = 0,
+    tris: u64 = 0,
+    raw_bytes: u64 = 0,
+    stats: grid.Stats = .{},
+    read_ms: i64 = 0,
+    light_ms: i64 = 0,
+    mesh_ms: i64 = 0,
+    write_ms: i64 = 0,
+};
+
+/// Worker loop: pull the next tile index, render it, repeat. Each worker keeps
+/// one arena, reset (capacity retained) between tiles, so peak memory is one
+/// tile's working set per thread.
+fn tileWorker(ctx: *RenderCtx) void {
+    var tile_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer tile_arena.deinit();
+    while (true) {
+        const idx = ctx.next.fetchAdd(1, .monotonic);
+        if (idx >= ctx.tile_keys.len) return;
+        _ = tile_arena.reset(.retain_capacity);
+        renderOneTile(ctx, tile_arena.allocator(), idx) catch |e| {
+            ctx.results[idx].err = e;
+        };
+        ctx.progress.completeOne();
+    }
+}
+
+/// Render tile `idx`: assemble its chunk window (+1 apron), remap biome ids
+/// onto the world table, mesh, serialize, gzip, and write the `.vtile`.
+fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
+    const res = &ctx.results[idx];
+    const key = ctx.tile_keys[idx];
+    const tile_chunks = ctx.tile_chunks;
+    const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+    const tz: i32 = @bitCast(@as(u32, @truncate(key)));
+
+    // Window = the tile's chunks plus a 1-chunk apron on every side.
+    const cx0 = tx * tile_chunks - 1;
+    const cz0 = tz * tile_chunks - 1;
+    const cx1 = (tx + 1) * tile_chunks;
+    const cz1 = (tz + 1) * tile_chunks;
+
+    const t_r0 = std.Io.Timestamp.now(ctx.io, .awake);
+    const g = try world.assembleWindow(ta, ctx.loaded, cx0, cz0, cx1, cz1, &res.stats, null);
+    res.read_ms = t_r0.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).toMilliseconds();
+    if (g.ids.len == 0) return;
+
+    // Remap this grid's interned biome ids onto the world-level table so every
+    // tile's vertex biome ids agree (and one legend serves them all). The
+    // snapshots taken under the lock are what this tile meshes/serializes
+    // against — another worker may grow (and reallocate) the live table, but
+    // every id this tile uses is below the snapshot's length.
+    const remap = try ta.alloc(u16, g.biome_names.len);
+    var raw_names: [][]const u8 = &.{};
+    var display_names: [][]const u8 = &.{};
+    {
+        ctx.world_mutex.lockUncancelable(ctx.io);
+        defer ctx.world_mutex.unlock(ctx.io);
+        if (remap.len > 0) remap[0] = 0;
+        for (g.biome_names[1..], 1..) |bn, gi| {
+            const gop = try ctx.world_biome_ids.getOrPut(bn);
+            if (!gop.found_existing) {
+                const dup = try ctx.sa.dupe(u8, bn); // bn lives in the tile arena
+                gop.key_ptr.* = dup;
+                const id: u16 = @intCast(ctx.world_raw.items.len);
+                try ctx.world_raw.append(ctx.sa, dup);
+                try ctx.world_display.append(ctx.sa, ctx.names.biomeName(ctx.sa, dup));
+                gop.value_ptr.* = id;
+            }
+            remap[gi] = gop.value_ptr.*;
+        }
+        raw_names = try ta.dupe([]const u8, ctx.world_raw.items);
+        display_names = try ta.dupe([]const u8, ctx.world_display.items);
+    }
+    for (g.biome_ids) |*b| b.* = remap[b.*];
+    var g2 = g;
+    g2.biome_names = raw_names;
+
+    // The tile's interior (its own chunks, apron excluded) in grid coords.
+    const bx0 = @as(i64, tx) * tile_chunks * 16;
+    const bz0 = @as(i64, tz) * tile_chunks * 16;
+    const bx1 = bx0 + @as(i64, tile_chunks) * 16;
+    const bz1 = bz0 + @as(i64, tile_chunks) * 16;
+    const interior: grid.Interior = .{
+        .x0 = @intCast(std.math.clamp(bx0 - g2.min_x, 0, @as(i64, @intCast(g2.sx)))),
+        .z0 = @intCast(std.math.clamp(bz0 - g2.min_z, 0, @as(i64, @intCast(g2.sz)))),
+        .x1 = @intCast(std.math.clamp(bx1 - g2.min_x, 0, @as(i64, @intCast(g2.sx)))),
+        .z1 = @intCast(std.math.clamp(bz1 - g2.min_z, 0, @as(i64, @intCast(g2.sz)))),
+    };
+    if (interior.x0 >= interior.x1 or interior.z0 >= interior.z1) return;
+
+    const t_m0 = std.Io.Timestamp.now(ctx.io, .awake);
+    const built = try mesh.buildTextured(ta, g2, ctx.resolver, ctx.builder, ctx.maps, ctx.reg, ctx.quality, ctx.blend_biomes, interior, ctx.cave_y, null);
+    res.light_ms = built.light_ms;
+    res.mesh_ms = t_m0.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).toMilliseconds() - built.light_ms;
+    if (built.solid.vertex_count == 0 and built.fluid.vertex_count == 0) return;
+
+    const surface = try grid.buildSurface(ta, g2, interior);
+    const geo = try tile.serializeWithSurfaceQuantized(ta, built.solid, built.fluid, surface, display_names);
+
+    // The tile's lowres source map (long-lived: feeds the pyramid later).
+    const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
+    const cmap = try ctx.sa.create(lowres.ColorMap);
+    cmap.* = try lowres.buildColorMap(ctx.sa, g2, interior, ctx.surf_colors, @intCast(bx0), @intCast(bz0), @intCast(tile_blocks));
+    res.cmap = cmap;
+
+    // Tiles ship gzip-wrapped (~8× smaller): any static host can serve
+    // them and the viewer inflates via native DecompressionStream.
+    const t_w0 = std.Io.Timestamp.now(ctx.io, .awake);
+    const zipped = try compress.gzipCompress(ta, geo, 6);
+    const tile_path = try std.fmt.allocPrint(ta, "{s}/tiles/t.{d}.{d}.vtile", .{ ctx.out_dir, tx, tz });
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = tile_path, .data = zipped });
+    res.write_ms = t_w0.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).toMilliseconds();
+
+    res.entry = .{ .tx = tx, .tz = tz, .bytes = zipped.len };
+    res.solid_verts = built.solid.vertex_count;
+    res.fluid_verts = built.fluid.vertex_count;
+    res.tris = built.solid.triangleCount() + built.fluid.triangleCount();
+    res.raw_bytes = geo.len;
+    res.written = true;
 }
 
 /// One rendered tile's manifest record.

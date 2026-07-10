@@ -6,6 +6,8 @@ import react from '@vitejs/plugin-react';
 // live in public/ and are served at the web root (e.g. /terrain.vtile).
 export default defineConfig({
   plugins: [react()],
-  server: { port: 8753, host: '127.0.0.1' },
+  // PORT lets a harness (or `PORT=… npm run dev`) pick a free port; 8753 stays
+  // the human-friendly default (`just serve`).
+  server: { port: Number(process.env['PORT']) || 8753, host: '127.0.0.1' },
   build: { outDir: 'dist-demo' },
 });

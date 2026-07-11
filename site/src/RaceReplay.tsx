@@ -68,10 +68,12 @@ export function RaceReplay() {
   const rootRef = useRef<HTMLDivElement>(null);
   const finish = Math.max(...LANES.map((l) => l.total));
 
-  // Autoplay the first time the section scrolls into view.
+  // Autoplay the first time the section scrolls into view (never for
+  // reduced-motion users — the play button is theirs).
   useEffect(() => {
     const el = rootRef.current;
     if (!el || !('IntersectionObserver' in window)) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     const io = new IntersectionObserver(
       (entries) => {
         if (entries.some((e) => e.isIntersecting) && !started.current) {

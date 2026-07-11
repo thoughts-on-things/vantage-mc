@@ -1219,7 +1219,9 @@ fn findAssets(a: std.mem.Allocator, io: std.Io, home: []const u8) !?[]const u8 {
 /// Natural-order compare for version-ish directory names, so "1.21.10" beats
 /// "1.21.4", and the year-versioned scheme ("26.2", 2026+) beats both (lexical
 /// order gets all of these wrong). Digit runs compare numerically, everything
-/// else byte-wise.
+/// else byte-wise. A `-suffix` marks a pre-release, so "26.2" beats
+/// "26.2-pre-4" — otherwise auto-picking would prefer release candidates over
+/// the release they precede.
 fn versionLessThan(a_name: []const u8, b_name: []const u8) bool {
     var i: usize = 0;
     var j: usize = 0;
@@ -1242,6 +1244,10 @@ fn versionLessThan(a_name: []const u8, b_name: []const u8) bool {
             j += 1;
         }
     }
+    // One name is a prefix of the other. If the remainder starts with `-`, the
+    // longer name is a pre-release of the shorter — it sorts BELOW the release.
+    if (i >= a_name.len and j < b_name.len and b_name[j] == '-') return false;
+    if (j >= b_name.len and i < a_name.len and a_name[i] == '-') return true;
     return (a_name.len - i) < (b_name.len - j);
 }
 
@@ -1255,6 +1261,11 @@ test versionLessThan {
     try std.testing.expect(versionLessThan("25.4", "26.2"));
     try std.testing.expect(versionLessThan("26.2", "26.10"));
     try std.testing.expect(!versionLessThan("default", "1.21.4") or versionLessThan("1.21.4", "default"));
+    // Pre-releases sort below the release they precede, but above older releases.
+    try std.testing.expect(versionLessThan("26.2-pre-4", "26.2"));
+    try std.testing.expect(!versionLessThan("26.2", "26.2-pre-4"));
+    try std.testing.expect(versionLessThan("26.2-pre-4", "26.2-pre-5"));
+    try std.testing.expect(versionLessThan("26.1.2", "26.2-pre-4"));
 }
 
 fn dirExists(io: std.Io, path: []const u8) bool {

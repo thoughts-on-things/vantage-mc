@@ -753,6 +753,28 @@ h2 em {
   color: var(--blue);
 }
 
+/* The winning cell of each row — whoever it belongs to. */
+.compare .compare-win {
+  position: relative;
+  background: rgba(87, 208, 106, 0.09);
+  color: var(--ink);
+  font-weight: 650;
+  box-shadow: inset 2px 0 0 var(--green);
+}
+
+.compare-chip {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 9px;
+  border: 1px solid rgba(87, 208, 106, 0.4);
+  border-radius: 999px;
+  font: 600 10.5px var(--mono);
+  letter-spacing: 0.04em;
+  color: var(--green);
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+
 .compare-note {
   margin: 14px 4px 0;
   font-size: 13px;
@@ -859,6 +881,8 @@ h2 em {
   font-size: 12.5px;
   line-height: 1.6;
   overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-bright) transparent;
 }
 
 .steps .p {

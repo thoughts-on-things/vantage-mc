@@ -207,17 +207,23 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
             <tbody>
               <tr>
                 <th>Full render, start to finish</th>
-                <td className="compare-vantage">4.7 s</td>
+                <td className="compare-vantage compare-win">
+                  4.7 s <span className="compare-chip">6× faster</span>
+                </td>
                 <td>28.3 s</td>
               </tr>
               <tr>
                 <th>Map size on disk</th>
                 <td className="compare-vantage">132 MB</td>
-                <td>74 MB</td>
+                <td className="compare-win">
+                  74 MB <span className="compare-chip">1.8× smaller</span>
+                </td>
               </tr>
               <tr>
                 <th>Runtime</th>
-                <td className="compare-vantage">one native binary</td>
+                <td className="compare-vantage compare-win">
+                  one native binary <span className="compare-chip">no Java</span>
+                </td>
                 <td>Java 25 JVM</td>
               </tr>
               <tr>
@@ -257,7 +263,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
 
       <section className="how" id="how">
         <p className="kicker reveal">how it works</p>
-        <h2 className="reveal">Two commands, no ceremony</h2>
+        <h2 className="reveal">From save to shared map in minutes</h2>
         <ol className="steps">
           <li className="reveal">
             <h3>Get vantage</h3>
@@ -265,7 +271,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
               <code>
                 <span className="c"># one small static binary — Linux, macOS, Windows</span>
                 {'\n'}
-                <span className="p">$</span> curl -LO {'…'}/releases/latest/vantage-x86_64-linux.tar.gz
+                <span className="p">$</span> curl -sL{' '}
+                {`${GITHUB.replace('https://', '')}/releases/latest/download/vantage-x86_64-linux.tar.gz`} | tar xz
               </code>
             </pre>
             <p>

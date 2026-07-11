@@ -1,14 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { File as NodeFile } from 'node:buffer';
 import { worldFromDirectory, worldFromFiles, worldFromUrl } from '../src/core/index.js';
+
+// Node 18 (the documented floor) has no global File; node:buffer's is the
+// same class that becomes the global in Node 20+.
+const FileImpl = (globalThis.File ?? NodeFile) as typeof File;
 
 const MANIFEST = { format: 1, tileChunks: 8, tileBlocks: 128, textures: 'terrain.vtexarr', biomes: [], tiles: [] };
 
 function jsonFile(value: unknown): File {
-  return new File([JSON.stringify(value)], 'manifest.json');
+  return new FileImpl([JSON.stringify(value)], 'manifest.json');
 }
 
 function binFile(name: string, bytes: number[]): File {
-  return new File([new Uint8Array(bytes)], name);
+  return new FileImpl([new Uint8Array(bytes)], name);
 }
 
 /** Files as `<input webkitdirectory>` presents them: paths via `pathOf`. */
@@ -68,12 +73,12 @@ function dirHandle(name: string, tree: Record<string, unknown>): FileSystemDirec
     name,
     getDirectoryHandle: (child: string) => {
       const node = tree[child];
-      if (typeof node !== 'object' || node === null || node instanceof File) return Promise.reject(new Error('NotFound'));
+      if (typeof node !== 'object' || node === null || node instanceof FileImpl) return Promise.reject(new Error('NotFound'));
       return Promise.resolve(dirHandle(child, node as Record<string, unknown>));
     },
     getFileHandle: (child: string) => {
       const node = tree[child];
-      if (!(node instanceof File)) return Promise.reject(new Error('NotFound'));
+      if (!(node instanceof FileImpl)) return Promise.reject(new Error('NotFound'));
       return Promise.resolve({ name: child, getFile: () => Promise.resolve(node) });
     },
   } as unknown as FileSystemDirectoryHandle;

@@ -225,7 +225,26 @@ export function encodeVTL6(): ArrayBuffer {
   return w.buffer();
 }
 
-export function encodeTextureArray(width = 2, height = 2, layers = 3): ArrayBuffer {
+export interface EncodedAnim {
+  base: number;
+  count: number;
+  frametime: number;
+  interpolate: boolean;
+}
+
+/** Version 2: an animation table follows the pixels (empty by default). */
+export function encodeTextureArray(width = 2, height = 2, layers = 3, anims: EncodedAnim[] = []): ArrayBuffer {
+  const w = new Writer();
+  w.magic('VTA1').u32(2).u32(width).u32(height).u32(layers);
+  const n = width * height * layers * 4;
+  w.u8a(Array.from({ length: n }, (_, i) => i % 256));
+  w.u32(anims.length);
+  for (const a of anims) w.u32(a.base).u16(a.count).u16(a.frametime).u8a([a.interpolate ? 1 : 0, 0, 0, 0]);
+  return w.buffer();
+}
+
+/** The legacy version-1 layout: header + pixels, no animation table. */
+export function encodeTextureArrayV1(width = 2, height = 2, layers = 3): ArrayBuffer {
   const w = new Writer();
   w.magic('VTA1').u32(1).u32(width).u32(height).u32(layers);
   const n = width * height * layers * 4;

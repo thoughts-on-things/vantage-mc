@@ -769,6 +769,10 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     });
     const manifest_path = try std.fmt.allocPrint(a, "{s}/manifest.json", .{out_dir});
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = manifest_path, .data = manifest });
+    // Re-rendering onto an existing output dir can leave tiles from a previous
+    // bake behind; now that the manifest is written, sweep anything tile-shaped
+    // it doesn't reference.
+    const stale_removed = sweepStaleTiles(a, init.io, out_dir, manifest_tiles.items, lowres_levels.items);
     tex_node.end();
     const t_end = std.Io.Timestamp.now(init.io, .awake);
 
@@ -800,6 +804,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         total_fluid_verts,
         out_dir,
     });
+    if (stale_removed > 0) std.debug.print("cleanup: removed {d} stale tile file(s) from a previous render\n", .{stale_removed});
     std.debug.print("timings: wall {d}ms on {d} thread(s) · cpu: read {d}ms · light {d}ms · geometry {d}ms · write {d}ms\n", .{
         t0.durationTo(t_end).toMilliseconds(), thread_count, read_ms, light_ms, mesh_ms, write_ms,
     });
@@ -1033,6 +1038,94 @@ const ManifestInput = struct {
     tiles: []const TileEntry,
     lowres: []const LowresLevel = &.{},
 };
+
+/// Whether `name` is a render-owned tile file: `t.<x>.<z>.vtile` (hires) or
+/// `l<level>.<x>.<z>.vlr` (lowres). The stale sweep only ever touches names
+/// this recognizes — anything else in the output dir is left alone.
+fn isTileFileName(name: []const u8) bool {
+    if (std.mem.startsWith(u8, name, "t.") and std.mem.endsWith(u8, name, ".vtile")) {
+        var it = std.mem.splitScalar(u8, name["t.".len .. name.len - ".vtile".len], '.');
+        for (0..2) |_| {
+            _ = std.fmt.parseInt(i32, it.next() orelse return false, 10) catch return false;
+        }
+        return it.next() == null;
+    }
+    if (name.len > 1 and name[0] == 'l' and std.mem.endsWith(u8, name, ".vlr")) {
+        var it = std.mem.splitScalar(u8, name[1 .. name.len - ".vlr".len], '.');
+        _ = std.fmt.parseInt(u5, it.next() orelse return false, 10) catch return false;
+        for (0..2) |_| {
+            _ = std.fmt.parseInt(i32, it.next() orelse return false, 10) catch return false;
+        }
+        return it.next() == null;
+    }
+    return false;
+}
+
+/// Delete tile files in `{out_dir}/tiles` left over from a previous render —
+/// names the just-written manifest no longer references (a re-render with a
+/// different tile grid or a shrunken world leaves them behind: unreachable,
+/// but they waste disk and confuse anyone inspecting the directory). Only
+/// exact tile-shaped names (see `isTileFileName`) are candidates. Returns the
+/// number removed; all failures are swallowed — a stale file is cosmetic,
+/// never worth failing a finished render over.
+fn sweepStaleTiles(
+    a: std.mem.Allocator,
+    io: std.Io,
+    out_dir: []const u8,
+    tiles: []const TileEntry,
+    lowres_levels: []const LowresLevel,
+) usize {
+    var expected = std.StringHashMap(void).init(a);
+    for (tiles) |t| {
+        const name = std.fmt.allocPrint(a, "t.{d}.{d}.vtile", .{ t.tx, t.tz }) catch return 0;
+        expected.put(name, {}) catch return 0;
+    }
+    for (lowres_levels) |lvl| {
+        for (lvl.tiles) |t| {
+            const name = std.fmt.allocPrint(a, "l{d}.{d}.{d}.vlr", .{ lvl.level, t.x, t.z }) catch return 0;
+            expected.put(name, {}) catch return 0;
+        }
+    }
+
+    const dir_path = std.fmt.allocPrint(a, "{s}/tiles", .{out_dir}) catch return 0;
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return 0;
+    defer dir.close(io);
+
+    // Collect first, delete after: removing entries mid-iteration can skip
+    // files on some filesystems. Entry names point into the iterator's reused
+    // buffer, so they must be duped.
+    var stale: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (true) {
+        const e = (it.next(io) catch break) orelse break;
+        if (e.kind != .file) continue;
+        if (!isTileFileName(e.name)) continue;
+        if (expected.contains(e.name)) continue;
+        stale.append(a, a.dupe(u8, e.name) catch break) catch break;
+    }
+    var removed: usize = 0;
+    for (stale.items) |name| {
+        dir.deleteFile(io, name) catch continue;
+        removed += 1;
+    }
+    return removed;
+}
+
+test "isTileFileName accepts render-owned tiles and nothing else" {
+    try std.testing.expect(isTileFileName("t.0.0.vtile"));
+    try std.testing.expect(isTileFileName("t.-12.4.vtile"));
+    try std.testing.expect(isTileFileName("l3.-1.7.vlr"));
+    // Wrong shape, wrong extension, non-numeric keys, extra segments.
+    try std.testing.expect(!isTileFileName("t.0.vtile"));
+    try std.testing.expect(!isTileFileName("t.0.0.0.vtile"));
+    try std.testing.expect(!isTileFileName("t.a.b.vtile"));
+    try std.testing.expect(!isTileFileName("t.0.0.vtile.bak"));
+    try std.testing.expect(!isTileFileName("l.0.0.vlr"));
+    try std.testing.expect(!isTileFileName("l3.0.vlr"));
+    try std.testing.expect(!isTileFileName("manifest.json"));
+    try std.testing.expect(!isTileFileName("terrain.vtexarr"));
+    try std.testing.expect(!isTileFileName("notes.txt"));
+}
 
 /// Serialize the world manifest — the small JSON the viewer streams tiles from.
 /// Hand-rolled (the shape is tiny and fixed) to stay off the std.json churn.

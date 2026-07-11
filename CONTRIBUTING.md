@@ -48,7 +48,7 @@ serves the demo viewer over them.
 ## Before you open a PR
 
 - `just ci` passes (CI runs the same: `zig fmt --check`, tests, build).
-- For web changes: `npm run typecheck && npm test` in `web/`.
+- For web changes: `npm ci && npm run ci && npm run build:demo` in `web/`.
 - New behavior comes with a test where practical — decoder/format changes in
   particular (there are inline `test` blocks in the Zig sources and vitest
   suites in `web/test/`).
@@ -56,6 +56,24 @@ serves the demo viewer over them.
   `VLR*`) or manifest `format` rather than silently changing the layout, and
   keep the decoder able to read every version the generator ever emitted.
 - Keep PRs focused; separate refactors from behavior changes.
+
+### Commits and releases
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) for changes
+that should appear in a release: `feat:` creates a minor release and `fix:` or
+`perf:` creates a patch release. Add `!` (for example, `feat!:`) and a
+`BREAKING CHANGE:` footer for a major release.
+
+Release Please maintains the release PR and changelog from commits merged to
+`main`. Merging that PR creates the tag and GitHub release, cross-compiles the
+five binary archives, and publishes `vantage-mc` to npm with provenance. A
+failed publish job can be retried safely; uploads are overwrite-safe and npm
+publishing first checks whether that exact version already exists.
+
+Maintainers must configure the npm package's trusted publisher once with
+organization `thoughts-on-things`, repository `vantage-mc`, workflow
+`release.yml`, and environment left blank. The workflow uses OIDC and does not
+need an `NPM_TOKEN` secret.
 
 ## Performance matters here
 

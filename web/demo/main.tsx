@@ -1,4 +1,4 @@
-// Demo app — the reference consumer of vantage-mc/react. This is exactly how a
+// Demo app — the reference consumer of the React package entry. This is how a
 // server-admin web app would drop Vantage in: one <VantageViewer> with a
 // <BiomeLayer> child. Tiles are served from web/public/ (regenerate with
 // `just render <save>`). Deep-links: #top frames top-down, #biome opens the

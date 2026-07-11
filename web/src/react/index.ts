@@ -1,4 +1,4 @@
-// vantage-mc/react — drop-in React components. Compose a full viewer in JSX:
+// @thoughts-on-things/vantage-mc/react — drop-in React components for JSX:
 //
 //   <VantageViewer tile="/terrain.vtile" textures="/terrain.vtexarr">
 //     <BiomeLayer legend hover />

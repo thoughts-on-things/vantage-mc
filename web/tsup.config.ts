@@ -1,9 +1,9 @@
 import { defineConfig } from 'tsup';
 
 // Three entry points, each its own importable subpath:
-//   vantage-mc/core   — zero-dep, isomorphic binary-format decoder
-//   vantage-mc/three  — three.js renderer + framework-agnostic viewer engine
-//   vantage-mc/react  — React drop-in components
+//   @thoughts-on-things/vantage-mc/core  — isomorphic binary-format decoder
+//   @thoughts-on-things/vantage-mc/three — three.js renderer + viewer engine
+//   @thoughts-on-things/vantage-mc/react — React drop-in components
 // three / react stay external (peer dependencies of the consumer).
 export default defineConfig({
   entry: {

@@ -23,7 +23,7 @@ browser, built around four ordered goals:
 
 A **native Zig generator** (no JVM, no GC, vendored C decompressors) reads a
 world's region files directly and bakes quantized, indexed geometry tiles plus a
-lowres LOD pyramid; a **thin web renderer** ([`vantage-mc`](./web/README.md) —
+lowres LOD pyramid; a **thin web renderer** ([`@thoughts-on-things/vantage-mc`](./web/README.md) —
 three.js, WebGL2) streams and shades them. The two sides are decoupled by a
 versioned binary tile contract, so each can evolve independently.
 
@@ -114,12 +114,12 @@ The renderer only ever reads the world — it never writes to it. Useful flags:
 
 The output is a static file tree (`manifest.json` + `tiles/` + one texture
 array) — serve it from any web server or object store. The viewer is an
-installable npm package, **[`vantage-mc`](./web/README.md)**, with three layers:
+installable npm package, **[`@thoughts-on-things/vantage-mc`](./web/README.md)**, with three layers:
 a zero-dependency tile decoder, a three.js renderer, and drop-in React
 components:
 
 ```tsx
-import { VantageViewer, BiomeLayer } from 'vantage-mc/react';
+import { VantageViewer, BiomeLayer } from '@thoughts-on-things/vantage-mc/react';
 
 <VantageViewer world="/manifest.json">
   <BiomeLayer legend hover />

@@ -8,7 +8,7 @@ reports, and PRs are all welcome.
 | Path | What it is |
 | --- | --- |
 | `src/` | The native generator (Zig): region/NBT parsing, model resolver, mesher, tile encoder |
-| `web/` | The `vantage-mc` npm package (tile decoder, three.js renderer, React components) and its demo app |
+| `web/` | The `@thoughts-on-things/vantage-mc` npm package (tile decoder, three.js renderer, React components) and its demo app |
 | `vendor/` | Vendored C libraries (libdeflate, stb_image) — don't edit, update wholesale |
 
 ## Dev setup
@@ -66,7 +66,7 @@ that should appear in a release: `feat:` creates a minor release and `fix:` or
 
 Release Please maintains the release PR and changelog from commits merged to
 `main`. Merging that PR creates the tag and GitHub release, cross-compiles the
-five binary archives, and publishes `vantage-mc` to npm with provenance. A
+five binary archives, and publishes `@thoughts-on-things/vantage-mc` to npm with provenance. A
 failed publish job can be retried safely; uploads are overwrite-safe and npm
 publishing first checks whether that exact version already exists.
 

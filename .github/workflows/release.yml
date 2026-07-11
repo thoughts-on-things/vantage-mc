@@ -112,7 +112,7 @@ jobs:
         run: npm pack
 
       - name: Generate checksum
-        run: sha256sum vantage-mc-*.tgz > SHA256SUMS
+        run: sha256sum thoughts-on-things-vantage-mc-*.tgz > SHA256SUMS
 
       - name: Upload package to GitHub release (with retries)
         shell: bash
@@ -121,7 +121,7 @@ jobs:
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
         run: |
           for attempt in 1 2 3; do
-            gh release upload "$TAG_NAME" vantage-mc-*.tgz SHA256SUMS --clobber && exit 0
+            gh release upload "$TAG_NAME" thoughts-on-things-vantage-mc-*.tgz SHA256SUMS --clobber && exit 0
             [ "$attempt" = 3 ] && exit 1
             sleep $((attempt * 10))
           done
@@ -135,11 +135,11 @@ jobs:
           VERSION: ${{ needs.release-please.outputs.version }}
         run: |
           for attempt in 1 2 3; do
-            if npm view "vantage-mc@$VERSION" version >/dev/null 2>&1; then
-              echo "vantage-mc@$VERSION is already published"
+            if npm view "@thoughts-on-things/vantage-mc@$VERSION" version >/dev/null 2>&1; then
+              echo "@thoughts-on-things/vantage-mc@$VERSION is already published"
               exit 0
             fi
-            npm publish --provenance --access public vantage-mc-*.tgz && exit 0
+            npm publish --provenance --access public thoughts-on-things-vantage-mc-*.tgz && exit 0
             [ "$attempt" = 3 ] && exit 1
             sleep $((attempt * 15))
           done

@@ -39,7 +39,15 @@ pub fn build(b: *std.Build) void {
             "vendor/libdeflate/lib/arm/cpu_features.c",
             "vendor/libdeflate/lib/x86/cpu_features.c",
         },
-        .flags = &.{"-std=c99"},
+        // Zig 0.16's Clang can expose AVX-512 intrinsics without carrying the
+        // new evex512 feature through libdeflate's per-function target
+        // attributes. Disable only those optional dispatch variants; the
+        // portable, SSE2, PCLMUL, and AVX2 paths remain available.
+        .flags = &.{
+            "-std=c99",
+            "-DLIBDEFLATE_ASSEMBLER_DOES_NOT_SUPPORT_AVX512VNNI",
+            "-DLIBDEFLATE_ASSEMBLER_DOES_NOT_SUPPORT_VPCLMULQDQ",
+        },
     });
     // Vendored stb_image (PNG decode) — C interop. PNG-only, decode-from-memory
     // (see the impl TU).

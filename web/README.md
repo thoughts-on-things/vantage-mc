@@ -1,4 +1,4 @@
-# vantage-mc
+# @thoughts-on-things/vantage-mc
 
 The web frontend for [Vantage](../README.md) — render a Minecraft (Java) world as
 a fast, beautiful, navigable 3D map in the browser. The native Zig generator bakes
@@ -9,15 +9,15 @@ It ships in three layers so you can enter at whatever altitude you need:
 
 | Import | What it is | Depends on |
 | --- | --- | --- |
-| `vantage-mc/core` | Zero-dependency, isomorphic decoder for the binary tile format | — |
-| `vantage-mc/three` (also the default `vantage-mc`) | three.js meshes/materials + a framework-agnostic viewer engine | `three` |
-| `vantage-mc/react` | Drop-in React components | `three`, `react` |
+| `@thoughts-on-things/vantage-mc/core` | Zero-dependency, isomorphic decoder for the binary tile format | — |
+| `@thoughts-on-things/vantage-mc/three` (also the default package export) | three.js meshes/materials + a framework-agnostic viewer engine | `three` |
+| `@thoughts-on-things/vantage-mc/react` | Drop-in React components | `three`, `react` |
 
 ## Install
 
 ```sh
-npm install vantage-mc three          # core + engine
-npm install react react-dom           # if you use vantage-mc/react
+npm install @thoughts-on-things/vantage-mc three
+npm install react react-dom # if you use the React entry point
 ```
 
 `three`, `react`, and `react-dom` are peer dependencies — you bring your own.
@@ -32,7 +32,7 @@ The whole map in one component. Point it at the manifest the generator produced
 doesn't matter.
 
 ```tsx
-import { VantageViewer, BiomeLayer } from 'vantage-mc/react';
+import { VantageViewer, BiomeLayer } from '@thoughts-on-things/vantage-mc/react';
 
 export function Map() {
   return (
@@ -75,7 +75,7 @@ A single standalone tile (from `vantage meshtex`) still works:
 Reach the engine for custom UI with the `useVantage()` hook or a `ref`:
 
 ```tsx
-import { useVantage } from 'vantage-mc/react';
+import { useVantage } from '@thoughts-on-things/vantage-mc/react';
 
 function Stats() {
   const { info, biomes, hoveredBiome } = useVantage();
@@ -89,8 +89,8 @@ Skip the engine and drop Vantage meshes into a scene you control (your own
 camera, lighting, post-processing):
 
 ```ts
-import { maybeInflate, parseTile, parseTextureArray } from 'vantage-mc/core';
-import { buildTerrain } from 'vantage-mc/three';
+import { maybeInflate, parseTile, parseTextureArray } from '@thoughts-on-things/vantage-mc/core';
+import { buildTerrain } from '@thoughts-on-things/vantage-mc/three';
 
 const tile = parseTile(await maybeInflate(await (await fetch('/tiles/t.0.0.vtile')).arrayBuffer()));
 const tex = parseTextureArray(await maybeInflate(await (await fetch('/terrain.vtexarr')).arrayBuffer()));
@@ -107,8 +107,8 @@ Or stream a whole world into your scene with `TileManager` (shared materials,
 nearest-first fetch queue, distance-based unload, height/biome queries):
 
 ```ts
-import { biomePalette, maybeInflate, parseManifest, parseTextureArray } from 'vantage-mc/core';
-import { createTerrainMaterial, createWaterMaterial, TileManager } from 'vantage-mc/three';
+import { biomePalette, maybeInflate, parseManifest, parseTextureArray } from '@thoughts-on-things/vantage-mc/core';
+import { createTerrainMaterial, createWaterMaterial, TileManager } from '@thoughts-on-things/vantage-mc/three';
 
 const manifest = parseManifest(await (await fetch('/manifest.json')).json());
 const tex = parseTextureArray(await maybeInflate(await (await fetch(manifest.textures)).arrayBuffer()));
@@ -128,7 +128,7 @@ tiles.update(camera.position.x, camera.position.z);
 Or the batteries-included engine without React:
 
 ```ts
-import { VantageViewer } from 'vantage-mc/three';
+import { VantageViewer } from '@thoughts-on-things/vantage-mc/three';
 
 const viewer = await VantageViewer.mount('#app', { world: '/manifest.json' });
 viewer.setBiomeLayer(true);
@@ -138,11 +138,11 @@ viewer.on('stats', ({ loaded, triangleCount }) => { /* streaming HUD */ });
 
 ## Just the format
 
-`vantage-mc/core` has no dependencies and runs anywhere (browser, worker, Node) —
+`@thoughts-on-things/vantage-mc/core` has no dependencies and runs anywhere (browser, worker, Node) —
 use it to inspect or transcode tiles without a renderer:
 
 ```ts
-import { parseTile, summarizeBiomes } from 'vantage-mc/core';
+import { parseTile, summarizeBiomes } from '@thoughts-on-things/vantage-mc/core';
 
 const tile = parseTile(buffer);
 console.log(tile.magic, tile.vertexCount, tile.indexCount / 3, 'tris');
@@ -157,13 +157,13 @@ returns only the fields a given version carries (`textured`, `hasBiome`, `fluid`
 
 ## API surface
 
-**`vantage-mc/core`** — `parseTile`, `parseTextureArray`, `parseManifest`,
+**`@thoughts-on-things/vantage-mc/core`** — `parseTile`, `parseTextureArray`, `parseManifest`,
 `parseLowresTile`, `maybeInflate`, `isGzip`, `tileKey`, `summarizeBiomes`,
 `biomePalette`, `stripNamespace`, `ByteReader`; types `DecodedTile`,
 `MeshSection`, `SurfaceMap`, `DecodedTextureArray`, `WorldManifest`,
 `ManifestTile`, `LowresTile`, `BiomeEntry`, `Rgb`.
 
-**`vantage-mc/three`** — `buildTerrain`, `buildTileMeshes`,
+**`@thoughts-on-things/vantage-mc/three`** — `buildTerrain`, `buildTileMeshes`,
 `buildQuantizedTileMeshes`, `buildLowresMesh`, `TileManager`,
 `createTerrainMaterial`, `createWaterMaterial`, `createLowresMaterial`,
 `createSky`, `pickBiome`, `MapControls`, `VantageViewer` (engine),
@@ -172,7 +172,7 @@ returns only the fields a given version carries (`textured`, `hasBiome`, `fluid`
 `LoadOptions`, `StreamingSettings`, `LightSettings`, `DisplaySettings`,
 `TileInfo`, `ViewMode`. Re-exports all of `core`.
 
-**`vantage-mc/react`** — `<VantageViewer>`, `<BiomeLayer>`, `<SettingsPanel>`,
+**`@thoughts-on-things/vantage-mc/react`** — `<VantageViewer>`, `<BiomeLayer>`, `<SettingsPanel>`,
 `<LightPanel>`, `<MapNav>`, `<Reticle>`, `<Panel>`, `useVantage`,
 `injectStyles`, `QUALITY_PRESETS`; types `VantageViewerProps`,
 `BiomeLayerProps`, `SettingsPanelProps`, `VantageContextValue`,

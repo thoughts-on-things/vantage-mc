@@ -1,4 +1,4 @@
-// vantage-mc/three — the three.js renderer and the framework-agnostic viewer
+// @thoughts-on-things/vantage-mc/three — three.js renderer and viewer
 // engine. Use `buildTerrain` to drop Vantage meshes into your own scene, or
 // `VantageViewer` for a batteries-included orbiting viewer.
 
@@ -37,6 +37,6 @@ export {
   DEFAULT_ORBIT_ANGLE,
 } from './viewer.js';
 
-// Re-export the core decoder so `vantage-mc/three` (and the main entry) are
+// Re-export the core decoder so the three.js and main package entries are
 // self-sufficient for the common case.
 export * from '../core/index.js';

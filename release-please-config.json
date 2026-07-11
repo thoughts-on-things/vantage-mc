@@ -5,7 +5,7 @@
   "include-component-in-tag": false,
   "packages": {
     ".": {
-      "package-name": "vantage-mc",
+      "package-name": "@thoughts-on-things/vantage-mc",
       "extra-files": [
         {
           "type": "json",

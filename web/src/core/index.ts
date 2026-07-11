@@ -1,4 +1,4 @@
-// vantage-mc/core — the zero-dependency, isomorphic binary-format decoder.
+// @thoughts-on-things/vantage-mc/core — isomorphic binary-format decoder.
 // Use this layer to read Vantage tiles anywhere (browser, worker, Node) without
 // pulling in three.js or the DOM.
 

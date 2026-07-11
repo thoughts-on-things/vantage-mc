@@ -21,6 +21,8 @@ npm install react react-dom           # if you use vantage-mc/react
 ```
 
 `three`, `react`, and `react-dom` are peer dependencies — you bring your own.
+The package is ESM-only: CJS consumers need `"type": "module"` or a dynamic
+`import()`.
 
 ## Quick start (React)
 
@@ -156,20 +158,25 @@ returns only the fields a given version carries (`textured`, `hasBiome`, `fluid`
 ## API surface
 
 **`vantage-mc/core`** — `parseTile`, `parseTextureArray`, `parseManifest`,
-`maybeInflate`, `isGzip`, `tileKey`, `summarizeBiomes`, `biomePalette`,
-`stripNamespace`, `ByteReader`; types `DecodedTile`, `MeshSection`,
-`SurfaceMap`, `DecodedTextureArray`, `WorldManifest`, `ManifestTile`,
-`BiomeEntry`, `Rgb`.
+`parseLowresTile`, `maybeInflate`, `isGzip`, `tileKey`, `summarizeBiomes`,
+`biomePalette`, `stripNamespace`, `ByteReader`; types `DecodedTile`,
+`MeshSection`, `SurfaceMap`, `DecodedTextureArray`, `WorldManifest`,
+`ManifestTile`, `LowresTile`, `BiomeEntry`, `Rgb`.
 
-**`vantage-mc/three`** — `buildTerrain`, `buildTileMeshes`, `TileManager`,
-`createTerrainMaterial`, `createWaterMaterial`, `createSky`, `pickBiome`,
-`VantageViewer` (engine); types `TerrainObjects`, `TileMeshes`,
-`TileManagerOptions`, `TileStats`, `VantageViewerOptions`, `LoadOptions`,
-`StreamingSettings`, `TileInfo`, `ViewMode`. Re-exports all of `core`.
+**`vantage-mc/three`** — `buildTerrain`, `buildTileMeshes`,
+`buildQuantizedTileMeshes`, `buildLowresMesh`, `TileManager`,
+`createTerrainMaterial`, `createWaterMaterial`, `createLowresMaterial`,
+`createSky`, `pickBiome`, `MapControls`, `VantageViewer` (engine),
+`VANILLA_DISPLAY`, `DEFAULT_ORBIT_ANGLE`; types `TerrainObjects`,
+`TileMeshes`, `TileManagerOptions`, `TileStats`, `VantageViewerOptions`,
+`LoadOptions`, `StreamingSettings`, `LightSettings`, `DisplaySettings`,
+`TileInfo`, `ViewMode`. Re-exports all of `core`.
 
-**`vantage-mc/react`** — `<VantageViewer>`, `<BiomeLayer>`, `useVantage`,
-`injectStyles`; types `VantageViewerProps`, `BiomeLayerProps`,
-`VantageContextValue`.
+**`vantage-mc/react`** — `<VantageViewer>`, `<BiomeLayer>`, `<SettingsPanel>`,
+`<LightPanel>`, `<MapNav>`, `<Reticle>`, `<Panel>`, `useVantage`,
+`injectStyles`, `QUALITY_PRESETS`; types `VantageViewerProps`,
+`BiomeLayerProps`, `SettingsPanelProps`, `VantageContextValue`,
+`VantageStatus`. Re-exports the engine and core types.
 
 ## Develop
 

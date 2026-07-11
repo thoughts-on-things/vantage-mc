@@ -113,6 +113,9 @@ export class MapControls {
   // WORLD-space shift (not pixels): the amount that keeps the grabbed ground
   // point pinned under the cursor, accumulated per event and drained with inertia.
   private readonly _ndc = new THREE.Vector3();
+  // Scratch for updateCamera() — it runs every frame, so no per-call allocs.
+  private readonly _orbitV = new THREE.Vector3();
+  private readonly _orbitAxis = new THREE.Vector3();
   private readonly _gpA = new THREE.Vector2();
   private readonly _gpB = new THREE.Vector2();
 
@@ -654,8 +657,8 @@ export class MapControls {
   private updateCamera(): void {
     // Place the camera on the orbit: a horizontal bearing from `rotation`, lifted
     // toward vertical by (π/2 − angle), at `distance` from the pivot.
-    const rv = new THREE.Vector3(Math.sin(this.rotation), 0, -Math.cos(this.rotation));
-    const axis = new THREE.Vector3(0, 1, 0).cross(rv).normalize();
+    const rv = this._orbitV.set(Math.sin(this.rotation), 0, -Math.cos(this.rotation));
+    const axis = this._orbitAxis.set(0, 1, 0).cross(rv).normalize();
     rv.applyAxisAngle(axis, HALF_PI - this.angle);
     rv.multiplyScalar(this.distance);
     this.camera.position.copy(this.position).sub(rv);

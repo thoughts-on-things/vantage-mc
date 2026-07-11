@@ -1,8 +1,13 @@
 const std = @import("std");
+const manifest = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // Single source of truth for `vantage --version`.
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", manifest.version);
 
     const exe = b.addExecutable(.{
         .name = "vantage",
@@ -17,6 +22,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    exe.root_module.addOptions("build_options", options);
     // Vendored libdeflate (chunk/level.dat decompression): whole-buffer zlib +
     // gzip decode, ~2-3× faster than system zlib. Decompression-only subset.
     exe.root_module.addIncludePath(b.path("vendor/libdeflate"));

@@ -219,7 +219,11 @@ export interface TerrainMaterialOptions {
   palette?: readonly Rgb[];
 }
 
-/** A 1-row RGBA8 texture holding the biome palette, indexed by biome id. */
+/** A 1-row RGBA8 texture holding the biome palette, indexed by biome id.
+ *  Deliberately left at `NoColorSpace`: entries are sRGB-authored and the
+ *  shader does its own `toLinear()` on the sampled value (matching the
+ *  non-quantized `abcol` path) — setting `SRGBColorSpace` here would decode
+ *  twice and wash the palette out. */
 function paletteTexture(palette: readonly Rgb[]): THREE.DataTexture {
   const n = Math.max(1, palette.length);
   const data = new Uint8Array(4 * n);

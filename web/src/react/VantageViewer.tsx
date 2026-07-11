@@ -13,6 +13,7 @@ import {
   type TextureSource,
   type TileInfo,
   type TileSource,
+  type TileStats,
   type ViewMode,
 } from '../three/index.js';
 import { VantageContext, type VantageContextValue, type VantageStatus } from './context.js';
@@ -26,7 +27,8 @@ export interface VantageViewerProps {
   tile?: TileSource;
   /** The `.vtexarr` texture array (required for textured tiles). */
   textures?: TextureSource;
-  /** Streaming behaviour for `world` sources (view distance, tile budget). */
+  /** Streaming behaviour for `world` sources (view distance, tile budget).
+   *  Live: changes re-plan in place, like the other setting props. */
   streaming?: StreamingSettings;
   /** Initial camera framing. Default `'orbit'`. */
   view?: ViewMode;
@@ -120,20 +122,30 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     engineRef.current = v;
     setEngine(v);
 
+    let pendingStats: TileStats | null = null;
+    let statsRaf: number | null = null;
+
     const offs = [
       v.on('load', (info) => {
         setS((p) => ({ ...p, status: 'ready', info, biomes: info.biomes, error: null }));
         onLoadRef.current?.(info);
       }),
       // Streamed worlds: keep the HUD's totals and the biome legend live as
-      // tiles come and go.
-      v.on('stats', (stats) =>
-        setS((p) =>
-          p.info
-            ? { ...p, info: { ...p.info, vertexCount: stats.vertexCount, triangleCount: stats.triangleCount } }
-            : p,
-        ),
-      ),
+      // tiles come and go. Stats can fire several times per frame during a big
+      // load and every setS re-renders all context consumers, so coalesce
+      // bursts into one commit per animation frame.
+      v.on('stats', (stats) => {
+        pendingStats = stats;
+        statsRaf ??= requestAnimationFrame(() => {
+          statsRaf = null;
+          const latest = pendingStats!;
+          setS((p) =>
+            p.info
+              ? { ...p, info: { ...p.info, vertexCount: latest.vertexCount, triangleCount: latest.triangleCount } }
+              : p,
+          );
+        });
+      }),
       v.on('biomes', (biomes) => setS((p) => ({ ...p, biomes }))),
       v.on('hover', (id) => setS((p) => (p.hoveredBiome === id ? p : { ...p, hoveredBiome: id }))),
       v.on('biomelayer', ({ enabled, highlight }) =>
@@ -143,6 +155,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
 
     return () => {
       offs.forEach((off) => off());
+      if (statsRaf !== null) cancelAnimationFrame(statsRaf);
       v.dispose();
       engineRef.current = null;
       setEngine(null);
@@ -177,6 +190,11 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
   useEffect(() => {
     if (engine && display) engine.setDisplay(display);
   }, [engine, display?.sharpness, display?.ao, display?.saturation, display?.contrast, display?.fog, display?.renderScale]);
+
+  // Apply live streaming changes (no remount, no re-load).
+  useEffect(() => {
+    if (engine && streaming) engine.setStreaming(streaming);
+  }, [engine, streaming?.viewDistance, streaming?.maxTiles, streaming?.concurrency]);
 
   const ctx = useMemo<VantageContextValue>(
     () => ({

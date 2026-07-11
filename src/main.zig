@@ -33,7 +33,13 @@ pub fn main(init: std.process.Init) !void {
 
     // Dispatch. If args[1] is a known subcommand use it, else treat args[1] as a
     // region path for the legacy histogram form.
-    if (std.mem.eql(u8, args[1], "render")) {
+    if (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "help")) {
+        printUsage();
+        return;
+    } else if (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "version")) {
+        std.debug.print("vantage {s}\n", .{@import("build_options").version});
+        return;
+    } else if (std.mem.eql(u8, args[1], "render")) {
         return runRender(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "mesh")) {
         return runMesh(init, a, args[2..]);
@@ -53,6 +59,11 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn usage() error{MissingArgument} {
+    printUsage();
+    return error.MissingArgument;
+}
+
+fn printUsage() void {
     std.debug.print(
         \\usage:
         \\  vantage render  <world-save-dir> [--assets <dir>] [--out <dir>] [--tile-chunks <n>]
@@ -68,18 +79,18 @@ fn usage() error{MissingArgument} {
         \\  vantage texinfo <assets/minecraft dir> <block-name...>
         \\
     , .{});
-    return error.MissingArgument;
 }
 
 /// Scan args for `--light flat|smooth` (default `smooth`). The bake-time light
 /// quality: `smooth` averages light over each vertex's neighbourhood, `flat`
 /// lights per face. Tolerant of position — both meshtex and render accept it.
-fn parseLightQuality(args: []const []const u8) mesh.LightQuality {
+fn parseLightQuality(args: []const []const u8) error{InvalidArgument}!mesh.LightQuality {
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
         if (!std.mem.eql(u8, args[i], "--light")) continue;
         if (std.mem.eql(u8, args[i + 1], "flat")) return .flat;
         if (std.mem.eql(u8, args[i + 1], "smooth")) return .smooth;
+        return badValue("--light", args[i + 1], "flat|smooth");
     }
     return .smooth;
 }
@@ -88,23 +99,23 @@ fn parseLightQuality(args: []const []const u8) mesh.LightQuality {
 /// below this world Y that only look into dark (sky-light-0) cells are culled —
 /// they are invisible from any above-ground view and dominate tile size on
 /// modern worlds. `off` renders full cave geometry.
-fn parseCaveY(args: []const []const u8) ?i32 {
+fn parseCaveY(args: []const []const u8) error{InvalidArgument}!?i32 {
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
         if (!std.mem.eql(u8, args[i], "--caves")) continue;
         if (std.mem.eql(u8, args[i + 1], "off")) return null;
-        return std.fmt.parseInt(i32, args[i + 1], 10) catch 55;
+        return std.fmt.parseInt(i32, args[i + 1], 10) catch badValue("--caves", args[i + 1], "off|<y>");
     }
     return 55;
 }
 
 /// Scan args for `--threads <n>`. Null means "not given" — the render defaults
 /// to the logical CPU count. `--threads 1` renders tiles serially.
-fn parseThreads(args: []const []const u8) ?usize {
+fn parseThreads(args: []const []const u8) error{InvalidArgument}!?usize {
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
         if (!std.mem.eql(u8, args[i], "--threads")) continue;
-        return std.fmt.parseInt(usize, args[i + 1], 10) catch null;
+        return std.fmt.parseInt(usize, args[i + 1], 10) catch badValue("--threads", args[i + 1], "<n>");
     }
     return null;
 }
@@ -112,14 +123,30 @@ fn parseThreads(args: []const []const u8) ?usize {
 /// Scan args for `--biome-blend on|off` (default `on`). When on, biome tint
 /// colours (grass/foliage/water) are bilinearly blended across biome borders for
 /// smooth vanilla-style gradients; off steps hard at each biome cell.
-fn parseBiomeBlend(args: []const []const u8) bool {
+fn parseBiomeBlend(args: []const []const u8) error{InvalidArgument}!bool {
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
         if (!std.mem.eql(u8, args[i], "--biome-blend")) continue;
         if (std.mem.eql(u8, args[i + 1], "off")) return false;
         if (std.mem.eql(u8, args[i + 1], "on")) return true;
+        return badValue("--biome-blend", args[i + 1], "on|off");
     }
     return true;
+}
+
+fn badValue(flag: []const u8, got: []const u8, want: []const u8) error{InvalidArgument} {
+    std.debug.print("invalid value for {s}: '{s}' (expected {s})\n", .{ flag, got, want });
+    return error.InvalidArgument;
+}
+
+/// Consume and return the value following a `--flag` token, erroring if absent.
+fn flagValue(args: []const []const u8, argi: *usize) error{MissingArgument}![]const u8 {
+    argi.* += 1;
+    if (argi.* >= args.len) {
+        std.debug.print("missing value for {s}\n", .{args[argi.* - 1]});
+        return error.MissingArgument;
+    }
+    return args[argi.*];
 }
 
 fn runTexinfo(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
@@ -280,7 +307,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
-    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, parseLightQuality(args), parseBiomeBlend(args), null, parseCaveY(args), null);
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, try parseLightQuality(args), try parseBiomeBlend(args), null, try parseCaveY(args), 0, null);
     const arr = try builder.finish();
 
     // Resolve human-readable biome names from the language file for the legend.
@@ -359,9 +386,14 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
 /// path isn't in that layout, in which case the registry falls back to defaults.
 fn dataRootFromAssets(a: std.mem.Allocator, assets: []const u8) []const u8 {
     var p = assets;
-    if (std.mem.endsWith(u8, p, "/")) p = p[0 .. p.len - 1];
+    while (p.len > 0 and (p[p.len - 1] == '/' or p[p.len - 1] == '\\')) p = p[0 .. p.len - 1];
     const suffix = "assets/minecraft";
-    if (!std.mem.endsWith(u8, p, suffix)) return "";
+    if (p.len < suffix.len) return "";
+    // Separator-insensitive suffix match so native Windows paths work too.
+    for (p[p.len - suffix.len ..], suffix) |c, s| {
+        const norm: u8 = if (c == '\\') '/' else c;
+        if (norm != s) return "";
+    }
     return std.fmt.allocPrint(a, "{s}data/minecraft", .{p[0 .. p.len - suffix.len]}) catch "";
 }
 
@@ -378,23 +410,31 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var out_dir: []const u8 = "web/public";
     var tile_chunks: i32 = 8; // tile span in chunks (128×128 blocks)
     var radius: i32 = 0; // optional cap: only tiles within ±radius chunks of spawn/centre (0 = whole world)
-    const quality = parseLightQuality(args);
-    const blend_biomes = parseBiomeBlend(args);
-    const cave_y = parseCaveY(args);
+    const quality = try parseLightQuality(args);
+    const blend_biomes = try parseBiomeBlend(args);
+    const cave_y = try parseCaveY(args);
     var argi: usize = 1;
     while (argi < args.len) : (argi += 1) {
-        if (std.mem.eql(u8, args[argi], "--assets") and argi + 1 < args.len) {
-            assets_opt = args[argi + 1];
+        const arg = args[argi];
+        if (std.mem.eql(u8, arg, "--assets")) {
+            assets_opt = try flagValue(args, &argi);
+        } else if (std.mem.eql(u8, arg, "--out")) {
+            out_dir = try flagValue(args, &argi);
+        } else if (std.mem.eql(u8, arg, "--tile-chunks")) {
+            const v = try flagValue(args, &argi);
+            const n = std.fmt.parseInt(i32, v, 10) catch return badValue("--tile-chunks", v, "1..32");
+            tile_chunks = std.math.clamp(n, 1, 32);
+        } else if (std.mem.eql(u8, arg, "--radius")) {
+            const v = try flagValue(args, &argi);
+            radius = std.fmt.parseInt(i32, v, 10) catch return badValue("--radius", v, "<chunks>");
+        } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
+            std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads"))
+        {
+            // Parsed by their dedicated scanners above; skip the value here.
             argi += 1;
-        } else if (std.mem.eql(u8, args[argi], "--out") and argi + 1 < args.len) {
-            out_dir = args[argi + 1];
-            argi += 1;
-        } else if (std.mem.eql(u8, args[argi], "--tile-chunks") and argi + 1 < args.len) {
-            tile_chunks = std.math.clamp(std.fmt.parseInt(i32, args[argi + 1], 10) catch tile_chunks, 1, 32);
-            argi += 1;
-        } else if (std.mem.eql(u8, args[argi], "--radius") and argi + 1 < args.len) {
-            radius = std.fmt.parseInt(i32, args[argi + 1], 10) catch radius;
-            argi += 1;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            std.debug.print("unknown flag for render: {s} (see `vantage --help`)\n", .{arg});
+            return error.InvalidArgument;
         }
     }
 
@@ -517,7 +557,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     // order no matter how tiles interleave. Peak memory is one tile's working
     // set per thread (each worker keeps a reusable arena).
     const cpu_count = std.Thread.getCpuCount() catch 4;
-    const thread_count = @max(1, @min(parseThreads(args) orelse cpu_count, tile_keys.len));
+    const thread_count = @max(1, @min((try parseThreads(args)) orelse cpu_count, tile_keys.len));
 
     const results = try a.alloc(TileResult, tile_keys.len);
     for (results) |*r| r.* = .{};
@@ -533,6 +573,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         .quality = quality,
         .blend_biomes = blend_biomes,
         .cave_y = cave_y,
+        .mesh_threads = if (thread_count > 1) 1 else 0,
         .resolver = resolver,
         .builder = &builder,
         .maps = maps,
@@ -581,6 +622,8 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         }
         stats.chunks_loaded += r.stats.chunks_loaded;
         stats.chunks_missing += r.stats.chunks_missing;
+        stats.chunks_premodern += r.stats.chunks_premodern;
+        stats.chunks_unreadable += r.stats.chunks_unreadable;
         read_ms += r.read_ms;
         light_ms += r.light_ms;
         mesh_ms += r.mesh_ms;
@@ -594,6 +637,25 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         total_bytes += r.entry.bytes;
         total_raw_bytes += r.raw_bytes;
     }
+
+    // A world saved before 1.18 stores chunks in the legacy `Level` layout and
+    // decodes to nothing — explain that instead of writing an empty map.
+    if (stats.chunks_loaded == 0 and stats.chunks_premodern > 0) {
+        std.debug.print(
+            \\this world's chunks use the pre-1.18 format, which vantage can't read.
+            \\Open and save it in Minecraft 1.18+ (which upgrades the chunks), then re-run.
+            \\
+        , .{});
+        return error.WorldTooOld;
+    }
+    if (stats.chunks_premodern > 0) std.debug.print(
+        "  note: {d} chunk(s) still in the pre-1.18 format were skipped\n",
+        .{stats.chunks_premodern},
+    );
+    if (stats.chunks_unreadable > 0) std.debug.print(
+        "  note: {d} chunk(s) skipped: lz4-compressed or external .mcc chunks are not supported yet\n",
+        .{stats.chunks_unreadable},
+    );
 
     // ---- lowres LOD pyramid -------------------------------------------------
     // Downsample the per-tile color maps 2× per level until the world fits in
@@ -794,6 +856,9 @@ const RenderCtx = struct {
     quality: mesh.LightQuality,
     blend_biomes: bool,
     cave_y: ?i32,
+    /// Thread budget for each tile's internal mesh pass: 1 when tiles already
+    /// run in parallel, 0 (= all cores) for a single-worker render.
+    mesh_threads: usize,
     resolver: model.Resolver,
     builder: *texture.Builder,
     maps: biome.Colormaps,
@@ -909,7 +974,7 @@ fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
     if (interior.x0 >= interior.x1 or interior.z0 >= interior.z1) return;
 
     const t_m0 = std.Io.Timestamp.now(ctx.io, .awake);
-    const built = try mesh.buildTextured(ta, g2, ctx.resolver, ctx.builder, ctx.maps, ctx.reg, ctx.quality, ctx.blend_biomes, interior, ctx.cave_y, null);
+    const built = try mesh.buildTextured(ta, g2, ctx.resolver, ctx.builder, ctx.maps, ctx.reg, ctx.quality, ctx.blend_biomes, interior, ctx.cave_y, ctx.mesh_threads, null);
     res.light_ms = built.light_ms;
     res.mesh_ms = t_m0.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).toMilliseconds() - built.light_ms;
     if (built.solid.vertex_count == 0 and built.fluid.vertex_count == 0) return;
@@ -1031,12 +1096,53 @@ fn findAssets(a: std.mem.Allocator, io: std.Io, home: []const u8) !?[]const u8 {
         const candidate = try std.fmt.allocPrint(a, "{s}/{s}/assets/minecraft", .{ base, e.name });
         const bs = try std.fmt.allocPrint(a, "{s}/blockstates", .{candidate});
         if (!dirExists(io, bs)) continue;
-        if (best_path == null or std.mem.lessThan(u8, best_name, e.name)) {
+        if (best_path == null or versionLessThan(best_name, e.name)) {
             best_path = candidate;
             best_name = try a.dupe(u8, e.name);
         }
     }
     return best_path;
+}
+
+/// Natural-order compare for version-ish directory names, so "1.21.10" beats
+/// "1.21.4", and the year-versioned scheme ("26.2", 2026+) beats both (lexical
+/// order gets all of these wrong). Digit runs compare numerically, everything
+/// else byte-wise.
+fn versionLessThan(a_name: []const u8, b_name: []const u8) bool {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < a_name.len and j < b_name.len) {
+        const ac = a_name[i];
+        const bc = b_name[j];
+        if (std.ascii.isDigit(ac) and std.ascii.isDigit(bc)) {
+            var ie = i;
+            while (ie < a_name.len and std.ascii.isDigit(a_name[ie])) ie += 1;
+            var je = j;
+            while (je < b_name.len and std.ascii.isDigit(b_name[je])) je += 1;
+            const an = std.fmt.parseInt(u64, a_name[i..ie], 10) catch 0;
+            const bn = std.fmt.parseInt(u64, b_name[j..je], 10) catch 0;
+            if (an != bn) return an < bn;
+            i = ie;
+            j = je;
+        } else {
+            if (ac != bc) return ac < bc;
+            i += 1;
+            j += 1;
+        }
+    }
+    return (a_name.len - i) < (b_name.len - j);
+}
+
+test versionLessThan {
+    try std.testing.expect(versionLessThan("1.21.4", "1.21.10"));
+    try std.testing.expect(versionLessThan("1.9", "1.21.4"));
+    try std.testing.expect(versionLessThan("1.20", "1.20.1"));
+    try std.testing.expect(!versionLessThan("1.21.10", "1.21.4"));
+    // Year-versioned releases (25.x/26.x, 2026+) sort above every 1.x release.
+    try std.testing.expect(versionLessThan("1.21.11", "26.2"));
+    try std.testing.expect(versionLessThan("25.4", "26.2"));
+    try std.testing.expect(versionLessThan("26.2", "26.10"));
+    try std.testing.expect(!versionLessThan("default", "1.21.4") or versionLessThan("1.21.4", "default"));
 }
 
 fn dirExists(io: std.Io, path: []const u8) bool {

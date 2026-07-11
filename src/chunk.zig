@@ -60,7 +60,7 @@ pub const Chunk = struct {
     data_version: i32,
 };
 
-pub const Error = error{ BadFormat, NoSections } || std.mem.Allocator.Error;
+pub const Error = error{ BadFormat, NoSections, PreModernChunk } || std.mem.Allocator.Error;
 
 /// bits-per-index = max(4, ceil(log2(palette_len))).
 pub fn bitsForPalette(n: usize) u6 {
@@ -88,7 +88,13 @@ pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
     const x_pos: i32 = readInt(root, "xPos");
     const z_pos: i32 = readInt(root, "zPos");
 
-    const sections_tag = nbt.get(root, "sections") orelse return error.NoSections;
+    const sections_tag = nbt.get(root, "sections") orelse {
+        // Pre-1.18 chunks nest everything under `Level` (capitalized keys,
+        // different palette layout) — unsupported, but worth telling apart from
+        // a merely empty chunk so the CLI can explain a blank render.
+        if (nbt.get(root, "Level") != null) return error.PreModernChunk;
+        return error.NoSections;
+    };
     if (sections_tag.* != .list) return error.BadFormat;
     const raw_sections = sections_tag.list.items;
 
@@ -104,6 +110,9 @@ pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
                 else => continue,
             };
         };
+        // Reject corrupt section Ys before they can overflow the grid's i32
+        // extent math (valid dimensions stay within ±127 sections = ±2032 blocks).
+        if (sy < -128 or sy > 127) continue;
 
         const bs = nbt.get(sec.compound, "block_states") orelse continue;
         if (bs.* != .compound) continue;

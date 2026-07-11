@@ -1,0 +1,91 @@
+name: Release
+
+# Tag-driven release: pushing a `v<version>` tag (matching build.zig.zon and
+# web/package.json) creates a GitHub Release with one static binary per
+# OS/arch and publishes the `vantage-mc` npm package.
+#
+# Requires an `NPM_TOKEN` repo secret with publish rights to `vantage-mc`.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write # npm --provenance
+
+jobs:
+  verify:
+    name: verify versions & create release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - name: Tag matches build.zig.zon and web/package.json
+        run: |
+          tag=${GITHUB_REF_NAME#v}
+          zon=$(grep -oP '\.version = "\K[^"]+' build.zig.zon)
+          npm=$(node -p "require('./web/package.json').version")
+          echo "tag=$tag build.zig.zon=$zon web/package.json=$npm"
+          test "$tag" = "$zon" && test "$tag" = "$npm"
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes || true
+
+  binaries:
+    name: binary (${{ matrix.name }})
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl for the Linux builds: fully static, runs on any distro.
+          - { target: x86_64-linux-musl, name: vantage-x86_64-linux }
+          - { target: aarch64-linux-musl, name: vantage-aarch64-linux }
+          - { target: x86_64-macos, name: vantage-x86_64-macos }
+          - { target: aarch64-macos, name: vantage-aarch64-macos }
+          - { target: x86_64-windows, name: vantage-x86_64-windows }
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+      - name: Cross-compile
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+      - name: Package
+        run: |
+          cd zig-out/bin
+          case "${{ matrix.target }}" in
+            *windows*) zip "$GITHUB_WORKSPACE/${{ matrix.name }}.zip" vantage.exe ;;
+            *) tar czf "$GITHUB_WORKSPACE/${{ matrix.name }}.tar.gz" vantage ;;
+          esac
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" ${{ matrix.name }}.* --clobber
+
+  npm:
+    name: npm publish
+    needs: verify
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+      # prepublishOnly runs typecheck + tests + build, so the tarball is
+      # always built from this checkout.
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

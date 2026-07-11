@@ -106,6 +106,11 @@ pub const Grid = struct {
 pub const Stats = struct {
     chunks_loaded: usize = 0,
     chunks_missing: usize = 0,
+    /// Chunks in the pre-1.18 `Level` layout — present but undecodable.
+    chunks_premodern: usize = 0,
+    /// Chunks whose payload we can't read: lz4-compressed (Paper servers) or
+    /// external `.mcc` sidecars.
+    chunks_unreadable: usize = 0,
     distinct_blocks: usize = 0,
     distinct_biomes: usize = 0,
 };
@@ -244,7 +249,12 @@ pub fn assemble(
     while (cz <= cz1) : (cz += 1) {
         var cx: u32 = cx0;
         while (cx <= cx1) : (cx += 1) {
-            const ch = decodeChunk(arena, reg, @intCast(cx), @intCast(cz)) catch {
+            const ch = decodeChunk(arena, reg, @intCast(cx), @intCast(cz)) catch |err| {
+                switch (err) {
+                    error.PreModernChunk => stats.chunks_premodern += 1,
+                    error.UnsupportedCompression, error.ExternalChunk => stats.chunks_unreadable += 1,
+                    else => {},
+                }
                 stats.chunks_missing += 1;
                 continue;
             } orelse {

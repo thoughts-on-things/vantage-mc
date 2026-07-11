@@ -192,6 +192,9 @@ pub const LightQuality = enum { flat, smooth };
 /// `interior`, if given, meshes only that XZ sub-box — the apron cells outside
 /// it still feed culling/AO/light/biome-blend reads but emit no geometry.
 /// `cave_y` enables cave culling below that world Y (see `MeshCtx.caveCulled`).
+/// `max_threads` caps the internal mesh/greedy parallelism (0 = one thread per
+/// core) — pass 1 when the caller already runs tiles in parallel, so N tile
+/// workers don't each spawn N mesh threads.
 pub fn buildTextured(
     arena: std.mem.Allocator,
     g: grid.Grid,
@@ -203,6 +206,7 @@ pub fn buildTextured(
     blend_biomes: bool,
     interior: ?grid.Interior,
     cave_y: ?i32,
+    max_threads: usize,
     progress: ?std.Progress.Node,
 ) !Built {
     var mesh: Mesh2 = .{}; // opaque terrain
@@ -282,7 +286,8 @@ pub fn buildTextured(
         .cave_y = cave_y,
     };
     const cpu = std.Thread.getCpuCount() catch 1;
-    const n_threads = @max(1, @min(cpu, g.sy));
+    const budget = if (max_threads == 0) cpu else max_threads;
+    const n_threads = @max(1, @min(budget, g.sy));
     if (n_threads <= 1) {
         try meshRange(&ctx, 0, g.sy, arena, &mesh, &fluid);
     } else {
@@ -293,8 +298,16 @@ pub fn buildTextured(
             const y0 = @min(g.sy, i * slab);
             p.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator), .y0 = y0, .y1 = @min(g.sy, y0 + slab) };
         }
-        for (partials, threads) |*p, *t| t.* = try std.Thread.spawn(.{}, meshWorker, .{ &ctx, p });
-        for (threads) |t| t.join();
+        // A failed spawn (thread exhaustion) runs that slab inline instead of
+        // failing the whole build.
+        var n_spawned: usize = 0;
+        for (partials) |*p| {
+            if (std.Thread.spawn(.{}, meshWorker, .{ &ctx, p })) |t| {
+                threads[n_spawned] = t;
+                n_spawned += 1;
+            } else |_| meshWorker(&ctx, p);
+        }
+        for (threads[0..n_spawned]) |t| t.join();
         for (partials) |*p| {
             defer p.arena.deinit();
             if (p.err) |e| return e;
@@ -305,12 +318,23 @@ pub fn buildTextured(
 
     // Greedy pass: merge the full-cube occluder faces (which the per-block pass
     // skipped) into big tiled quads. The 6 directions are independent, so they
-    // run as 6 workers into disjoint meshes, concatenated in direction order.
+    // run as 6 workers into disjoint meshes, concatenated in direction order
+    // (inline when the thread budget is 1).
     const gp = try arena.alloc(GreedyPartial, 6);
-    const gthreads = try arena.alloc(std.Thread, 6);
     for (gp, 0..) |*p, di| p.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator), .di = di };
-    for (gp, gthreads) |*p, *t| t.* = try std.Thread.spawn(.{}, greedyWorker, .{ &ctx, p });
-    for (gthreads) |t| t.join();
+    if (n_threads <= 1) {
+        for (gp) |*p| greedyWorker(&ctx, p);
+    } else {
+        const gthreads = try arena.alloc(std.Thread, 6);
+        var n_spawned: usize = 0;
+        for (gp) |*p| {
+            if (std.Thread.spawn(.{}, greedyWorker, .{ &ctx, p })) |t| {
+                gthreads[n_spawned] = t;
+                n_spawned += 1;
+            } else |_| greedyWorker(&ctx, p);
+        }
+        for (gthreads[0..n_spawned]) |t| t.join();
+    }
     for (gp) |*p| {
         defer p.arena.deinit();
         if (p.err) |e| return e;
@@ -977,7 +1001,7 @@ fn blendedTint(ctx: *const MeshCtx, kind: biome.Tint, lx: f32, ly: f32, lz: f32)
 fn buildTintTable(arena: std.mem.Allocator, g: grid.Grid, maps: biome.Colormaps, reg: *biome.Registry) ![][3]u8 {
     const nkind = @as(usize, biome.Tint.count);
     const nbiome = @max(1, g.biome_names.len);
-    const kinds = [_]biome.Tint{ .none, .grass, .foliage, .water, .spruce, .birch, .lily };
+    const kinds = [_]biome.Tint{ .none, .grass, .foliage, .water, .spruce, .birch, .lily, .redstone, .stem };
     const out = try arena.alloc([3]u8, nbiome * nkind);
     for (0..nbiome) |bi| {
         const name = if (bi < g.biome_names.len) g.biome_names[bi] else "";
@@ -1038,6 +1062,19 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
         return .{ .faces = try list.toOwnedSlice(arena), .occluder = occluder };
     };
 
+    // Block entities (chests, beds, signs, …) resolve to a model with *no*
+    // elements — the game draws them with block-entity renderers, which a baked
+    // map can't run. Emit an approximate colored box so builds don't show holes
+    // where their furniture is. Never an occluder: the box is smaller than the
+    // cell, so it must not cull its neighbours' faces.
+    if (!partsHaveGeometry(parts)) {
+        if (blockEntityBox(name)) |box| {
+            const layer: f32 = @floatFromInt(try tex.solidLayer(box.color));
+            try bakeBox(arena, &list, layer, box.height);
+            return .{ .faces = try list.toOwnedSlice(arena), .occluder = false };
+        }
+    }
+
     for (parts) |rm| {
         for (rm.elements, 0..) |el, ei| {
             const x0: f32 = @floatCast(el.from[0] / 16.0);
@@ -1064,7 +1101,30 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
                 const ao_on = mf.cullface != null;
                 // Face texture rotation (0/90/180/270) cycles which uv corner each
                 // vertex samples, rotating the texture on the face.
-                const uvsteps: usize = (@as(usize, mf.rotation) / 90) % 4;
+                //
+                // `uvlock` counter-rotates faces *parallel to the rotation axis*
+                // so their texture stays world-aligned while the geometry turns
+                // (stair/slab tops keep their grain when the block faces east).
+                // Cycle counts were derived from the corner/uvsel tables and the
+                // documented rotation convention (y+90: north→east from above;
+                // x+90: up→north): the +normal face counter-cycles, the −normal
+                // face cycles forward. Faces perpendicular to the axis relocate
+                // without spinning, so they need no correction. Combined x+y
+                // rotations (top-half stairs) are left uncorrected — the cycle
+                // model can't express the mirror an x=180 flip introduces.
+                const xk = (@as(usize, rm.x) / 90) % 4;
+                const yk = (@as(usize, rm.y) / 90) % 4;
+                var lock: usize = 0;
+                if (rm.uvlock) {
+                    if (yk != 0 and xk == 0) {
+                        if (tf.dir == .up) lock = (4 - yk) % 4;
+                        if (tf.dir == .down) lock = yk;
+                    } else if (xk != 0 and yk == 0) {
+                        if (tf.dir == .west) lock = xk;
+                        if (tf.dir == .east) lock = (4 - xk) % 4;
+                    }
+                }
+                const uvsteps: usize = ((@as(usize, mf.rotation) / 90) + lock) % 4;
                 var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = tint, .cull = cull, .ao = ao_on };
                 for (0..4) |i| {
                     const cs = tf.corners[i];
@@ -1175,6 +1235,64 @@ fn isGreedyGeom(bf: BakedFace) bool {
         } else if (mn[a] != 0.0 or mx[a] != 1.0) return false; // spans the full edge
     }
     return true;
+}
+
+fn partsHaveGeometry(parts: []const model.ResolvedModel) bool {
+    for (parts) |rm| {
+        if (rm.elements.len > 0) return true;
+    }
+    return false;
+}
+
+/// Approximate stand-in for a block whose visuals live in a block-entity
+/// renderer (no model elements). Curated colors/heights for the common,
+/// visually significant ones; null leaves the block invisible (correct for
+/// markers like light or structure_void, which also resolve to no geometry).
+const EntityBox = struct { color: [3]u8, height: f32 };
+
+fn blockEntityBox(name: []const u8) ?EntityBox {
+    const b = model.stripNs(name);
+    if (std.mem.eql(u8, b, "chest") or std.mem.eql(u8, b, "trapped_chest"))
+        return .{ .color = .{ 140, 100, 45 }, .height = 0.875 };
+    if (std.mem.eql(u8, b, "ender_chest"))
+        return .{ .color = .{ 25, 55, 60 }, .height = 0.875 };
+    if (std.mem.endsWith(u8, b, "_bed"))
+        return .{ .color = .{ 180, 60, 60 }, .height = 0.5625 };
+    if (std.mem.endsWith(u8, b, "sign"))
+        return .{ .color = .{ 120, 95, 60 }, .height = 1.0 };
+    if (std.mem.endsWith(u8, b, "banner"))
+        return .{ .color = .{ 205, 205, 205 }, .height = 1.0 };
+    if (std.mem.endsWith(u8, b, "_skull") or std.mem.endsWith(u8, b, "_head"))
+        return .{ .color = .{ 225, 220, 200 }, .height = 0.5 };
+    if (std.mem.endsWith(u8, b, "shulker_box"))
+        return .{ .color = .{ 150, 105, 160 }, .height = 1.0 };
+    if (std.mem.eql(u8, b, "decorated_pot"))
+        return .{ .color = .{ 160, 90, 60 }, .height = 1.0 };
+    if (std.mem.eql(u8, b, "conduit"))
+        return .{ .color = .{ 130, 180, 170 }, .height = 0.5 };
+    return null;
+}
+
+/// Like `bakeFullCube` but `height` (0..1] scales Y — a squashed cube for
+/// chest/bed/skull stand-ins. Faces keep their cull dirs: sides/bottom are
+/// flush with the cell so neighbour culling stays correct, and a culled top
+/// under a solid block matches the in-game view (you can't see it there either).
+fn bakeBox(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32, height: f32) !void {
+    for (tex_faces) |tf| {
+        var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = .none, .cull = tf.dir, .ao = true };
+        const n = [3]f32{ @floatFromInt(tf.n[0]), @floatFromInt(tf.n[1]), @floatFromInt(tf.n[2]) };
+        for (0..4) |i| {
+            const cs = tf.corners[i];
+            const p = [3]f32{ @floatFromInt(cs[0]), @as(f32, @floatFromInt(cs[1])) * height, @floatFromInt(cs[2]) };
+            bf.ao_off[i] = cornerAoOffsets(n, .{ @floatFromInt(cs[0]), @floatFromInt(cs[1]), @floatFromInt(cs[2]) });
+            bf.verts[i] = .{
+                .pos = p,
+                .uv = .{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(tf.uvsel[i][1]) },
+                .n = tf.n,
+            };
+        }
+        try list.append(arena, bf);
+    }
 }
 
 fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32, tint: biome.Tint) !void {

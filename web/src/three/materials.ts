@@ -3,7 +3,7 @@
 // uniforms, and a camera-locked gradient sky dome whose horizon matches the fog.
 
 import * as THREE from 'three';
-import type { DecodedTextureArray, Rgb } from '../core/index.js';
+import type { DecodedTextureArray, Rgb, TextureAnimation } from '../core/index.js';
 
 /** Atmosphere palette — a calm Minecraft-ish daytime. Horizon doubles as fog. */
 export const SKY_TOP: readonly [number, number, number] = [0.3, 0.52, 0.84];
@@ -61,7 +61,8 @@ const VERT = /* glsl */ `
     vBlk = (light - sky * 16.0) / 15.0;
     // Water surface waves come from real mesh geometry (Minecraft flowing-water
     // heights, baked in the mesher) — the normal here carries the slope, so the
-    // waves catch light. No vertex animation — the water is static.
+    // waves catch light. No vertex animation — motion comes from the animated
+    // texture frames (see the fragment shader's uAnim/uTime).
     vN = normalize(mat3(modelMatrix) * nrm);
     vec4 wp = modelMatrix * vec4(pos, 1.0);
     vec4 mv = viewMatrix * wp;
@@ -77,6 +78,8 @@ const FRAG = /* glsl */ `
   precision highp float;
   precision highp sampler2DArray;
   uniform sampler2DArray map;
+  uniform sampler2D uAnim;   // per-layer animation LUT: frame count, frametime lo/hi, interpolate
+  uniform float uTime;       // seconds (the viewer advances and wraps it)
   uniform vec3 lightDir;
   uniform float uBiomeMix;   // 0 = textured, 1 = biome layer
   uniform float uHi;         // highlighted biome id, or -1
@@ -157,25 +160,45 @@ const FRAG = /* glsl */ `
   void main() {
     float lightAmt; vec3 lightCol;
     bakedLight(lightAmt, lightCol);
-    vec4 t = texture(map, vec3(vUv, vLayer), -uSharpness); // negative bias = sharper
+    // Animated textures (water, lava, magma, kelp, …): the LUT row for this
+    // base layer holds the baked frame count and frametime; frames occupy the
+    // consecutive layers after the base, so playback is base + wrap(frame).
+    // vLayer is a flat varying — uniform per primitive — so the branch and the
+    // extra interpolation tap are quad-coherent.
+    vec4 anim = texelFetch(uAnim, ivec2(int(vLayer + 0.5), 0), 0) * 255.0;
+    float layer = vLayer;
+    float blendf = 0.0;
+    if (anim.r > 1.5) {
+      float ft = max(anim.g + anim.b * 256.0, 1.0); // ticks per frame
+      float frames = uTime * 20.0 / ft;             // 20 ticks per second
+      layer = vLayer + mod(floor(frames), anim.r);
+      if (anim.a > 0.5) blendf = fract(frames);     // interpolate: blend to next
+    }
+    vec4 t = texture(map, vec3(vUv, layer), -uSharpness); // negative bias = sharper
+    if (blendf > 0.0) {
+      float nxt = vLayer + mod(layer - vLayer + 1.0, anim.r);
+      t = mix(t, texture(map, vec3(vUv, nxt), -uSharpness), blendf);
+    }
     if (t.a < 0.05) discard;                       // drop only fully-empty texels; the
                                                    // fractional edge becomes MSAA coverage
     t.rgb = toLinear(t.rgb);                        // work in linear; encode at the end
     vec3 fogCol = toLinear(uFogColor);
     vec3 N = normalize(vN);
 
-    // Water pass: a semi-transparent blue tint over the normally-lit seabed.
-    // The depth read comes from the SEABED darkening (sky light is
-    // attenuated through water in the light pass), seen through the clear surface,
-    // NOT from fading the water to opaque. So keep the surface fairly transparent
-    // so sand/gravel/seagrass show through; the wave look is the real flowing-water
-    // mesh geometry, whose sloped normal (vN) catches light.
+    // Water pass: the animated water texture × biome tint (the game's own
+    // formula — the texture is authored grey, its average ~0.45 linear, so a
+    // lift keeps overall brightness where a flat tint would sit), blended
+    // semi-transparently over the normally-lit seabed. The depth read comes
+    // from the SEABED darkening (sky light is attenuated through water in the
+    // light pass), seen through the clear surface, NOT from fading the water
+    // to opaque. So keep the surface fairly transparent so sand/gravel/seagrass
+    // show through; the wave look is the real flowing-water mesh geometry,
+    // whose sloped normal (vN) catches light.
     if (uWater > 0.5) {
       float depth = vTint.a;
-      vec3 wcol = toLinear(vTint.rgb);
+      vec3 wcol = t.rgb * toLinear(vTint.rgb) * 2.2;
       wcol = mix(wcol, wcol * vec3(0.55, 0.66, 0.85), depth * 0.7); // deep water cools + deepens
-      vec3 Nw = normalize(vN);
-      float ndl2 = max(dot(Nw, normalize(lightDir)), 0.0);
+      float ndl2 = max(dot(N, normalize(lightDir)), 0.0);
       // Flat-lit (mostly the water colour × baked light); only a small
       // directional term so the wave-slope normals read, no blown-out sun sheen.
       vec3 wlit = grade(wcol * (0.62 + 0.28 * SUN * ndl2) * lightAmt * lightCol * uExposure);
@@ -224,6 +247,29 @@ export interface TerrainMaterialOptions {
  *  shader does its own `toLinear()` on the sampled value (matching the
  *  non-quantized `abcol` path) — setting `SRGBColorSpace` here would decode
  *  twice and wash the palette out. */
+/** A 1-row RGBA8 LUT indexed by texture-array layer: R = the animation's baked
+ *  frame count (1 = static), G/B = frametime in ticks (lo/hi), A = interpolate.
+ *  Only base layers carry their animation's row; the frame layers that follow
+ *  are never referenced by geometry and stay static rows. */
+function animLutTexture(layers: number, anims: readonly TextureAnimation[]): THREE.DataTexture {
+  const n = Math.max(1, layers);
+  const data = new Uint8Array(4 * n);
+  for (let i = 0; i < n; i++) data[i * 4] = 1; // static: count 1
+  for (const a of anims) {
+    if (a.base < 0 || a.base >= n) continue;
+    const ft = Math.min(Math.max(a.frametime, 1), 0xffff);
+    data[a.base * 4 + 0] = Math.min(a.count, 255);
+    data[a.base * 4 + 1] = ft & 0xff;
+    data[a.base * 4 + 2] = ft >> 8;
+    data[a.base * 4 + 3] = a.interpolate ? 255 : 0;
+  }
+  const tex = new THREE.DataTexture(data, n, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 function paletteTexture(palette: readonly Rgb[]): THREE.DataTexture {
   const n = Math.max(1, palette.length);
   const data = new Uint8Array(4 * n);
@@ -262,6 +308,8 @@ export function createTerrainMaterial(texData: DecodedTextureArray, opts: Terrai
     defines: opts.quantized ? { QUANTIZED: '' } : {},
     uniforms: {
       map: { value: tex },
+      uAnim: { value: animLutTexture(texData.layers, texData.anims ?? []) },
+      uTime: { value: 0.0 }, // seconds; the viewer advances it every frame
       // Per-tile dequantization transform, set per-mesh in onBeforeRender
       // (quantized path only; inert otherwise).
       uPosMin: { value: new THREE.Vector3() },

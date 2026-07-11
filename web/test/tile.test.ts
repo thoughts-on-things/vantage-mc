@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { parseTextureArray, parseTile, parseTileQuantized, summarizeBiomes, summarizeSurfaceBiomes } from '../src/core/index.js';
 import {
   encodeTextureArray,
+  encodeTextureArrayV1,
   encodeVTL1,
   encodeVTL2,
   encodeVTL3,
@@ -155,13 +156,34 @@ describe('summarizeBiomes', () => {
 });
 
 describe('parseTextureArray', () => {
-  it('decodes a VTA1 texture array', () => {
+  it('decodes a texture array with an empty animation table', () => {
     const tex = parseTextureArray(encodeTextureArray(2, 2, 3));
     expect(tex.width).toBe(2);
     expect(tex.height).toBe(2);
     expect(tex.layers).toBe(3);
     expect(tex.pixels.length).toBe(2 * 2 * 3 * 4);
     expect(tex.pixels[5]).toBe(5);
+    expect(tex.anims).toEqual([]);
+  });
+
+  it('decodes the version-2 animation table', () => {
+    const tex = parseTextureArray(
+      encodeTextureArray(2, 2, 40, [
+        { base: 3, count: 32, frametime: 2, interpolate: false },
+        { base: 35, count: 3, frametime: 300, interpolate: true },
+      ]),
+    );
+    expect(tex.anims).toEqual([
+      { base: 3, count: 32, frametime: 2, interpolate: false },
+      { base: 35, count: 3, frametime: 300, interpolate: true },
+    ]);
+  });
+
+  it('still decodes legacy version-1 files (no animation table)', () => {
+    const tex = parseTextureArray(encodeTextureArrayV1(2, 2, 3));
+    expect(tex.layers).toBe(3);
+    expect(tex.pixels.length).toBe(2 * 2 * 3 * 4);
+    expect(tex.anims).toEqual([]);
   });
 
   it('throws on an unrecognized magic', () => {

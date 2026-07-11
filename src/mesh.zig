@@ -220,25 +220,41 @@ pub fn buildTextured(
     const tint_colors = try buildTintTable(arena, g, maps, reg);
     const nkind = @as(usize, biome.Tint.count);
 
-    // Precompute occluder-ness and water-ness per block id (bakes every present
-    // type once) so cull/AO tests are a flat array read, not a re-bake. Water is
-    // never an occluder, so the floor under it still meshes. `waterish` also
+    // Precompute occluder-ness and fluid-ness per block id (bakes every present
+    // type once) so cull/AO tests are a flat array read, not a re-bake. Fluids
+    // are never geometry occluders, so the floor under them still meshes and
+    // the neighbour sliver above a 14/16 surface still draws. `waterish` also
     // covers waterlogged blocks (seagrass, kelp, waterlogged stairs/…) so the
     // water reads as one continuous body, not a shell around each plant.
     const id_occluder = try arena.alloc(bool, g.names.len);
     const is_water = try arena.alloc(bool, g.names.len); // pure water (no block model)
+    const is_lava = try arena.alloc(bool, g.names.len); // pure lava (no block model)
     const waterish = try arena.alloc(bool, g.names.len); // water OR waterlogged
-    // Fluid level per id for the water-surface heights: pure water reads its
+    // Fluid level per id for the surface heights: pure water/lava read their
     // blockstate `level`; waterlogged blocks count as a source (0); the rest -1.
-    const water_level = try arena.alloc(i16, g.names.len);
-    for (id_occluder, is_water, waterish, water_level, 0..) |*o, *w, *wi, *lvl, id| {
+    const fluid_level = try arena.alloc(i16, g.names.len);
+    var any_water = false;
+    var any_lava = false;
+    for (id_occluder, is_water, is_lava, waterish, fluid_level, 0..) |*o, *w, *lv, *wi, *lvl, id| {
         const nm = g.nameOf(@intCast(id));
         w.* = id != 0 and isWater(nm);
+        lv.* = id != 0 and isLava(nm);
         wi.* = id != 0 and (w.* or isWaterlogged(nm, g.stateOf(@intCast(id))));
-        lvl.* = if (w.*) @intCast(parseLevel(g.stateOf(@intCast(id)))) else if (wi.*) 0 else -1;
+        lvl.* = if (w.* or lv.*) @intCast(parseLevel(g.stateOf(@intCast(id)))) else if (wi.*) 0 else -1;
         o.* = if (id == 0) false else (try getCached(arena, g, resolver, tex, cache, @intCast(id))).occluder;
+        if (wi.*) any_water = true;
+        if (lv.*) any_lava = true;
     }
-    const water_layer: f32 = @floatFromInt(tex.layerFor("block/water_still"));
+    // Fluid texture layers, loaded only when the grid holds that fluid so a dry
+    // tile doesn't pull unused animation frames into the shared atlas.
+    const water_layers: FluidLayers = if (any_water) .{
+        .still = @floatFromInt(tex.layerFor("block/water_still")),
+        .flow = @floatFromInt(tex.layerFor("block/water_flow")),
+    } else .{};
+    const lava_layers: FluidLayers = if (any_lava) .{
+        .still = @floatFromInt(tex.layerFor("block/lava_still")),
+        .flow = @floatFromInt(tex.layerFor("block/lava_flow")),
+    } else .{};
 
     // Per-id greedy-face table: which cached face (if any) is the greedy face in
     // each of the 6 directions. Built once from the populated cache so the greedy
@@ -258,9 +274,14 @@ pub fn buildTextured(
     // light in their region files, so we derive it ourselves.
     const emission = try arena.alloc(u8, g.names.len);
     for (emission, 0..) |*e, id| e.* = if (id == 0) 0 else lighting.emissionOf(g.nameOf(@intCast(id)));
+    // Lava stays opaque to LIGHT (closing the sky column, walling the flood)
+    // even though it no longer occludes geometry; its cells still seed their
+    // own emission, so the glow spreads outward from the body itself.
+    const light_occluder = try arena.alloc(bool, g.names.len);
+    for (light_occluder, id_occluder, is_lava) |*lo, o, lv| lo.* = o or lv;
     const t_light0 = std.Io.Timestamp.now(resolver.io, .awake);
     const light_node: ?std.Progress.Node = if (progress) |p| p.start("computing light", 0) else null;
-    try lighting.compute(arena, g, id_occluder, emission, waterish);
+    try lighting.compute(arena, g, light_occluder, emission, waterish);
     if (light_node) |n| n.end();
     const light_ms = t_light0.durationTo(std.Io.Timestamp.now(resolver.io, .awake)).toMilliseconds();
 
@@ -274,13 +295,15 @@ pub fn buildTextured(
         .cache = cache,
         .id_occluder = id_occluder,
         .is_water = is_water,
+        .is_lava = is_lava,
         .waterish = waterish,
         .tint_colors = tint_colors,
         .nkind = nkind,
-        .water_layer = water_layer,
+        .water_layers = water_layers,
+        .lava_layers = lava_layers,
         .quality = quality,
         .blend_biomes = blend_biomes,
-        .water_level = water_level,
+        .fluid_level = fluid_level,
         .greedy_faces = greedy_faces,
         .interior = interior orelse grid.Interior.full(g),
         .cave_y = cave_y,
@@ -344,25 +367,36 @@ pub fn buildTextured(
     return .{ .solid = mesh, .fluid = fluid, .light_ms = light_ms };
 }
 
+/// A fluid's texture-array layers: the still texture (flat tops, bottoms) and
+/// the flow texture (sides, and tops that slope — see `emitFluid`).
+const FluidLayers = struct { still: f32 = 0, flow: f32 = 0 };
+
+/// Which fluid `emitFluid` is drawing. Water goes to the transparent mesh
+/// (biome-tinted, depth in alpha); lava to the opaque solid mesh (untinted,
+/// lit by its own full-bright cell).
+const Fluid = enum { water, lava };
+
 /// Immutable, shareable context for the per-cell mesh pass (read by every thread).
 const MeshCtx = struct {
     g: grid.Grid,
     cache: []?Cached,
     id_occluder: []const bool,
     is_water: []const bool,
+    is_lava: []const bool,
     waterish: []const bool,
     tint_colors: [][3]u8,
     nkind: usize,
-    water_layer: f32,
+    water_layers: FluidLayers = .{},
+    lava_layers: FluidLayers = .{},
     quality: LightQuality,
     /// Blend biome tint colours across borders (vanilla-style grass/foliage/water
     /// gradients) rather than stepping per biome cell. See `blendedTint`.
     blend_biomes: bool,
-    /// Per block id, the fluid level for the watery surface algorithm: 0 = source
+    /// Per block id, the fluid level for the liquid surface algorithm: 0 = source
     /// (or waterlogged), 1..7 = flowing (decreasing height), >=8 = falling/full,
-    /// -1 = not a fluid surface. Drives the real Minecraft water heights so flowing
-    /// water slopes into waves (see `liquidCornerHeight`).
-    water_level: []const i16,
+    /// -1 = not a fluid surface. Drives the real Minecraft fluid heights so flowing
+    /// water/lava slopes into waves (see `liquidCornerHeight`).
+    fluid_level: []const i16,
     /// Per block id, the cached-face index of its greedy face in each of the 6
     /// directions (see `dirIndex`), or -1. The greedy pass uses this to find a
     /// cell's mergeable face; the per-block pass skips faces marked `greedy`.
@@ -434,7 +468,15 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
                 // faces, surface lip, depth — see emitFluid. Dark underground
                 // water below the cave horizon is culled with the caves.
                 if (ctx.is_water[id]) {
-                    if (!ctx.caveDark(xi, yi, zi)) try emitFluid(alloc, fluid, ctx, x, y, z, wx, wy, wz, bid);
+                    if (!ctx.caveDark(xi, yi, zi)) try emitFluid(alloc, fluid, ctx, .water, x, y, z, wx, wy, wz, bid);
+                    continue;
+                }
+                // Pure lava: opaque fluid-height geometry into the solid mesh.
+                // Its cells carry no sky light (lava closes the light column),
+                // so cave culling happens per-face inside emitFluid against the
+                // cell each face looks into, like solid blocks do.
+                if (ctx.is_lava[id]) {
+                    try emitFluid(alloc, mesh, ctx, .lava, x, y, z, wx, wy, wz, bid);
                     continue;
                 }
 
@@ -470,7 +512,7 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
                 // rendered its model into the opaque mesh; now lay continuous water
                 // over its cell so it sits *in* the water instead of in a shell.
                 if (ctx.waterish[id] and !ctx.caveDark(xi, yi, zi)) {
-                    try emitFluid(alloc, fluid, ctx, x, y, z, wx, wy, wz, bid);
+                    try emitFluid(alloc, fluid, ctx, .water, x, y, z, wx, wy, wz, bid);
                 }
             }
         }
@@ -726,6 +768,10 @@ fn isWater(name: []const u8) bool {
     return std.mem.eql(u8, model.stripNs(name), "water");
 }
 
+fn isLava(name: []const u8) bool {
+    return std.mem.eql(u8, model.stripNs(name), "lava");
+}
+
 /// Whether a block holds water in its cell (so water should flow through it
 /// rather than wall it off). Explicit `waterlogged=true` comes from the
 /// blockstate; the always-water-filled plants are defined in game *code*, not
@@ -754,20 +800,21 @@ fn liquidBaseHeight(level: i16) f32 {
     return (14.0 - @as(f32, @floatFromInt(level)) * 1.9) / 16.0;
 }
 
-/// One top corner's surface height (0..1) for the water cell at (x,y,z), averaged
-/// over the 2×2 of cells meeting at the corner (`xo`,`zo` ∈ {−1,0}). Mirrors the
+/// One top corner's surface height (0..1) for the fluid cell at (x,y,z), averaged
+/// over the 2×2 of cells meeting at the corner (`xo`,`zo` ∈ {−1,0}). `merge` is
+/// the same-fluid group (waterish for water, is_lava for lava). Mirrors the
 /// game's liquid renderer: a same-liquid block directly above any of the
 /// 2×2 forces a full corner; a source neighbour pins it to 14/16; otherwise it is
 /// the average base height, with air cells counting as 0 (pulling the corner down)
 /// and solid cells ignored. Deterministic per world corner, so adjacent cells
 /// agree on the shared height → watertight.
-fn liquidCornerHeight(ctx: *const MeshCtx, x: isize, y: isize, z: isize, xo: isize, zo: isize) f32 {
+fn liquidCornerHeight(ctx: *const MeshCtx, merge: []const bool, x: isize, y: isize, z: isize, xo: isize, zo: isize) f32 {
     const g = ctx.g;
     var ix = xo;
     while (ix <= xo + 1) : (ix += 1) {
         var iz = zo;
         while (iz <= zo + 1) : (iz += 1) {
-            if (ctx.waterish[g.at(x + ix, y + 1, z + iz)]) return 1.0;
+            if (merge[g.at(x + ix, y + 1, z + iz)]) return 1.0;
         }
     }
     var sum: f32 = 0;
@@ -777,8 +824,8 @@ fn liquidCornerHeight(ctx: *const MeshCtx, x: isize, y: isize, z: isize, xo: isi
         var iz = zo;
         while (iz <= zo + 1) : (iz += 1) {
             const id = g.at(x + ix, y, z + iz);
-            if (ctx.waterish[id]) {
-                const lvl = ctx.water_level[id];
+            if (merge[id]) {
+                const lvl = ctx.fluid_level[id];
                 if (lvl == 0) return 14.0 / 16.0; // a source corner is fixed at 14/16
                 sum += liquidBaseHeight(lvl);
                 count += 1;
@@ -797,18 +844,31 @@ fn quantSlope(f: f32) i8 {
     return @intFromFloat(std.math.clamp(@round(f * 127.0), -127.0, 127.0));
 }
 
-/// Emit a water cell's boundary faces into the transparent `mesh`. A face draws
-/// only when its neighbour is neither opaque (would hide it) nor waterish (water
-/// or waterlogged — merged), so an ocean interior is empty and only the surface
-/// sheet + exposed edges cost geometry. The top surface uses real Minecraft fluid
-/// corner heights (see `liquidCornerHeight`), so flowing water slopes into waves;
-/// the up face's normal carries that slope so the ridges catch light. A 0..1 depth
-/// factor (cells below, capped) rides in the colour alpha; the shader turns it into
-/// opacity so shallow water is clear and deep water reads as solid blue.
+/// Emit a fluid cell's boundary faces — water into the transparent mesh, lava
+/// into the opaque solid mesh. A face draws only when its neighbour is neither
+/// opaque (would hide it) nor the same fluid (merged), so an ocean interior is
+/// empty and only the surface sheet + exposed edges cost geometry. The top
+/// surface uses real Minecraft fluid corner heights (see `liquidCornerHeight`),
+/// so flowing fluid slopes into waves; the up face's normal carries that slope
+/// so the ridges catch light.
+///
+/// Textures follow the game's fluid renderer: a flat top samples the *still*
+/// texture; a sloping top samples the *flow* texture's centred half-scale
+/// window rotated to the downhill direction; side faces always sample the flow
+/// texture (its frames scroll downward), the window tracking the surface
+/// height; bottoms are still. All windows stay inside [0,1] so tile UV
+/// quantization and mip sampling are unaffected.
+///
+/// Water rides a 0..1 depth factor (cells below, capped) in the colour alpha —
+/// the shader turns it into opacity so shallow water is clear and deep water
+/// reads as solid blue. Lava is untinted/opaque and lit by its OWN cell (block
+/// light 15 → full bright, like the game) rather than the cell a face looks
+/// into, and cave-culls per face since lava cells themselves carry no sky light.
 fn emitFluid(
     arena: std.mem.Allocator,
     mesh: *Mesh2,
     ctx: *const MeshCtx,
+    kind: Fluid,
     x: usize,
     y: usize,
     z: usize,
@@ -819,10 +879,14 @@ fn emitFluid(
 ) !void {
     const g = ctx.g;
     const id_occluder = ctx.id_occluder;
-    const waterish = ctx.waterish;
-    const layer = ctx.water_layer;
-    const blend = ctx.blend_biomes;
-    const base_rgb = ctx.tint_colors[bid * ctx.nkind + @intFromEnum(biome.Tint.water)];
+    // Same-fluid merge group: faces between two cells of the group are interior.
+    const merge = if (kind == .water) ctx.waterish else ctx.is_lava;
+    const layers = if (kind == .water) ctx.water_layers else ctx.lava_layers;
+    const blend = ctx.blend_biomes and kind == .water;
+    const base_rgb: [3]u8 = if (kind == .water)
+        ctx.tint_colors[bid * ctx.nkind + @intFromEnum(biome.Tint.water)]
+    else
+        .{ 255, 255, 255 };
     const min_xf: f32 = @floatFromInt(g.min_x);
     const min_yf: f32 = @floatFromInt(g.min_y);
     const min_zf: f32 = @floatFromInt(g.min_z);
@@ -833,15 +897,15 @@ fn emitFluid(
     // (level ≥ 8) or a source with same liquid directly above fills full height;
     // otherwise each top corner averages the fluid around it (see
     // `liquidCornerHeight`). `cornerH[cx][cz]` indexes the local (x,z) corner.
-    const self_level = ctx.water_level[g.at(xi, yi, zi)];
-    const full_top = self_level >= 8 or (self_level == 0 and waterish[g.at(xi, yi + 1, zi)]);
+    const self_level = ctx.fluid_level[g.at(xi, yi, zi)];
+    const full_top = self_level >= 8 or (self_level == 0 and merge[g.at(xi, yi + 1, zi)]);
     var cornerH: [2][2]f32 = .{ .{ 1, 1 }, .{ 1, 1 } };
     if (!full_top) {
         inline for (0..2) |cx| {
             inline for (0..2) |cz| {
                 const xo: isize = if (cx == 0) -1 else 0;
                 const zo: isize = if (cz == 0) -1 else 0;
-                cornerH[cx][cz] = liquidCornerHeight(ctx, xi, yi, zi, xo, zo);
+                cornerH[cx][cz] = liquidCornerHeight(ctx, merge, xi, yi, zi, xo, zo);
             }
         }
     }
@@ -851,18 +915,39 @@ fn emitFluid(
     const dhdz = ((cornerH[0][1] + cornerH[1][1]) - (cornerH[0][0] + cornerH[1][0])) * 0.5;
     const inv = 1.0 / @sqrt(dhdx * dhdx + dhdz * dhdz + 1.0);
     const up_n = [3]i8{ quantSlope(-dhdx * inv), quantSlope(inv), quantSlope(-dhdz * inv) };
-    // Depth: count waterish cells directly below (capped) -> 0..1 in the alpha.
-    var below: u32 = 0;
-    var yy: isize = yi - 1;
-    while (below < 32 and waterish[g.at(xi, yy, zi)]) : (yy -= 1) below += 1;
-    const depth = depthFactor(below);
+    // A tilted surface is flowing: its top face samples the flow texture's
+    // centred half-scale window rotated so the pattern runs downhill (the
+    // gradient points uphill; a=0 flows toward +Z). Flat cells — the common
+    // case — skip the trig.
+    const flowing = @abs(dhdx) > 1e-4 or @abs(dhdz) > 1e-4;
+    var fcos: f32 = 1;
+    var fsin: f32 = 0;
+    if (flowing) {
+        const fa = std.math.atan2(-dhdx, -dhdz);
+        fcos = @cos(fa);
+        fsin = @sin(fa);
+    }
+    // Depth: count same-fluid cells directly below (capped) -> 0..1 in the
+    // alpha (water opacity; lava is opaque and full-alpha).
+    var depth: u8 = 255;
+    if (kind == .water) {
+        var below: u32 = 0;
+        var yy: isize = yi - 1;
+        while (below < 32 and merge[g.at(xi, yy, zi)]) : (yy -= 1) below += 1;
+        depth = depthFactor(below);
+    }
+    const own_light: i8 = @bitCast(g.lightAt(xi, yi, zi));
     const bid_f: f32 = @floatFromInt(bid);
 
     for (tex_faces) |tf| {
         const nb = g.at(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2]);
-        if (id_occluder[nb] or waterish[nb]) continue; // hidden by solid / merged with water
-        const lp: i8 = @bitCast(g.lightAt(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2]));
+        if (id_occluder[nb] or merge[nb]) continue; // hidden by solid / merged with same fluid
+        if (kind == .lava and ctx.caveCulled(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2])) continue;
+        const lp: i8 = if (kind == .lava) own_light else @bitCast(g.lightAt(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2]));
         const is_up = tf.n[1] > 0;
+        const is_side = tf.n[1] == 0;
+        const flow_top = is_up and flowing;
+        const layer = if (flow_top or is_side) layers.flow else layers.still;
         const base = mesh.vertex_count;
         for (0..4) |i| {
             const cs = tf.corners[i];
@@ -871,7 +956,18 @@ fn emitFluid(
             const pyw = wy + py;
             const pz = wz + @as(f32, @floatFromInt(cs[2]));
             try mesh.positions.appendSlice(arena, &.{ px, pyw, pz });
-            try mesh.uv.appendSlice(arena, &.{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(tf.uvsel[i][1]) });
+            var u: f32 = @floatFromInt(tf.uvsel[i][0]);
+            var v: f32 = @floatFromInt(tf.uvsel[i][1]);
+            if (flow_top) {
+                const cx = @as(f32, @floatFromInt(cs[0])) - 0.5;
+                const cz = @as(f32, @floatFromInt(cs[2])) - 0.5;
+                u = 0.5 + 0.5 * (cx * fcos - cz * fsin);
+                v = 0.5 + 0.5 * (cx * fsin + cz * fcos);
+            } else if (is_side) {
+                u *= 0.5;
+                v = 0.5 - py * 0.5;
+            }
+            try mesh.uv.appendSlice(arena, &.{ u, v });
             try mesh.layer.append(arena, layer);
             const col = if (blend) blendedTint(ctx, .water, px - min_xf, pyw - min_yf, pz - min_zf) else base_rgb;
             try mesh.color.appendSlice(arena, &.{ col[0], col[1], col[2], depth });
@@ -1025,32 +1121,14 @@ fn getCached(
     return c;
 }
 
-const FluidTex = struct { path: []const u8, tint: biome.Tint };
-
-/// Opaque fluids carry no geometry in their model (rendered specially in-game),
-/// so resolving them yields nothing. Render lava as its own opaque full cube.
-/// (Water is *not* here — it's transparent and handled by emitFluid instead.)
-fn fluidTex(name: []const u8) ?FluidTex {
-    const b = model.stripNs(name);
-    if (std.mem.eql(u8, b, "lava")) return .{ .path = "block/lava_still", .tint = .none };
-    return null;
-}
-
 fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver: model.Resolver, tex: *texture.Builder) !Cached {
     var list: std.ArrayList(BakedFace) = .empty;
 
-    // Water contributes no opaque geometry and never occludes: it's drawn in the
-    // separate transparent pass (emitFluid), so the seabed/shore under it meshes.
-    if (isWater(name)) return .{ .faces = &.{}, .occluder = false };
-
-    // Lava: an opaque full-cube surface; it occludes so the interior of a lava
-    // body doesn't emit every face.
-    if (fluidTex(name)) |f| {
-        const layer: f32 = @floatFromInt(tex.layerFor(f.path));
-        try bakeFullCube(arena, &list, layer, f.tint);
-        markGreedy(list.items, true);
-        return .{ .faces = try list.toOwnedSlice(arena), .occluder = true };
-    }
+    // Fluids contribute no baked geometry and never occlude — both are drawn by
+    // emitFluid with real surface heights (water into the transparent pass,
+    // lava as opaque fluid geometry), so the terrain under/behind them meshes
+    // and the neighbour sliver above a 14/16 surface still draws.
+    if (isWater(name) or isLava(name)) return .{ .faces = &.{}, .occluder = false };
 
     const parts = resolver.resolveBlock(name, state) catch {
         // Fallback: a flat-color full cube via a solid texture-array layer
@@ -1719,13 +1797,13 @@ test "blendedTint ramps linearly between two biome cells" {
         .cache = &.{},
         .id_occluder = &.{},
         .is_water = &.{},
+        .is_lava = &.{},
         .waterish = &.{},
         .tint_colors = tint,
         .nkind = nkind,
-        .water_layer = 0,
         .quality = .flat,
         .blend_biomes = true,
-        .water_level = &.{},
+        .fluid_level = &.{},
         .greedy_faces = &.{},
         .interior = grid.Interior.full(g),
         .cave_y = null,
@@ -1787,13 +1865,13 @@ test "greedy pass emits only interior cells (apron feeds reads, not geometry)" {
         .cache = &cache,
         .id_occluder = &id_occluder,
         .is_water = &.{ false, false },
+        .is_lava = &.{ false, false },
         .waterish = &.{ false, false },
         .tint_colors = tint,
         .nkind = nkind,
-        .water_layer = 0,
         .quality = .flat,
         .blend_biomes = false,
-        .water_level = &.{ -1, -1 },
+        .fluid_level = &.{ -1, -1 },
         .greedy_faces = &greedy_faces,
         .interior = .{ .x0 = 1, .z0 = 1, .x1 = 3, .z1 = 3 },
         .cave_y = null,
@@ -1821,4 +1899,85 @@ test "fluid level parsing and base height" {
     try std.testing.expectEqual(@as(f32, 1.0), liquidBaseHeight(8));
     try std.testing.expectApproxEqAbs(@as(f32, (14.0 - 7.0 * 1.9) / 16.0), liquidBaseHeight(7), 1e-6);
     try std.testing.expect(liquidBaseHeight(1) < liquidBaseHeight(0)); // flowing sits below source
+}
+
+test "emitFluid: a lone lava source emits fluid-height geometry, flow-textured sides" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+
+    // 1×1×1 grid holding a single lava source; everything around is out-of-grid
+    // (reads as air), so all 6 faces are exposed.
+    var ids = [_]u16{1};
+    var lightbuf = [_]u8{0x0F}; // block light 15 (lava's own glow)
+    var names = [_][]const u8{ "", "minecraft:lava" };
+    const g: grid.Grid = .{
+        .sx = 1,
+        .sy = 1,
+        .sz = 1,
+        .min_x = 0,
+        .min_y = 0,
+        .min_z = 0,
+        .ids = &ids,
+        .light = &lightbuf,
+        .names = &names,
+    };
+    const nkind = @as(usize, biome.Tint.count);
+    const tint = try a.alloc([3]u8, 1 * nkind);
+    @memset(tint, .{ 10, 20, 30 });
+    const ctx: MeshCtx = .{
+        .g = g,
+        .cache = &.{},
+        .id_occluder = &.{ false, false },
+        .is_water = &.{ false, false },
+        .is_lava = &.{ false, true },
+        .waterish = &.{ false, false },
+        .tint_colors = tint,
+        .nkind = nkind,
+        .lava_layers = .{ .still = 5, .flow = 6 },
+        .quality = .flat,
+        .blend_biomes = false,
+        .fluid_level = &.{ -1, 0 },
+        .greedy_faces = &.{},
+        .interior = grid.Interior.full(g),
+        .cave_y = null,
+    };
+    var out: Mesh2 = .{};
+    try emitFluid(a, &out, &ctx, .lava, 0, 0, 0, 0, 0, 0, 0);
+
+    try std.testing.expectEqual(@as(u32, 24), out.vertex_count); // 6 faces
+    // Every top vertex sits at the source height 14/16; none at full height.
+    var top_verts: usize = 0;
+    var i: usize = 0;
+    while (i < out.vertex_count) : (i += 1) {
+        const py = out.positions.items[i * 3 + 1];
+        try std.testing.expect(py == 0.0 or py < 0.9);
+        if (py > 0.0) {
+            try std.testing.expectApproxEqAbs(@as(f32, 14.0 / 16.0), py, 1e-6);
+            top_verts += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 12), top_verts); // top quad + 2 per side face
+    // Faces: a flat source top samples the STILL layer; sides the FLOW layer.
+    var still_faces: usize = 0;
+    var flow_faces: usize = 0;
+    var f: usize = 0;
+    while (f < 6) : (f += 1) {
+        const layer = out.layer.items[f * 4];
+        if (layer == 5) still_faces += 1 else if (layer == 6) flow_faces += 1;
+        // Untinted (white) + opaque alpha, lit by the cell's own block light 15.
+        try std.testing.expectEqual(@as(u8, 255), out.color.items[f * 16 + 0]);
+        try std.testing.expectEqual(@as(u8, 255), out.color.items[f * 16 + 3]);
+        try std.testing.expectEqual(@as(i8, 0x0F), out.normals.items[f * 16 + 3]);
+    }
+    try std.testing.expectEqual(@as(usize, 2), still_faces); // flat top + bottom
+    try std.testing.expectEqual(@as(usize, 4), flow_faces); // 4 sides
+    // Side-face UVs stay in the flow texture's top-left quadrant-ish window:
+    // u ∈ {0, .5}, v from (1-h)/2 at the surface down to .5 at the base.
+    var k: usize = 0;
+    while (k < out.vertex_count) : (k += 1) {
+        const u = out.uv.items[k * 2];
+        const v = out.uv.items[k * 2 + 1];
+        try std.testing.expect(u >= 0.0 and u <= 1.0 and v >= 0.0 and v <= 1.0);
+    }
 }

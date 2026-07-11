@@ -990,11 +990,14 @@ export class VantageViewer {
       if (this.shader) (this.shader.uniforms['uFogCenter']!.value as THREE.Vector2).set(focus.x, focus.z);
     }
 
-    // Ease the textured<->biome crossfade, and advance the water-animation clock.
+    // Ease the textured<->biome crossfade, and advance the texture-animation
+    // clock (water, lava, magma, … step through their baked frames). Wrapped
+    // hourly so the f32 uniform keeps sub-frame precision on long sessions.
     if (this.shader) {
       this.mixCurrent += (this.mixTarget - this.mixCurrent) * 0.2;
       if (Math.abs(this.mixCurrent - this.mixTarget) < 0.0015) this.mixCurrent = this.mixTarget;
       this.shader.uniforms['uBiomeMix']!.value = this.mixCurrent;
+      this.shader.uniforms['uTime']!.value = (now / 1000) % 3600;
     }
 
     this.pickHover();

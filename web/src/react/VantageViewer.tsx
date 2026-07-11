@@ -15,14 +15,18 @@ import {
   type TileSource,
   type TileStats,
   type ViewMode,
+  type WorldSource,
 } from '../three/index.js';
 import { VantageContext, type VantageContextValue, type VantageStatus } from './context.js';
 import { injectStyles } from './styles.js';
 
 export interface VantageViewerProps {
-  /** A tiled world to stream: the `manifest.json` URL (from `vantage render`).
+  /** A tiled world to stream: the `manifest.json` URL (from `vantage render`),
+   *  or a `WorldSource` for renders that don't live on a server — e.g.
+   *  `worldFromDirectory(handle)` for a folder the user picked. Keep the object
+   *  referentially stable (state/memo): a new identity reloads the world.
    *  Takes precedence over `tile`. */
-  world?: string;
+  world?: string | WorldSource;
   /** A single `.vtile` to render: a URL, a raw buffer, or already-decoded data. */
   tile?: TileSource;
   /** The `.vtexarr` texture array (required for textured tiles). */

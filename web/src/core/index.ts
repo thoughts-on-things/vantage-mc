@@ -14,6 +14,7 @@ export {
 } from './tile.js';
 export { parseTextureArray, type DecodedTextureArray } from './texture.js';
 export { parseManifest, tileKey, type WorldManifest, type ManifestTile, type LowresLevel } from './manifest.js';
+export { worldFromUrl, worldFromDirectory, worldFromFiles, type WorldSource, type WorldFetch } from './source.js';
 export { parseLowresTile, LOWRES_EMPTY, LOWRES_MAGIC, type LowresTile } from './lowres.js';
 export { isGzip, maybeInflate } from './gzip.js';
 export {

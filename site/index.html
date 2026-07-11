@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vantage — your Minecraft world as a living 3D map</title>
+    <meta
+      name="description"
+      content="Vantage bakes a Minecraft Java world into streaming 3D tiles in seconds and renders it in the browser at 120+ FPS. Open source, no server required — explore the demo or point it at your own render."
+    />
+    <meta property="og:title" content="Vantage — your Minecraft world as a living 3D map" />
+    <meta
+      property="og:description"
+      content="A native-speed Minecraft world → 3D web map renderer. Whole worlds in seconds, streamed to the browser."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://vantage.beacon-mc.io/" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><rect width=%2216%22 height=%226%22 fill=%22%235b9bff%22/><rect width=%2216%22 height=%2210%22 y=%226%22 fill=%22%2357a64e%22/></svg>" />
+    <style>
+      /* Pre-hydration shell: match the app background so there is no flash. */
+      html, body { margin: 0; height: 100%; background: #0b0e14; }
+      #root { min-height: 100%; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

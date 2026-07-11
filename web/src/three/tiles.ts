@@ -25,6 +25,7 @@ import {
   type ManifestTile,
   type Rgb,
   type SurfaceMap,
+  type WorldFetch,
   type WorldManifest,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
@@ -32,8 +33,9 @@ import { buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, type TileMe
 
 export interface TileManagerOptions {
   manifest: WorldManifest;
-  /** URL the manifest was fetched from — tile paths resolve relative to it. */
-  baseUrl: string;
+  /** Fetch a file by manifest-relative path — a {@link WorldSource}'s `fetch`
+   *  (HTTP, a local folder, …). Tile paths are passed through verbatim. */
+  fetch: WorldFetch;
   scene: THREE.Scene;
   /** The shared terrain shader (from {@link createTerrainMaterial}). */
   material: THREE.ShaderMaterial;
@@ -371,10 +373,7 @@ export class TileManager {
     this.records.set(key, rec);
     this.inFlight++;
     try {
-      const url = new URL(ref.path, this.opts.baseUrl).toString();
-      const res = await fetch(url, { signal: abort.signal });
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
-      const tile = parseLowresTile(await maybeInflate(await res.arrayBuffer()));
+      const tile = parseLowresTile(await maybeInflate(await this.opts.fetch(ref.path, abort.signal)));
       if (this.disposed || rec.state !== 'loading') return; // unloaded mid-fetch
       const mesh = buildLowresMesh(tile, this.lowresMaterial);
       if (!mesh) {
@@ -446,10 +445,7 @@ export class TileManager {
     this.records.set(key, rec);
     this.inFlight++;
     try {
-      const url = new URL(ref.path, this.opts.baseUrl).toString();
-      const res = await fetch(url, { signal: abort.signal });
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
-      const buffer = await maybeInflate(await res.arrayBuffer());
+      const buffer = await maybeInflate(await this.opts.fetch(ref.path, abort.signal));
       if (this.disposed || rec.state !== 'loading') return; // unloaded mid-fetch
 
       // VTL6 fast path: keep the on-disk quantized encoding as zero-copy views

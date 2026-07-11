@@ -1,0 +1,101 @@
+# Build and deploy vantage.beacon-mc.io to GitHub Pages.
+#
+# The site is fully static: the landing page + viewer (site/), the vantage-mc
+# library it embeds (web/), and a demo world rendered by the freshly-built
+# generator. Minecraft assets are extracted from the official client jar at
+# build time (downloaded from Mojang's CDN, same as any launcher/BlueMap) so
+# no Mojang-owned files ever live in the repo.
+#
+# One-time repo setup (Settings → Pages): set Source to "GitHub Actions" and
+# the custom domain to vantage.beacon-mc.io. DNS: CNAME vantage.beacon-mc.io
+# → thoughts-on-things.github.io.
+
+name: Deploy site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push supersedes an in-flight build.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  # The client-jar version the demo world's textures come from. The demo save
+  # is a 1.21-era world; any release from then on renders it correctly.
+  MC_VERSION: "26.2"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+
+      - name: Build the generator
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Cache Minecraft assets
+        id: mc-assets
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vantage/assets
+          key: mc-assets-${{ env.MC_VERSION }}
+
+      - name: Extract Minecraft assets from the official client jar
+        if: steps.mc-assets.outputs.cache-hit != 'true'
+        run: |
+          curl -sf https://piston-meta.mojang.com/mc/game/version_manifest_v2.json -o /tmp/versions.json
+          VER_URL=$(jq -r --arg v "$MC_VERSION" '.versions[] | select(.id == $v) | .url' /tmp/versions.json)
+          test -n "$VER_URL" || { echo "version $MC_VERSION not in Mojang's manifest"; exit 1; }
+          JAR_URL=$(curl -sf "$VER_URL" | jq -r '.downloads.client.url')
+          curl -sfL "$JAR_URL" -o "/tmp/$MC_VERSION.jar"
+          ./zig-out/bin/vantage extract "/tmp/$MC_VERSION.jar"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            site/package-lock.json
+
+      - name: Build the vantage-mc library
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build the site
+        working-directory: site
+        run: |
+          npm ci
+          npm run build
+
+      - name: Render the demo world
+        run: ./zig-out/bin/vantage render site/demo-world --out site/dist/demo
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

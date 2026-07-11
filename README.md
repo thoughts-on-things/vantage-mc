@@ -5,6 +5,9 @@
 
 A high-performance Minecraft (Java Edition) world → 3D web map renderer, written in Zig.
 
+**Live demo: [vantage.beacon-mc.io](https://vantage.beacon-mc.io)** — the real
+viewer streaming a real world, plus a measured side-by-side against BlueMap.
+
 Vantage turns a Minecraft world into a fast, beautiful, navigable 3D map in the
 browser, built around four ordered goals:
 
@@ -67,14 +70,17 @@ just web-install   # once: install the viewer's npm deps
 Vantage reads models, textures, and biome data straight from a Minecraft client
 jar (Mojang's assets aren't redistributable, so you extract them once from your
 own copy — anything from 1.18 up through the current year-versioned releases
-works):
+works). If Minecraft is installed locally this happens **automatically on the
+first render**; otherwise (or to re-extract) point the built-in extractor at
+any client jar:
 
 ```sh
-just extract ~/.minecraft/versions/26.2/26.2.jar
+vantage extract                                      # newest jar in .minecraft/versions
+vantage extract ~/.minecraft/versions/26.2/26.2.jar  # …or an explicit one
 ```
 
-or by hand with `unzip` (see the recipe in the [`Justfile`](./Justfile)) into
-`~/.cache/vantage/assets/default`.
+The subset a render needs lands in `~/.cache/vantage/assets/<version>` (a few
+MB — blockstates, block models and textures, colormaps, biome data).
 
 ### 2. Render your world
 
@@ -130,6 +136,7 @@ stream tiles into your own three.js scene.
 
 ```sh
 vantage render  <save> [flags]                       # world → tiles + manifest + LOD pyramid
+vantage extract [client.jar]                         # populate the asset cache (auto-discovers the jar)
 vantage meshtex <region.mca> <out.vtile> <assets> [cx0 cz0 cx1 cz1]
                                                      # textured mesh of one region window
 vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]  # flat-color mesh, no assets needed

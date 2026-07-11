@@ -90,3 +90,28 @@ jobs:
         run: npm run build
       - name: Build demo
         run: npm run build:demo
+
+  site:
+    name: site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            site/package-lock.json
+      # The site links vantage-mc from ../web (file:), so the library's dist
+      # must exist before the site can typecheck or build.
+      - name: Build the vantage-mc library
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Typecheck & build the site
+        working-directory: site
+        run: |
+          npm ci
+          npm run ci

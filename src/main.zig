@@ -25,6 +25,7 @@ const biome = @import("biome.zig");
 const lang = @import("lang.zig");
 const world = @import("world.zig");
 const lowres = @import("lowres.zig");
+const extract = @import("extract.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -41,6 +42,8 @@ pub fn main(init: std.process.Init) !void {
         return;
     } else if (std.mem.eql(u8, args[1], "render")) {
         return runRender(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "extract")) {
+        return runExtract(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "mesh")) {
         return runMesh(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "meshtex")) {
@@ -71,6 +74,10 @@ fn printUsage() void {
         \\                  [--threads <n>]
         \\      Render the whole populated world as streamable tiles + manifest.json
         \\      (default out: web/public). --radius caps to a window around spawn.
+        \\      Missing assets are extracted automatically from your newest client jar.
+        \\  vantage extract [client.jar]
+        \\      Extract the assets a render needs into ~/.cache/vantage/assets/<version>.
+        \\      With no argument, uses the newest jar in your .minecraft/versions.
         \\  vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]
         \\  vantage meshtex <region.mca> <out.vtile> <assets/minecraft dir> [cx0 cz0 cx1 cz1] [--light flat|smooth] [--biome-blend on|off]
         \\  vantage histo   <region.mca> [localX localZ]
@@ -451,10 +458,12 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
 
     const home = init.environ_map.get("HOME") orelse
         init.environ_map.get("USERPROFILE") orelse ""; // Windows has no HOME
-    const assets = assets_opt orelse (try findAssets(a, init.io, home)) orelse {
+    const assets = assets_opt orelse (try findAssets(a, init.io, home)) orelse
+        (try autoExtract(init, a, home)) orelse {
         std.debug.print(
-            \\no extracted assets found. Get them from a client jar first:
-            \\  just extract <client.jar>     (or pass --assets <assets/minecraft dir>)
+            \\no extracted assets found, and no Minecraft installation to extract from.
+            \\Point `vantage extract` at any client jar first:
+            \\  vantage extract <path/to/client.jar>    (or pass --assets <assets/minecraft dir>)
             \\
         , .{});
         return error.NoAssets;
@@ -1081,6 +1090,109 @@ fn appendJsonString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8
     try out.append(a, '"');
 }
 
+/// `vantage extract [client.jar]` — populate the asset cache from a client jar.
+/// With no argument, auto-discovers the newest jar in the local Minecraft
+/// installation, so a fresh `vantage render <save>` works with zero setup.
+fn runExtract(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    const home = init.environ_map.get("HOME") orelse
+        init.environ_map.get("USERPROFILE") orelse "";
+    const jar = if (args.len >= 1 and !std.mem.startsWith(u8, args[0], "-"))
+        args[0]
+    else
+        (try findClientJar(a, init.io, init.environ_map, home)) orelse {
+            std.debug.print(
+                \\no Minecraft client jar found under .minecraft/versions.
+                \\Pass one explicitly:  vantage extract <path/to/client.jar>
+                \\
+            , .{});
+            return error.NoClientJar;
+        };
+    const dest = try assetCachePathForJar(a, home, jar);
+    const summary = try extract.extractJar(init.io, jar, dest);
+    std.debug.print("extracted {d} files ({Bi:.1}) from {s}\n  -> {s}\n", .{ summary.files, summary.bytes, jar, dest });
+}
+
+/// When a render finds no cached assets, extract them from the newest local
+/// client jar automatically (announcing what happened). Returns the resulting
+/// `assets/minecraft` dir, or null when there is nothing to extract from.
+fn autoExtract(init: std.process.Init, a: std.mem.Allocator, home: []const u8) !?[]const u8 {
+    if (home.len == 0) return null;
+    const jar = (try findClientJar(a, init.io, init.environ_map, home)) orelse return null;
+    const dest = try assetCachePathForJar(a, home, jar);
+    std.debug.print("no cached assets found — extracting from {s} (one-time)\n", .{jar});
+    const summary = extract.extractJar(init.io, jar, dest) catch |e| {
+        std.debug.print("extraction failed ({t}); pass --assets or run `vantage extract <jar>`\n", .{e});
+        return null;
+    };
+    std.debug.print("extracted {d} files ({Bi:.1}) -> {s}\n", .{ summary.files, summary.bytes, dest });
+    return try std.fmt.allocPrint(a, "{s}/assets/minecraft", .{dest});
+}
+
+/// `~/.cache/vantage/assets/<version>` for a jar, versioned by the jar's file
+/// stem ("26.2.jar" -> "26.2") so `findAssets` picks the newest via its
+/// natural version sort.
+fn assetCachePathForJar(a: std.mem.Allocator, home: []const u8, jar_path: []const u8) ![]const u8 {
+    const base = std.fs.path.basename(jar_path);
+    const stem = if (std.mem.endsWith(u8, base, ".jar")) base[0 .. base.len - ".jar".len] else base;
+    const name = if (stem.len == 0) "default" else stem;
+    return std.fmt.allocPrint(a, "{s}/.cache/vantage/assets/{s}", .{ home, name });
+}
+
+/// Find the newest client jar in the local Minecraft installation
+/// (`.minecraft/versions/<v>/<v>.jar`), checking the platform's launcher
+/// locations. Returns null when Minecraft isn't installed locally.
+fn findClientJar(a: std.mem.Allocator, io: std.Io, environ: anytype, home: []const u8) !?[]const u8 {
+    var roots_buf: [3][]const u8 = undefined;
+    var roots_len: usize = 0;
+    if (environ.get("APPDATA")) |appdata| { // Windows launcher default
+        roots_buf[roots_len] = try std.fmt.allocPrint(a, "{s}/.minecraft", .{appdata});
+        roots_len += 1;
+    }
+    if (home.len > 0) {
+        // macOS launcher default, then the Linux/portable default.
+        roots_buf[roots_len] = try std.fmt.allocPrint(a, "{s}/Library/Application Support/minecraft", .{home});
+        roots_len += 1;
+        roots_buf[roots_len] = try std.fmt.allocPrint(a, "{s}/.minecraft", .{home});
+        roots_len += 1;
+    }
+
+    // Prefer vanilla-looking versions (they start with a digit: "1.21.11",
+    // "26.2", "25w34b") over modded profiles ("fabric-loader-…", "forge-…"),
+    // which would otherwise win the lexical tie-break; within a tier, newest
+    // wins by natural version order. Modded jars still work as a last resort —
+    // most bundle the vanilla assets.
+    var best_jar: ?[]const u8 = null;
+    var best_name: []const u8 = "";
+    var best_vanilla = false;
+    for (roots_buf[0..roots_len]) |root| {
+        const versions = try std.fmt.allocPrint(a, "{s}/versions", .{root});
+        var dir = std.Io.Dir.cwd().openDir(io, versions, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |e| {
+            if (e.kind != .directory) continue;
+            const jar = try std.fmt.allocPrint(a, "{s}/{s}/{s}.jar", .{ versions, e.name, e.name });
+            if (!fileExists(io, jar)) continue;
+            const vanilla = e.name.len > 0 and std.ascii.isDigit(e.name[0]);
+            const better = best_jar == null or
+                (vanilla and !best_vanilla) or
+                (vanilla == best_vanilla and versionLessThan(best_name, e.name));
+            if (better) {
+                best_jar = jar;
+                best_name = try a.dupe(u8, e.name);
+                best_vanilla = vanilla;
+            }
+        }
+    }
+    return best_jar;
+}
+
+fn fileExists(io: std.Io, path: []const u8) bool {
+    var f = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    f.close(io);
+    return true;
+}
+
 /// Auto-detect an extracted `assets/minecraft` under `~/.cache/vantage/assets/<ver>/`,
 /// preferring the highest-named version. Returns null if none is found.
 fn findAssets(a: std.mem.Allocator, io: std.Io, home: []const u8) !?[]const u8 {
@@ -1107,7 +1219,9 @@ fn findAssets(a: std.mem.Allocator, io: std.Io, home: []const u8) !?[]const u8 {
 /// Natural-order compare for version-ish directory names, so "1.21.10" beats
 /// "1.21.4", and the year-versioned scheme ("26.2", 2026+) beats both (lexical
 /// order gets all of these wrong). Digit runs compare numerically, everything
-/// else byte-wise.
+/// else byte-wise. A `-suffix` marks a pre-release, so "26.2" beats
+/// "26.2-pre-4" — otherwise auto-picking would prefer release candidates over
+/// the release they precede.
 fn versionLessThan(a_name: []const u8, b_name: []const u8) bool {
     var i: usize = 0;
     var j: usize = 0;
@@ -1130,6 +1244,10 @@ fn versionLessThan(a_name: []const u8, b_name: []const u8) bool {
             j += 1;
         }
     }
+    // One name is a prefix of the other. If the remainder starts with `-`, the
+    // longer name is a pre-release of the shorter — it sorts BELOW the release.
+    if (i >= a_name.len and j < b_name.len and b_name[j] == '-') return false;
+    if (j >= b_name.len and i < a_name.len and a_name[i] == '-') return true;
     return (a_name.len - i) < (b_name.len - j);
 }
 
@@ -1143,6 +1261,11 @@ test versionLessThan {
     try std.testing.expect(versionLessThan("25.4", "26.2"));
     try std.testing.expect(versionLessThan("26.2", "26.10"));
     try std.testing.expect(!versionLessThan("default", "1.21.4") or versionLessThan("1.21.4", "default"));
+    // Pre-releases sort below the release they precede, but above older releases.
+    try std.testing.expect(versionLessThan("26.2-pre-4", "26.2"));
+    try std.testing.expect(!versionLessThan("26.2", "26.2-pre-4"));
+    try std.testing.expect(versionLessThan("26.2-pre-4", "26.2-pre-5"));
+    try std.testing.expect(versionLessThan("26.1.2", "26.2-pre-4"));
 }
 
 fn dirExists(io: std.Io, path: []const u8) bool {

@@ -1,0 +1,113 @@
+{
+ "world": "New World — 7,225 chunks",
+ "threads": 16,
+ "vantage": {
+  "name": "vantage",
+  "cmd": "vantage render \"New World\" --out map/",
+  "total": 4746,
+  "lines": [
+   {
+    "t": 131,
+    "text": "world:   ~/.minecraft/saves/New World/region"
+   },
+   {
+    "t": 131,
+    "text": "assets:  ~/.cache/vantage/assets/1.21.11/assets/minecraft"
+   },
+   {
+    "t": 143,
+    "text": "regions: 16 files · 7225 populated chunks · extent 85×85 chunks · 132 tiles of 8×8 chunks"
+   },
+   {
+    "t": 4740,
+    "text": "chunks:  7225 populated (11235 decodes incl. apron overlap)"
+   },
+   {
+    "t": 4740,
+    "text": "blocks:  766 block states, 22 biomes"
+   },
+   {
+    "t": 4740,
+    "text": "tiles:   81 written (124.9 MB gzipped, 970.5 MB raw) + texture array (292 layers)"
+   },
+   {
+    "t": 4740,
+    "text": "lowres:  38 LOD tiles across 3 levels (0.5 MB)"
+   },
+   {
+    "t": 4740,
+    "text": "mesh:    31634108 vertices, 15817054 triangles (2409552 water verts)"
+   },
+   {
+    "t": 4740,
+    "text": "out:     map/"
+   },
+   {
+    "t": 4740,
+    "text": "timings: wall 4592ms on 16 thread(s) · cpu: read 2855ms · light 13544ms · geometry 42903ms · write 7825ms"
+   }
+  ],
+  "progress": []
+ },
+ "bluemap": {
+  "name": "BlueMap CLI",
+  "cmd": "java -Xmx4g -jar bluemap-5.22-cli.jar -r",
+  "total": 28318,
+  "lines": [
+   {
+    "t": 791,
+    "text": "[00:28:03 INFO] Loading resources..."
+   },
+   {
+    "t": 1553,
+    "text": "[00:28:04 INFO] Resources loaded."
+   },
+   {
+    "t": 1624,
+    "text": "[00:28:04 INFO] Initializing Storage: 'file' (Type: 'bluemap:file')"
+   },
+   {
+    "t": 1626,
+    "text": "[00:28:04 INFO] Loading map 'overworld'..."
+   },
+   {
+    "t": 1745,
+    "text": "[00:28:04 INFO] Start updating 1 maps ..."
+   },
+   {
+    "t": 11790,
+    "text": "[00:28:14 INFO] updating map 'overworld': 14.398% (ETA: 1.1 minutes)"
+   },
+   {
+    "t": 21751,
+    "text": "[00:28:24 INFO] updating map 'overworld': 41.522% (ETA: 33 seconds)"
+   },
+   {
+    "t": 28255,
+    "text": "[00:28:30 INFO] Your maps are now all up-to-date!"
+   },
+   {
+    "t": 28256,
+    "text": "[00:28:30 INFO] Stopping..."
+   },
+   {
+    "t": 28258,
+    "text": "[00:28:30 INFO] Saving..."
+   },
+   {
+    "t": 28272,
+    "text": "[00:28:30 INFO] Stopped."
+   }
+  ],
+  "progress": [
+   {
+    "t": 11790,
+    "p": 0.14398
+   },
+   {
+    "t": 21751,
+    "p": 0.41522
+   }
+  ]
+ }
+}

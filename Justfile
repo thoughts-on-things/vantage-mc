@@ -79,14 +79,26 @@ serve:
 # Full loop: mesh the demo area, then serve the viewer.
 demo: mesh serve
 
-# Extract the assets + biome data + lang a render needs: `just extract <client.jar>`.
-extract jar:
-    unzip -oq "{{jar}}" \
-      'assets/minecraft/blockstates/*' 'assets/minecraft/models/block/*' \
-      'assets/minecraft/textures/block/*' 'assets/minecraft/textures/colormap/*' \
-      'assets/minecraft/lang/en_us.json' 'data/minecraft/worldgen/biome/*' \
-      -d "{{cache}}"
-    @echo "extracted to {{cache}}"
+# ---- the marketing/demo site (site/ → vantage.beacon-mc.io) ----
+
+# One-time site setup: install deps and build the linked vantage-mc package.
+site-install:
+    cd web && npm install && npm run build
+    cd site && npm install
+
+# Render the committed demo world into the site dev server (once, ~3 s).
+site-demo: build
+    {{bin}} render site/demo-world --out site/public/demo
+
+# Serve the site locally (needs `just site-install` and `just site-demo` once).
+site-serve:
+    @echo "→ http://127.0.0.1:8754/"
+    cd site && npm run dev
+
+# Extract the assets + biome data + lang a render needs (built into the binary;
+# `just extract` auto-discovers the newest jar in .minecraft/versions).
+extract jar='': build
+    {{bin}} extract {{jar}}
 
 # Headless viewer screenshot to OUT (PATH e.g. '#biome'): `just shot docs/b.png '#biome'`.
 shot out='shot.png' path='/':

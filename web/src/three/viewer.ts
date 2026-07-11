@@ -17,6 +17,8 @@ import {
   type DecodedTile,
   type SurfaceMap,
   type WorldManifest,
+  type WorldSource,
+  worldFromUrl,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
 import { createLowresMaterial, createSky, createTerrainMaterial, createWaterMaterial, SKY_HORIZON } from './materials.js';
@@ -115,8 +117,10 @@ export type TileSource = string | ArrayBuffer | DecodedTile;
 export type TextureSource = string | ArrayBuffer | DecodedTextureArray;
 
 export interface LoadOptions {
-  /** A tiled world to stream: the `manifest.json` URL. Takes precedence over `tile`. */
-  world?: string;
+  /** A tiled world to stream: the `manifest.json` URL, or a {@link WorldSource}
+   *  for worlds that don't live on an HTTP server (a local folder, a zip — see
+   *  `worldFromDirectory` / `worldFromFiles`). Takes precedence over `tile`. */
+  world?: string | WorldSource;
   /** A single `.vtile` to render (the non-streaming path). */
   tile?: TileSource;
   /** The `.vtexarr` texture array (required for textured tiles). */
@@ -377,12 +381,10 @@ export class VantageViewer {
   /** Stream a tiled world render from its `manifest.json`. Tiles load around
    *  the camera as it moves and unload behind it; the whole world is reachable
    *  without ever holding more than the streaming budget in memory. */
-  private async loadWorld(url: string, view: ViewMode): Promise<void> {
-    const abs = new URL(url, typeof document !== 'undefined' ? document.baseURI : undefined).toString();
-    const res = await fetch(abs);
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${abs}`);
-    const manifest = parseManifest(await res.json());
-    const texData = parseTextureArray(await maybeInflate(await fetchBuffer(new URL(manifest.textures, abs).toString())));
+  private async loadWorld(world: string | WorldSource, view: ViewMode): Promise<void> {
+    const source = typeof world === 'string' ? await worldFromUrl(world) : world;
+    const manifest = parseManifest(source.manifest);
+    const texData = parseTextureArray(await maybeInflate(await source.fetch(manifest.textures)));
 
     this.disposeCurrent();
     const palette = biomePalette(manifest.biomes.length);
@@ -400,7 +402,7 @@ export class VantageViewer {
     this.tile = null;
     this.tiles = new TileManager({
       manifest,
-      baseUrl: abs,
+      fetch: source.fetch,
       scene: this.scene,
       material: shader,
       waterMaterial: waterShader,

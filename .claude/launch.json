@@ -7,6 +7,13 @@
       "runtimeArgs": ["--prefix", "web", "run", "dev"],
       "port": 8753,
       "autoPort": true
+    },
+    {
+      "name": "site",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "site", "run", "dev"],
+      "port": 8754,
+      "autoPort": true
     }
   ]
 }

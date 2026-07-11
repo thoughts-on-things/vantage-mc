@@ -1,0 +1,5 @@
+node_modules/
+dist/
+# The demo render is baked from demo-world/ (locally: `just site-demo`; in CI:
+# the Pages workflow) — never committed.
+public/demo/

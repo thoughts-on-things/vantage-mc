@@ -5,6 +5,10 @@ zig-out/
 # Generated tiles (regenerate with `vantage mesh` / `meshtex` → web/public/)
 *.vtile
 *.vtexarr
+# … except the small gzip-wrapped golden fixtures the web tests decode
+# (produced by the real Zig generator; see web/test/golden.test.ts).
+!web/test/fixtures/*.vtile
+!web/test/fixtures/*.vtexarr
 
 # Web package (see web/.gitignore for the rest)
 web/node_modules/

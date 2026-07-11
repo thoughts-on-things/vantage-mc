@@ -25,6 +25,8 @@
   "files": [
     "dist"
   ],
+  "types": "./dist/three/index.d.ts",
+  "module": "./dist/three/index.js",
   "exports": {
     ".": {
       "types": "./dist/three/index.d.ts",
@@ -51,7 +53,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "ci": "npm run typecheck && npm run test && npm run build"
+    "ci": "npm run typecheck && npm run test && npm run build",
+    "prepublishOnly": "npm run ci"
   },
   "overrides": {
     "tsup": {

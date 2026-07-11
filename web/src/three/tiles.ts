@@ -77,8 +77,11 @@ interface Record_ {
   ref: ManifestTile;
   /** Pyramid level: 0 = hires, ≥1 = lowres LOD ring. */
   level: number;
-  /** `built` = decoded and meshed, queued for its staggered scene insertion. */
-  state: 'loading' | 'built' | 'ready' | 'failed';
+  /** `built` = decoded and meshed, queued for its staggered scene insertion.
+   *  `failed` retries with backoff while still in view; `empty` never does. */
+  state: 'loading' | 'built' | 'ready' | 'failed' | 'empty';
+  /** For `failed`: earliest time (performance.now()) to retry the fetch. */
+  retryAt?: number;
   abort?: AbortController;
   terrain?: THREE.Mesh;
   water?: THREE.Mesh;
@@ -130,6 +133,10 @@ export class TileManager {
   private lastFocusX = Infinity;
   private lastFocusZ = Infinity;
   private disposed = false;
+  /** Fetch-failure counts per record key, surviving record deletion so retry
+   *  backoff escalates; cleared on success or unload (a fresh pan-in retries). */
+  private failCounts = new Map<string, number>();
+  private nextRetrySweep = 0;
 
   private biomesCache: BiomeEntry[] | null = null;
   private statsCache: TileStats | null = null;
@@ -164,9 +171,15 @@ export class TileManager {
     return this.lowLevels.find((l) => l.level === level)?.tileBlocks ?? this.tileBlocks * 2 ** level;
   }
 
-  private distTo(t: ManifestTile, level: number, x: number, z: number): number {
+  /** Squared distance from the focus to a tile centre. The re-plan compares
+   *  and sorts distances over every manifest tile (potentially 10⁵ on a big
+   *  world), so it stays in squared space — one sqrt per tile is the single
+   *  hottest thing the planner does. */
+  private distSqTo(t: ManifestTile, level: number, x: number, z: number): number {
     const tb = this.levelBlocks(level);
-    return Math.hypot((t.x + 0.5) * tb - x, (t.z + 0.5) * tb - z);
+    const dx = (t.x + 0.5) * tb - x;
+    const dz = (t.z + 0.5) * tb - z;
+    return dx * dx + dz * dz;
   }
 
   /**
@@ -177,6 +190,7 @@ export class TileManager {
   update(focusX: number, focusZ: number): void {
     if (this.disposed) return;
     this.flushOne();
+    this.retrySweep();
     if (this.coverageDirty) this.applyCoverage();
     // Re-plan only when the focus has moved a quarter tile; otherwise just keep
     // the fetch pipeline full. (The first call always plans: lastFocus = ∞.)
@@ -191,10 +205,12 @@ export class TileManager {
     const { viewDistance, maxTiles } = this.opts;
 
     // Hires: the nearest maxTiles tiles within viewDistance of the focus.
+    // (`d` values are squared throughout the plan — only compared and sorted.)
     const desired: { t: ManifestTile; d: number }[] = [];
+    const viewDistSq = viewDistance * viewDistance;
     for (const t of this.index.values()) {
-      const d = this.distTo(t, 0, focusX, focusZ);
-      if (d <= viewDistance) desired.push({ t, d });
+      const d = this.distSqTo(t, 0, focusX, focusZ);
+      if (d <= viewDistSq) desired.push({ t, d });
     }
     desired.sort((a, b) => a.d - b.d);
     if (desired.length > maxTiles) desired.length = maxTiles;
@@ -209,11 +225,11 @@ export class TileManager {
     for (let i = 0; i < this.lowLevels.length; i++) {
       const lvl = this.lowLevels[i]!;
       const top = i === this.lowLevels.length - 1;
-      const outer = top ? Infinity : viewDistance * 2 ** lvl.level;
-      const inner = top || i === 0 ? 0 : viewDistance * 2 ** (lvl.level - 1) * 0.85;
+      const outer = top ? Infinity : (viewDistance * 2 ** lvl.level) ** 2;
+      const inner = top || i === 0 ? 0 : (viewDistance * 2 ** (lvl.level - 1) * 0.85) ** 2;
       const ring: { ref: ManifestTile; level: number; d: number }[] = [];
       for (const t of lvl.tiles) {
-        const d = this.distTo(t, lvl.level, focusX, focusZ);
+        const d = this.distSqTo(t, lvl.level, focusX, focusZ);
         if (d <= outer && d >= inner) ring.push({ ref: t, level: lvl.level, d });
       }
       ring.sort((a, b) => a.d - b.d);
@@ -232,9 +248,9 @@ export class TileManager {
       if (desiredKeys.has(key)) continue;
       const top = this.lowLevels.length > 0 && rec.level === this.lowLevels[this.lowLevels.length - 1]!.level;
       if (top) continue; // the blanket never unloads
-      const d = this.distTo(rec.ref, rec.level, focusX, focusZ);
+      const d = this.distSqTo(rec.ref, rec.level, focusX, focusZ);
       const keep = rec.level === 0 ? viewDistance * 1.25 : viewDistance * 2 ** rec.level * 1.25;
-      if (d > keep) this.unload(key, rec);
+      if (d > keep * keep) this.unload(key, rec);
     }
 
     // Queue what's missing: the coarsest blanket first (whole-world coverage
@@ -362,7 +378,7 @@ export class TileManager {
       if (this.disposed || rec.state !== 'loading') return; // unloaded mid-fetch
       const mesh = buildLowresMesh(tile, this.lowresMaterial);
       if (!mesh) {
-        rec.state = 'failed'; // all-empty tile: nothing to draw, don't retry
+        rec.state = 'empty'; // all-empty tile: nothing to draw, never retry
         return;
       }
       // Coarser rings draw first (less overdraw); the dip in buildLowresMesh
@@ -383,17 +399,42 @@ export class TileManager {
       rec.vertexCount = tile.width * tile.depth;
       rec.triangleCount = mesh.geometry.index!.count / 3;
       rec.state = 'built';
+      this.failCounts.delete(key);
       this.pendingAdd.push(key);
       this.invalidate();
       this.emitter.emit('change', this.stats);
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
-        rec.state = 'failed';
+        this.markFailed(key, rec);
         console.warn(`vantage: lowres tile ${key} failed to load:`, e);
       }
     } finally {
       this.inFlight--;
       this.pump();
+    }
+  }
+
+  /** A transient failure (network blip, 5xx) retries with exponential backoff
+   *  while the tile stays in view — otherwise one blip is a permanent hole in
+   *  the map until the user pans away and back. Capped so a genuinely bad tile
+   *  (corrupt file, future format) settles instead of hammering the server.
+   *  Attempt counts live outside the record because a retry deletes it. */
+  private markFailed(key: string, rec: Record_): void {
+    rec.state = 'failed';
+    const attempts = (this.failCounts.get(key) ?? 0) + 1;
+    this.failCounts.set(key, attempts);
+    rec.retryAt = attempts >= 5 ? Infinity : performance.now() + 2000 * 2 ** (attempts - 1);
+  }
+
+  /** Re-queue failed records whose backoff has expired (cheap; throttled). */
+  private retrySweep(): void {
+    const now = performance.now();
+    if (now < this.nextRetrySweep) return;
+    this.nextRetrySweep = now + 500;
+    for (const [key, rec] of this.records) {
+      if (rec.state !== 'failed' || now < (rec.retryAt ?? Infinity)) continue;
+      this.records.delete(key);
+      this.queue.push({ ref: rec.ref, level: rec.level });
     }
   }
 
@@ -448,12 +489,13 @@ export class TileManager {
       // several tiles finishing together can't stack their GPU uploads into a
       // single frame. update() flushes the queue.
       rec.state = 'built';
+      this.failCounts.delete(key);
       this.pendingAdd.push(key);
       this.invalidate();
       this.emitter.emit('change', this.stats);
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
-        rec.state = 'failed';
+        this.markFailed(key, rec);
         console.warn(`vantage: tile ${key} failed to load:`, e);
       }
     } finally {
@@ -470,6 +512,7 @@ export class TileManager {
       mesh.geometry.dispose();
     }
     this.records.delete(key);
+    this.failCounts.delete(key);
     this.coverageDirty = true; // an uncovered lowres parent may need to reappear
     this.invalidate();
     this.emitter.emit('change', this.stats);

@@ -66,14 +66,15 @@ just web-install   # once: install the viewer's npm deps
 
 Vantage reads models, textures, and biome data straight from a Minecraft client
 jar (Mojang's assets aren't redistributable, so you extract them once from your
-own copy — any 1.18+ version works):
+own copy — anything from 1.18 up through the current year-versioned releases
+works):
 
 ```sh
-just extract ~/.minecraft/versions/1.21.11/1.21.11.jar
+just extract ~/.minecraft/versions/26.2/26.2.jar
 ```
 
 or by hand with `unzip` (see the recipe in the [`Justfile`](./Justfile)) into
-`~/.cache/vantage/assets/<version>`.
+`~/.cache/vantage/assets/default`.
 
 ### 2. Render your world
 
@@ -90,6 +91,8 @@ just serve         # → http://127.0.0.1:8753/
 The renderer only ever reads the world — it never writes to it. Useful flags:
 
 - `--out <dir>` — output directory (default `web/public`).
+- `--assets <dir>` — the extracted `assets/minecraft` directory (default:
+  newest version under `~/.cache/vantage/assets`).
 - `--radius <chunks>` — render only a window around spawn (quick previews).
 - `--caves off|<y>` — cave-culling horizon (default 55): faces that only look
   into dark, sky-light-0 cells below this Y are skipped. Ocean and lake floors
@@ -98,6 +101,8 @@ The renderer only ever reads the world — it never writes to it. Useful flags:
 - `--threads <n>` — tile-render parallelism (default: all logical cores).
   Peak memory is roughly one tile's working set per thread; lower it on
   RAM-constrained machines.
+- `--light flat|smooth` — bake-time light quality (default `smooth`).
+- `--biome-blend on|off` — vanilla-style biome tint gradients (default `on`).
 
 ### 3. Deploy anywhere
 
@@ -120,14 +125,18 @@ stream tiles into your own three.js scene.
 
 ## CLI reference
 
-`vantage render` is the main command; the rest are inspection tools:
+`vantage render` is the main command; the rest are inspection and debug tools
+(`vantage --help` prints the full usage):
 
 ```sh
-vantage render <save> [flags]                 # world → tiles + manifest + LOD pyramid
-vantage histo  <region.mca> <cx> <cz>         # block histogram for one chunk
-vantage biomes <region.mca> <cx0> <cz0> <cx1> <cz1>   # biome histogram
-vantage meshtex <region.mca> <out.vtile> <assets> <cx0> <cz0> <cx1> <cz1>
-                                              # mesh a single region window by hand
+vantage render  <save> [flags]                       # world → tiles + manifest + LOD pyramid
+vantage meshtex <region.mca> <out.vtile> <assets> [cx0 cz0 cx1 cz1]
+                                                     # textured mesh of one region window
+vantage mesh    <region.mca> <out.vtile> [cx0 cz0 cx1 cz1]  # flat-color mesh, no assets needed
+vantage histo   <region.mca> [localX localZ]         # block histogram for one chunk
+vantage biomes  <region.mca> [cx0 cz0 cx1 cz1]       # biome histogram
+vantage resolve <assets> <block> [state]             # debug: blockstate → model resolution
+vantage texinfo <assets> <block...>                  # debug: texture lookups
 ```
 
 ## Contributing

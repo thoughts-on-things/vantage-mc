@@ -203,7 +203,12 @@ pub fn assembleWindow(
                 if (prog) |p| p.completeOne();
                 const lx: u5 = @intCast(wx - rcx0);
                 const lz: u5 = @intCast(wz - rcz0);
-                const ch = grid.decodeChunk(arena, reg, lx, lz) catch {
+                const ch = grid.decodeChunk(arena, reg, lx, lz) catch |err| {
+                    switch (err) {
+                        error.PreModernChunk => stats.chunks_premodern += 1,
+                        error.UnsupportedCompression, error.ExternalChunk => stats.chunks_unreadable += 1,
+                        else => {},
+                    }
                     stats.chunks_missing += 1;
                     continue;
                 } orelse {

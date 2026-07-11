@@ -39,8 +39,10 @@ pub const Tint = enum(u8) {
     spruce,
     birch,
     lily,
+    redstone,
+    stem,
 
-    pub const count = 7;
+    pub const count = 9;
 };
 
 /// `grass_color_modifier` from the biome's effects — a post-process the game
@@ -154,6 +156,8 @@ pub fn colorFor(maps: Colormaps, tint: Tint, info: BiomeInfo) [3]u8 {
         .spruce => .{ 0x61, 0x99, 0x61 }, // FoliageColor.getSpruceColor
         .birch => .{ 0x80, 0xa7, 0x55 }, // FoliageColor.getBirchColor
         .lily => .{ 0x20, 0x80, 0x30 }, // lily pad
+        .redstone => .{ 0x4D, 0x00, 0x00 }, // RedStoneWireBlock power-0 colour
+        .stem => .{ 0xE0, 0xC7, 0x1C }, // StemBlock age-7 (mature) colour
     };
 }
 
@@ -242,6 +246,11 @@ pub fn blockTint(name: []const u8) Tint {
     if (std.mem.eql(u8, b, "water") or
         std.mem.eql(u8, b, "bubble_column") or
         std.mem.eql(u8, b, "water_cauldron")) return .water;
+    // Tinted but not biome-driven: redstone dust (power gradient in game) and
+    // melon/pumpkin stems (age gradient) get fixed representative colours.
+    if (std.mem.eql(u8, b, "redstone_wire")) return .redstone;
+    if (std.mem.endsWith(u8, b, "_stem") and
+        (std.mem.indexOf(u8, b, "melon") != null or std.mem.indexOf(u8, b, "pumpkin") != null)) return .stem;
     // grass family, sugar cane, and anything else tinted defaults to grass.
     return .grass;
 }
@@ -257,6 +266,12 @@ test "blockTint classification" {
     try std.testing.expectEqual(Tint.water, blockTint("minecraft:water"));
     try std.testing.expectEqual(Tint.lily, blockTint("minecraft:lily_pad"));
     try std.testing.expectEqual(Tint.foliage, blockTint("minecraft:vine"));
+    try std.testing.expectEqual(Tint.redstone, blockTint("minecraft:redstone_wire"));
+    try std.testing.expectEqual(Tint.stem, blockTint("minecraft:melon_stem"));
+    try std.testing.expectEqual(Tint.stem, blockTint("minecraft:attached_pumpkin_stem"));
+    // mushroom_stem has no tintindex, but if it ever lands here it must NOT
+    // classify as a crop stem.
+    try std.testing.expectEqual(Tint.grass, blockTint("minecraft:mushroom_stem"));
 }
 
 test "parseColor accepts hex strings and integers" {

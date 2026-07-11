@@ -83,7 +83,7 @@ export const DEFAULT_ORBIT_ANGLE = 0.42;
 export interface StreamingSettings {
   /** Stream-in radius around the camera focus, in blocks. Default `768`. */
   viewDistance?: number;
-  /** Hard cap on resident tiles (nearest win). Default `96`. */
+  /** Hard cap on resident tiles (nearest win). Default `120`. */
   maxTiles?: number;
   /** Concurrent tile fetches. Default `4`. */
   concurrency?: number;
@@ -155,15 +155,17 @@ async function fetchBuffer(url: string): Promise<ArrayBuffer> {
   return r.arrayBuffer();
 }
 
+// `maybeInflate` so single-tile mode accepts both meshtex output (raw) and
+// render output (gzip-wrapped), matching the streaming path.
 async function resolveTile(src: TileSource): Promise<DecodedTile> {
-  if (typeof src === 'string') return parseTile(await fetchBuffer(src));
-  if (src instanceof ArrayBuffer) return parseTile(src);
+  if (typeof src === 'string') return parseTile(await maybeInflate(await fetchBuffer(src)));
+  if (src instanceof ArrayBuffer) return parseTile(await maybeInflate(src));
   return src;
 }
 
 async function resolveTextures(src: TextureSource): Promise<DecodedTextureArray> {
-  if (typeof src === 'string') return parseTextureArray(await fetchBuffer(src));
-  if (src instanceof ArrayBuffer) return parseTextureArray(src);
+  if (typeof src === 'string') return parseTextureArray(await maybeInflate(await fetchBuffer(src)));
+  if (src instanceof ArrayBuffer) return parseTextureArray(await maybeInflate(src));
   return src;
 }
 
@@ -230,7 +232,7 @@ export class VantageViewer {
   private tile: DecodedTile | null = null;
   private shader: THREE.ShaderMaterial | null = null;
   private bounds = new THREE.Box3();
-  private current: { terrain: THREE.Mesh; water?: THREE.Mesh } | null = null;
+  private current: { terrain: THREE.Mesh; water?: THREE.Mesh; lights?: THREE.Light[] } | null = null;
   private _biomes: BiomeEntry[] = [];
 
   // Streamed-world state (world/manifest mode). `tiles` doubles as the mode flag.
@@ -497,7 +499,7 @@ export class VantageViewer {
    *  disc of maxTiles tiles ⇒ radius tb·√(maxTiles/π)). */
   private streamRadius(): number {
     const vd = this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768;
-    const mt = this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 96;
+    const mt = this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 120;
     const tb = this.manifest?.tileBlocks ?? 128;
     return Math.min(vd, tb * Math.sqrt(mt / Math.PI));
   }
@@ -541,10 +543,13 @@ export class VantageViewer {
     this.current = { terrain: built.terrain, water: built.water };
 
     if (built.requiresSceneLights) {
-      this.scene.add(new THREE.HemisphereLight(0xbcd7ff, 0x4a4636, 1.0));
+      const hemi = new THREE.HemisphereLight(0xbcd7ff, 0x4a4636, 1.0);
       const sun = new THREE.DirectionalLight(0xfff2d8, 1.6);
       sun.position.set(0.6, 1.0, 0.35);
-      this.scene.add(sun);
+      this.scene.add(hemi, sun);
+      // Tracked so a reload removes them — re-adding on every setTile would
+      // stack suns and overbrighten.
+      this.current.lights = [hemi, sun];
     }
 
     // Let the controls' pivot ride the terrain surface, from
@@ -771,7 +776,7 @@ export class VantageViewer {
   get streamingSettings(): Required<StreamingSettings> {
     return {
       viewDistance: this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768,
-      maxTiles: this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 96,
+      maxTiles: this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 120,
       concurrency: this.options.streaming.concurrency ?? 4,
     };
   }
@@ -1005,18 +1010,27 @@ export class VantageViewer {
     const h = this.container.clientHeight || window.innerHeight;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    // devicePixelRatio changes with monitor moves and browser zoom without a
+    // container resize necessarily following — re-apply it on every resize so
+    // the framebuffer tracks the display.
+    this.renderer.setPixelRatio(this.targetPixelRatio());
     this.renderer.setSize(w, h, false);
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
     this.msaa.setSize(Math.max(1, size.x), Math.max(1, size.y));
   }
 
   private disposeCurrent(): void {
+    // The viewer created every material and texture it holds — single-tile ones
+    // inside buildTerrain (setTile), streaming ones in loadWorld — so it owns
+    // their GPU memory in both modes and must release it on reload/dispose.
     if (this.current) {
       for (const mesh of [this.current.terrain, this.current.water]) {
         if (!mesh) continue;
         this.scene.remove(mesh);
         mesh.geometry.dispose();
+        for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) m.dispose();
       }
+      for (const light of this.current.lights ?? []) this.scene.remove(light);
       this.current = null;
     }
     if (this.tiles) {
@@ -1026,21 +1040,19 @@ export class VantageViewer {
       this.tiles = null;
       this.manifest = null;
     }
-    // Streaming owns its materials (single-tile mode shares them with the
-    // caller via buildTerrain, so those are left alone).
+    if (this.shader) {
+      (this.shader.uniforms['map']?.value as THREE.Texture | null)?.dispose();
+      (this.shader.uniforms['uPalette']?.value as THREE.Texture | null)?.dispose();
+      this.shader.dispose();
+      this.shader = null;
+    }
     if (this.waterShader) {
       this.waterShader.dispose();
       this.waterShader = null;
-      if (this.shader) {
-        (this.shader.uniforms['map']!.value as THREE.Texture | null)?.dispose();
-        (this.shader.uniforms['uPalette']!.value as THREE.Texture | null)?.dispose();
-        this.shader.dispose();
-        this.shader = null;
-      }
-      if (this.lowresShader) {
-        this.lowresShader.dispose();
-        this.lowresShader = null;
-      }
+    }
+    if (this.lowresShader) {
+      this.lowresShader.dispose();
+      this.lowresShader = null;
     }
     this.controls.heightAt = null;
   }

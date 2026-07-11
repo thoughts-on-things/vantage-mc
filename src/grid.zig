@@ -272,6 +272,19 @@ pub fn assemble(
     return buildGrid(arena, loaded.items, stats);
 }
 
+/// Whether a section's palette holds anything besides air variants. Air-only
+/// sections contribute no geometry (the fill loop skips AIR ids) and the grid
+/// defaults to open-sky air everywhere, so they can be excluded from the
+/// vertical bounds without changing the rendered result.
+fn sectionHasBlocks(s: chunk.Section) bool {
+    for (s.names) |n| {
+        if (!std.mem.eql(u8, n, "minecraft:air") and
+            !std.mem.eql(u8, n, "minecraft:cave_air") and
+            !std.mem.eql(u8, n, "minecraft:void_air")) return true;
+    }
+    return false;
+}
+
 /// Build a dense grid from already-decoded chunks (single- or multi-region),
 /// sizing it to their tight bounds. Cross-region culling is automatic because
 /// adjacent regions' chunks share one grid. All allocations come from `arena`.
@@ -288,12 +301,18 @@ pub fn buildGrid(arena: std.mem.Allocator, loaded: []const chunk.Chunk, stats: *
         min_cz = @min(min_cz, ch.z);
         max_cz = @max(max_cz, ch.z);
         for (ch.sections) |s| {
+            // Only sections that hold actual blocks stretch the vertical
+            // extent. Air-only sections (vanilla stores them above terrain,
+            // and corrupt saves can carry them at wild Y values) would
+            // otherwise balloon the dense grid — one stray section at
+            // Y=127 alongside terrain at Y=-4 costs ~160 MB per tile.
+            if (!sectionHasBlocks(s)) continue;
             min_sy = @min(min_sy, s.y);
             max_sy = @max(max_sy, s.y);
         }
     }
 
-    if (loaded.len == 0) {
+    if (loaded.len == 0 or min_sy > max_sy) {
         return .{ .sx = 0, .sy = 0, .sz = 0, .min_x = 0, .min_y = 0, .min_z = 0, .ids = &.{}, .names = &.{} };
     }
 
@@ -333,6 +352,11 @@ pub fn buildGrid(arena: std.mem.Allocator, loaded: []const chunk.Chunk, stats: *
 
     for (loaded) |ch| {
         for (ch.sections) |s| {
+            // Sections outside the block-bearing extent were excluded from
+            // the bounds above; their base_y would index out of the grid.
+            // They're air (or air-only corrupt data), so skipping them
+            // changes nothing the mesher sees.
+            if (s.y < min_sy or s.y > max_sy) continue;
             // Intern this section's palette once (by name + state).
             const sec_ids = try arena.alloc(u16, s.names.len);
             for (s.names, s.states, sec_ids) |name, state, *id| id.* = try interner.intern(name, state);
@@ -388,6 +412,42 @@ pub fn decodeChunk(arena: std.mem.Allocator, reg: region.Region, cx: u5, cz: u5)
     var parser = nbt.Parser{ .buf = nbt_bytes, .arena = arena };
     const root = try parser.parseRoot();
     return try chunk.decode(arena, root);
+}
+
+test "air-only sections don't stretch the grid's vertical extent" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    var stats: Stats = .{};
+    var stone_names = [_][]const u8{"minecraft:stone"};
+    var air_names = [_][]const u8{"minecraft:air"};
+    var no_states = [_][]const u8{""};
+    var sections = [_]chunk.Section{
+        .{ .y = 0, .names = &stone_names, .states = &no_states, .indices = &.{} },
+        // A stray air-only section far above the terrain — vanilla writes
+        // these routinely, corrupt saves write them at wild Y values. It
+        // must not size the grid.
+        .{ .y = 120, .names = &air_names, .states = &no_states, .indices = &.{} },
+    };
+    var chunks = [_]chunk.Chunk{.{ .x = 0, .z = 0, .sections = &sections, .data_version = 3465 }};
+    const g = try buildGrid(a, &chunks, &stats);
+    try std.testing.expectEqual(@as(usize, 16), g.sy);
+    try std.testing.expectEqual(@as(i32, 0), g.min_y);
+}
+
+test "all-air chunks build an empty grid" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    var stats: Stats = .{};
+    var air_names = [_][]const u8{"minecraft:air"};
+    var no_states = [_][]const u8{""};
+    var sections = [_]chunk.Section{
+        .{ .y = 4, .names = &air_names, .states = &no_states, .indices = &.{} },
+    };
+    var chunks = [_]chunk.Chunk{.{ .x = 0, .z = 0, .sections = &sections, .data_version = 3465 }};
+    const g = try buildGrid(a, &chunks, &stats);
+    try std.testing.expectEqual(@as(usize, 0), g.ids.len);
 }
 
 test "empty grid reads as air everywhere" {

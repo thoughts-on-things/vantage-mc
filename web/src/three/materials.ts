@@ -22,10 +22,20 @@ const VERT = /* glsl */ `
   in vec4 anrm;
   uniform vec3 uPosMin;
   uniform vec3 uPosScale;
+  uniform float uUvScale; // texture units per stored uv step (1 = f32 VTL6,
+                          // 1/128 = VTL7's i16 fixed point); set per mesh
   uniform sampler2D uPalette;
 #else
   in vec3 abcol;
   in float alight;                                 // packed (sky<<4)|block, 0..255
+#endif
+#ifdef LIGHTMAP
+  // Atlas-lit geometry (VTL8's greedy tail): baked light + AO come from a
+  // per-tile texture sampled in the fragment shader — per-BLOCK gradients on
+  // arbitrarily large merged quads — instead of per-vertex values.
+  in vec2 almuv;                                   // half-texel atlas coords
+  uniform vec2 uLmSize;                            // atlas dims in texels
+  out vec2 vLmUv;
 #endif
   uniform vec2 uFogCenter;                         // streaming focus (world XZ)
   uniform float uFogRadial;                        // 1 = fog by XZ distance from
@@ -40,17 +50,18 @@ const VERT = /* glsl */ `
   out float vSky;                                  // saved sky light, 0..1
   out float vBlk;                                  // saved block light, 0..1
   void main() {
-    vUv = uv;
     vTint = atint;
     vLayer = alayer;
     vBiome = abiome;
 #ifdef QUANTIZED
+    vUv = uv * uUvScale;
     vec3 pos = uPosMin + position * uPosScale;
     vec3 nrm = anrm.xyz;
     // The light byte was stored as the int8 normal's 4th lane; undo the sign.
     float light = anrm.w < 0.0 ? anrm.w + 256.0 : anrm.w;
     vBcol = texelFetch(uPalette, ivec2(int(abiome + 0.5), 0), 0).rgb;
 #else
+    vUv = uv;
     vec3 pos = position;
     vec3 nrm = normal;
     float light = alight;
@@ -59,6 +70,9 @@ const VERT = /* glsl */ `
     float sky = floor(light / 16.0);
     vSky = sky / 15.0;
     vBlk = (light - sky * 16.0) / 15.0;
+#ifdef LIGHTMAP
+    vLmUv = almuv * 0.5 / uLmSize;
+#endif
     // Water surface waves come from real mesh geometry (Minecraft flowing-water
     // heights, baked in the mesher) — the normal here carries the slope, so the
     // waves catch light. No vertex animation — motion comes from the animated
@@ -104,6 +118,10 @@ const FRAG = /* glsl */ `
   in float vFog;
   in float vSky;
   in float vBlk;
+#ifdef LIGHTMAP
+  uniform sampler2D uLightmap;                    // per-tile baked light+AO atlas
+  in vec2 vLmUv;
+#endif
   out vec4 frag;
   const vec3 SKY = vec3(0.62, 0.72, 0.88);        // hemispheric sky ambient
   const vec3 GND = vec3(0.34, 0.31, 0.27);        // hemispheric ground ambient
@@ -113,16 +131,16 @@ const FRAG = /* glsl */ `
   // Baked sky+block light -> a (brightness, colour) pair. Effective level is the
   // brighter of (sky * daylight) and block light, eased and floored so caves read
   // on a map; block-lit areas pick up a warm cast that sunlit ones don't.
-  void bakedLight(out float amt, out vec3 col) {
-    float sky = vSky * uDay;
-    float lvl = max(sky, vBlk);
+  void bakedLight(float skyIn, float blkIn, out float amt, out vec3 col) {
+    float sky = skyIn * uDay;
+    float lvl = max(sky, blkIn);
     // Minecraft's exact lightmap curve: brightness = l / (4 - 3l) (LightTexture).
     // Concave — far darker in the midtones than a smoothstep (a light-7 nook is
     // ~0.18, not ~0.5). Surface terrain is full skylight (l=1 → 1.0); the curve
     // only deepens shaded overhangs and caves, matching the game.
     float curve = lvl / (4.0 - 3.0 * lvl);
     amt = mix(uAmbient, 1.0, curve);
-    col = mix(vec3(1.0), TORCH, 0.6 * clamp(vBlk - sky, 0.0, 1.0));
+    col = mix(vec3(1.0), TORCH, 0.6 * clamp(blkIn - sky, 0.0, 1.0));
   }
 
   // Pixel-art textures + the colour uniforms are authored in sRGB; decode to
@@ -158,8 +176,20 @@ const FRAG = /* glsl */ `
   }
 
   void main() {
+    // Light + AO source: per-vertex (interpolated), or — for atlas-lit
+    // geometry — the tile lightmap, whose bilinear filter reproduces the
+    // per-block-corner values exactly and keeps gradients inside big quads.
+    float skyL = vSky;
+    float blkL = vBlk;
+    float aoV = vTint.a;
+#ifdef LIGHTMAP
+    vec3 lmS = texture(uLightmap, vLmUv).rgb;
+    skyL = lmS.r;
+    blkL = lmS.g;
+    aoV = lmS.b;
+#endif
     float lightAmt; vec3 lightCol;
-    bakedLight(lightAmt, lightCol);
+    bakedLight(skyL, blkL, lightAmt, lightCol);
     // Animated textures (water, lava, magma, kelp, …): the LUT row for this
     // base layer holds the baked frame count and frametime; frames occupy the
     // consecutive layers after the base, so playback is base + wrap(frame).
@@ -208,7 +238,7 @@ const FRAG = /* glsl */ `
       return;
     }
 
-    float ao = 1.0 - (1.0 - vTint.a) * uAoStrength; // baked AO (colour alpha), strength-scaled
+    float ao = 1.0 - (1.0 - aoV) * uAoStrength; // baked AO, strength-scaled
     vec3 texcol = t.rgb * toLinear(vTint.rgb);
     float luma = dot(texcol, vec3(0.299, 0.587, 0.114));
     // Biome view keeps terrain relief by modulating the flat biome colour by luma.
@@ -314,6 +344,11 @@ export function createTerrainMaterial(texData: DecodedTextureArray, opts: Terrai
       // (quantized path only; inert otherwise).
       uPosMin: { value: new THREE.Vector3() },
       uPosScale: { value: new THREE.Vector3(1, 1, 1) },
+      uUvScale: { value: 1.0 },
+      // Per-tile lightmap atlas, set per-mesh (used by the LIGHTMAP sibling
+      // material — see createLightmappedMaterial; inert here).
+      uLightmap: { value: null },
+      uLmSize: { value: new THREE.Vector2(1, 1) },
       uPalette: { value: opts.quantized ? paletteTexture(opts.palette ?? []) : null },
       uFogCenter: { value: new THREE.Vector2() }, // streaming focus (world XZ)
       uFogRadial: { value: 0.0 }, // 1 = radial fog around uFogCenter (streaming)
@@ -340,6 +375,26 @@ export function createTerrainMaterial(texData: DecodedTextureArray, opts: Terrai
     // fix for the foliage shimmer/"noise" you get when moving the camera. Needs the
     // renderer's MSAA (antialias:true), which is on. Opaque blocks (alpha 1) are
     // unaffected. The water material stays transparent and ignores this.
+    alphaToCoverage: true,
+  });
+}
+
+/**
+ * The atlas-lit sibling of the terrain material (VTL8): shares every uniform
+ * OBJECT with it (fog, biome mix, light controls stay in lock-step) and adds
+ * the LIGHTMAP define — geometry drawn with it samples baked light + AO from
+ * the per-tile atlas (`uLightmap`/`uLmSize`, set per mesh) instead of vertex
+ * values, via its `almuv` attribute.
+ */
+export function createLightmappedMaterial(terrain: THREE.ShaderMaterial): THREE.ShaderMaterial {
+  const u: Record<string, THREE.IUniform> = {};
+  for (const k in terrain.uniforms) u[k] = terrain.uniforms[k]!; // share refs
+  return new THREE.ShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    defines: { ...terrain.defines, LIGHTMAP: '' },
+    uniforms: u,
+    vertexShader: VERT,
+    fragmentShader: FRAG,
     alphaToCoverage: true,
   });
 }

@@ -118,13 +118,27 @@ pub const Mesh2 = struct {
     layer: std.ArrayList(f32) = .empty, // 1/vert (texture-array layer)
     color: std.ArrayList(u8) = .empty, // 4/vert (tint multiply RGBA)
     biome: std.ArrayList(f32) = .empty, // 1/vert (grid biome id, for the biome layer)
-    indices: std.ArrayList(u32) = .empty,
+    /// Lightmap-atlas UVs in half-texel units, 2 per vertex — present ONLY for
+    /// the greedy (atlas-lit) vertex tail, so its length is
+    /// `2 * (vertex_count - lm_start)`. Empty in flat-light mode and for fluids.
+    lmuv: std.ArrayList(u16) = .empty,
     vertex_count: u32 = 0,
 
+    // No index list: every emitter writes strict quads (4 verts, two CCW
+    // triangles `[b,b+1,b+2, b,b+2,b+3]`), so indices are pure derivation —
+    // serializers that still ship them synthesize the pattern (see tile.zig).
+
     pub fn triangleCount(self: Mesh2) usize {
-        return self.indices.items.len / 3;
+        return self.vertex_count / 2; // per quad: 4 verts, 2 triangles
     }
 };
+
+/// A tile's baked light+AO atlas: one RGBA8 texel per block corner of every
+/// greedy quad (R = sky·17, G = block·17, B = AO, A = 255), shelf-packed. The
+/// shader samples it bilinearly, which reproduces per-vertex interpolation
+/// exactly per block — and gives big merged quads the true per-block light
+/// gradients that a 4-corner quad flattens.
+pub const Lightmap = struct { w: u32 = 0, h: u32 = 0, texels: []u8 = &.{} };
 
 /// Per-direction geometry winding (CCW outward, matching the flat mesher) plus
 /// the uv-corner selectors that orient the texture upright on each face.
@@ -178,7 +192,15 @@ const AO_LUT = [4]u8{ 130, 178, 218, 255 };
 /// A built tile: the opaque terrain mesh plus a separate transparent fluid mesh
 /// (water). They are meshed together but drawn in two passes — the fluid mesh
 /// blends over the already-drawn opaque one, so the seabed shows through.
-pub const Built = struct { solid: Mesh2 = .{}, fluid: Mesh2 = .{}, light_ms: i64 = 0 };
+/// `lm_start` is the first solid vertex lit by the lightmap atlas (the greedy
+/// tail); everything before it carries per-vertex light as always.
+pub const Built = struct {
+    solid: Mesh2 = .{},
+    fluid: Mesh2 = .{},
+    lm_start: u32 = 0,
+    lightmap: Lightmap = .{},
+    light_ms: i64 = 0,
+};
 
 /// Baked-light quality. `flat` lights each face by the single cell it faces (hard
 /// per-face steps). `smooth` averages the four cells around each vertex (the AO
@@ -307,6 +329,7 @@ pub fn buildTextured(
         .greedy_faces = greedy_faces,
         .interior = interior orelse grid.Interior.full(g),
         .cave_y = cave_y,
+        .atlas = quality == .smooth,
     };
     const cpu = std.Thread.getCpuCount() catch 1;
     const budget = if (max_threads == 0) cpu else max_threads;
@@ -358,13 +381,129 @@ pub fn buildTextured(
         }
         for (gthreads[0..n_spawned]) |t| t.join();
     }
+    for (gp) |*p| if (p.err) |e| return e;
+    for (gp) |*p| try appendMesh(arena, &mesh, &p.mesh);
+    const lm_start = mesh.vertex_count; // the atlas-lit tail starts here
+    const lightmap = try appendAtlasTail(arena, gp, &mesh);
+    for (gp) |*p| p.arena.deinit(); // after packing — patches live in these
+
+    return .{ .solid = mesh, .fluid = fluid, .lm_start = lm_start, .lightmap = lightmap, .light_ms = light_ms };
+}
+
+/// Append the atlas-lit quads to `mesh` — reordered patch-height-first (stable)
+/// so shelf packing is dense (same-height rects share shelves; ~90% of shipped
+/// texels are real instead of ~20%) — and shelf-pack their patches into the
+/// tile atlas in that same order, so a quad's stream neighbours are also its
+/// atlas neighbours and the lmuv/position deltas stay small. Each quad's
+/// rect-local lmuv gets its final origin added here. Returns an empty lightmap
+/// when there are no patches (flat-light mode, or all-uniform greedy light).
+fn appendAtlasTail(arena: std.mem.Allocator, gp: []GreedyPartial, mesh: *Mesh2) !Lightmap {
+    var total: usize = 0;
+    var max_w: usize = 1;
+    var n_rects: usize = 0;
     for (gp) |*p| {
-        defer p.arena.deinit();
-        if (p.err) |e| return e;
-        try appendMesh(arena, &mesh, &p.mesh);
+        n_rects += p.lm.rects.items.len;
+        std.debug.assert(p.lm_mesh.lmuv.items.len == p.lm.rects.items.len * 8);
+        for (p.lm.rects.items) |r| {
+            total += @as(usize, r[0]) * r[1];
+            max_w = @max(max_w, r[0]);
+        }
+    }
+    if (n_rects == 0) return .{};
+
+    // Flatten (dims, owning partial, quad index within it, patch offset).
+    const Flat = struct { dims: [2]u16, part: u8, quad: u32, patch_off: u32 };
+    const flat = try arena.alloc(Flat, n_rects);
+    {
+        var ri: usize = 0;
+        for (gp, 0..) |*p, pi| {
+            var off: u32 = 0;
+            for (p.lm.rects.items, 0..) |r, qi| {
+                flat[ri] = .{ .dims = r, .part = @intCast(pi), .quad = @intCast(qi), .patch_off = off };
+                off += @as(u32, r[0]) * r[1] * 4;
+                ri += 1;
+            }
+        }
+    }
+    const order = try arena.alloc(u32, n_rects);
+    for (order, 0..) |*o, i| o.* = @intCast(i);
+    std.mem.sort(u32, order, flat, struct {
+        fn lt(f: []Flat, a: u32, b: u32) bool {
+            if (f[a].dims[1] != f[b].dims[1]) return f[a].dims[1] > f[b].dims[1];
+            return a < b; // stable: emission order within a height class
+        }
+    }.lt);
+
+    // Shelf packing at power-of-two widths: near-square, widening only if the
+    // height would pass the conservative 4096 GPU-safe cap (lmuv half-texels
+    // also stay comfortably inside u16 that way).
+    var w: usize = 256;
+    while (w < max_w or w * w < total) w *= 2;
+    const origins = try arena.alloc([2]u32, n_rects); // indexed by SORTED position
+    var h: usize = 0;
+    while (true) {
+        var x: usize = 0;
+        var y: usize = 0;
+        var shelf_h: usize = 0;
+        for (order, 0..) |ri, k| {
+            const r = flat[ri].dims;
+            if (x + r[0] > w) {
+                y += shelf_h;
+                x = 0;
+                shelf_h = 0;
+            }
+            origins[k] = .{ @intCast(x), @intCast(y) };
+            x += r[0];
+            shelf_h = @max(shelf_h, r[1]);
+        }
+        h = y + shelf_h;
+        if (h <= 4096 or w >= 4096) break;
+        w *= 2;
     }
 
-    return .{ .solid = mesh, .fluid = fluid, .light_ms = light_ms };
+    const texels = try arena.alloc(u8, w * h * 4);
+    @memset(texels, 0);
+    for (order, 0..) |ri, k| {
+        const f = flat[ri];
+        const p = &gp[f.part];
+        const tw: usize = f.dims[0];
+        const th: usize = f.dims[1];
+        const o = origins[k];
+        for (0..th) |j| {
+            const src = p.lm.patches.items[f.patch_off + j * tw * 4 ..][0 .. tw * 4];
+            const dst = texels[((o[1] + j) * w + o[0]) * 4 ..][0 .. tw * 4];
+            @memcpy(dst, src);
+        }
+        // Append the quad's vertex streams in sorted order, with the atlas
+        // origin folded into its rect-local lmuv.
+        const q: usize = f.quad;
+        const src = &p.lm_mesh;
+        try mesh.positions.appendSlice(arena, src.positions.items[q * 12 ..][0..12]);
+        try mesh.uv.appendSlice(arena, src.uv.items[q * 8 ..][0..8]);
+        try mesh.layer.appendSlice(arena, src.layer.items[q * 4 ..][0..4]);
+        try mesh.color.appendSlice(arena, src.color.items[q * 16 ..][0..16]);
+        try mesh.normals.appendSlice(arena, src.normals.items[q * 16 ..][0..16]);
+        try mesh.biome.appendSlice(arena, src.biome.items[q * 4 ..][0..4]);
+        for (0..4) |vi| {
+            try mesh.lmuv.append(arena, src.lmuv.items[(q * 4 + vi) * 2 + 0] + @as(u16, @intCast(2 * o[0])));
+            try mesh.lmuv.append(arena, src.lmuv.items[(q * 4 + vi) * 2 + 1] + @as(u16, @intCast(2 * o[1])));
+        }
+        mesh.vertex_count += 4;
+    }
+
+    // Ship the atlas as three planar channels (all sky, then all block, then
+    // all AO — the constant alpha isn't stored): measured ~2× better under
+    // gzip than interleaved RGBA (each plane is self-similar; row/column
+    // predictors were also measured and LOSE — tiny packed patches make
+    // neighbour prediction noise). The client re-interleaves in one pass.
+    const planar = try arena.alloc(u8, w * h * 3);
+    const n = w * h;
+    for (0..n) |i| {
+        planar[i] = texels[i * 4];
+        planar[n + i] = texels[i * 4 + 1];
+        planar[2 * n + i] = texels[i * 4 + 2];
+    }
+    return .{ .w = @intCast(w), .h = @intCast(h), .texels = planar };
 }
 
 /// A fluid's texture-array layers: the still texture (flat tops, bottoms) and
@@ -410,6 +549,12 @@ const MeshCtx = struct {
     /// are always kept, so deep ocean floors survive (sky light attenuates to
     /// 0 under ~15 blocks of water). Null = render everything.
     cave_y: ?i32,
+    /// Lightmap-atlas mode (smooth light): greedy merges ignore light/AO — the
+    /// per-block-corner values bake into a per-tile atlas instead of vertices,
+    /// so lighting gradients no longer fragment merges. Flat light keeps the
+    /// legacy per-vertex path (flat light is per BLOCK, which a corner-grid
+    /// texture can't represent without smoothing it).
+    atlas: bool = false,
 
     /// Whether cell (x,y,z) is in the dark below the cave-culling horizon.
     fn caveDark(ctx: *const MeshCtx, x: isize, y: isize, z: isize) bool {
@@ -519,17 +664,16 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
     }
 }
 
-/// Append `src`'s vertex streams to `dst`, offsetting indices by `dst`'s current
-/// vertex count — concatenates a thread's partial mesh into the combined one.
+/// Append `src`'s vertex streams to `dst` — concatenates a thread's partial
+/// mesh into the combined one. Quad topology is positional, so no index rebase.
 fn appendMesh(alloc: std.mem.Allocator, dst: *Mesh2, src: *const Mesh2) !void {
-    const base = dst.vertex_count;
     try dst.positions.appendSlice(alloc, src.positions.items);
     try dst.uv.appendSlice(alloc, src.uv.items);
     try dst.layer.appendSlice(alloc, src.layer.items);
     try dst.color.appendSlice(alloc, src.color.items);
     try dst.normals.appendSlice(alloc, src.normals.items);
     try dst.biome.appendSlice(alloc, src.biome.items);
-    for (src.indices.items) |idx| try dst.indices.append(alloc, idx + base);
+    try dst.lmuv.appendSlice(alloc, src.lmuv.items);
     dst.vertex_count += src.vertex_count;
 }
 
@@ -621,9 +765,11 @@ fn greedyMerge(
 
 /// Mesh one of the 6 greedy directions: for each slice perpendicular to the
 /// direction, fill the (present, key) mask from the grid, greedy-merge it, and
-/// emit the merged quads. Reads only immutable grid/cache state, so the 6
-/// directions run as independent workers into disjoint output meshes.
-fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, di: usize) !void {
+/// emit the merged quads — vertex-lit ones into `mesh`, atlas-lit ones into
+/// `lm_mesh` (with their lightmap patches in `out_lm`). Reads only immutable
+/// grid/cache state, so the 6 directions run as independent workers into
+/// disjoint output meshes.
+fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, lm_mesh: *Mesh2, out_lm: *LmPartial, di: usize) !void {
     const g = ctx.g;
     const gd = gdirs[di];
     const dims = [3]usize{ g.sx, g.sy, g.sz };
@@ -666,6 +812,16 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, di
                 const zi: isize = @intCast(z);
                 if (ctx.id_occluder[g.at(xi + noff[0], yi + noff[1], zi + noff[2])]) continue;
                 if (ctx.caveCulled(xi + noff[0], yi + noff[1], zi + noff[2])) continue;
+                const idx = v * U + u;
+                present[idx] = true;
+                if (ctx.atlas) {
+                    // Atlas mode: light/AO live in the per-tile lightmap, not
+                    // the merge key — gradients no longer fragment merges, and
+                    // the per-cell corner sampling moves to one pass per atlas
+                    // texel at emit time (shared corners sampled once, not 4×).
+                    keys[idx] = .{ .id = id, .biome = g.biomeAt(x, y, z), .ao = @splat(255), .light = @splat(255) };
+                    continue;
+                }
                 const face = ctx.cache[id].?.faces[@intCast(fi)];
                 var ao = [4]u8{ 255, 255, 255, 255 };
                 for (0..4) |ci| ao[ci] = cornerAo(g, ctx.id_occluder, x, y, z, face.ao_off[ci]);
@@ -675,8 +831,6 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, di
                     const base_n = [3]i8{ face.verts[0].n[0], face.verts[0].n[1], face.verts[0].n[2] };
                     for (0..4) |ci| lights[ci] = cornerLight(g, ctx.id_occluder, x, y, z, base_n, face.ao_off[ci]);
                 }
-                const idx = v * U + u;
-                present[idx] = true;
                 keys[idx] = .{ .id = id, .biome = g.biomeAt(x, y, z), .ao = ao, .light = lights };
             }
         }
@@ -687,16 +841,95 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, di
             base[gd.nax] = s;
             base[gd.uax] = r.u;
             base[gd.vax] = r.v;
-            try emitGreedyQuad(alloc, mesh, ctx, gd, di, base, r);
+            if (!ctx.atlas) {
+                try emitGreedyQuad(alloc, mesh, ctx, gd, di, base, r, null);
+                continue;
+            }
+            // Uniform-light rects stay vertex-lit in the plain mesh; gradient
+            // rects go to the atlas-lit mesh (joined AFTER every vertex-lit
+            // quad, so the atlas region is one contiguous tail — no per-vertex
+            // flags, and its lmuv stream delta-codes like positions do).
+            if (try sampleLmPatch(ctx, alloc, out_lm, gd, di, s, r)) |uni| {
+                try emitGreedyQuad(alloc, mesh, ctx, gd, di, base, r, uni);
+            } else {
+                try emitGreedyQuad(alloc, lm_mesh, ctx, gd, di, base, r, null);
+            }
         }
     }
 }
 
+/// The per-direction lightmap output: one (tw × th) texel patch per
+/// NON-UNIFORM emitted rect, in rect order, RGBA8 (R sky·17, G block·17,
+/// B AO, A 255). Packed into the tile atlas after the direction workers join.
+const LmPartial = struct {
+    /// Texel dims per rect, rect order (tw = w+1, th = h+1).
+    rects: std.ArrayList([2]u16) = .empty,
+    /// The rects' texel bytes, concatenated in the same order.
+    patches: std.ArrayList(u8) = .empty,
+};
+
+/// A rect whose light + AO turned out identical at every corner — the common
+/// case (open flat ground, dark cave floors). It carries its constants per
+/// vertex like any quad and stays OUT of the atlas.
+const LmUniform = struct { light: u8, ao: u8 };
+
+/// Sample one merged rect's per-block-corner light + AO. Uniform rects return
+/// their constant and append nothing; varying rects append their atlas patch
+/// to `out` and return null. A corner texel is a function of the world-space
+/// corner (adjacent blocks agree on shared corners — that's why per-vertex
+/// smooth lighting is seamless), so texel (i,j) samples block
+/// (min(i,w-1), min(j,h-1)) at its (i==w, j==h) corner via the face's baked
+/// AO offsets.
+fn sampleLmPatch(ctx: *const MeshCtx, alloc: std.mem.Allocator, out: *LmPartial, gd: GDir, di: usize, s: usize, r: Rect) !?LmUniform {
+    const g = ctx.g;
+    const face = ctx.cache[r.key.id].?.faces[@intCast(ctx.greedy_faces[r.key.id][di])];
+    // (su, sv) -> the face's corner index, for its per-corner AO offsets.
+    var cmap: [2][2]usize = undefined;
+    for (face.verts, 0..) |vtx, ci| {
+        cmap[@intFromFloat(vtx.pos[gd.uax])][@intFromFloat(vtx.pos[gd.vax])] = ci;
+    }
+    const base_n = [3]i8{ face.verts[0].n[0], face.verts[0].n[1], face.verts[0].n[2] };
+    const tw: usize = r.w + 1;
+    const th: usize = r.h + 1;
+    const texels = try out.patches.addManyAsSlice(alloc, tw * th * 4);
+    var uniform = true;
+    var j: usize = 0;
+    while (j <= r.h) : (j += 1) {
+        const sv: usize = if (j == r.h) 1 else 0;
+        var i: usize = 0;
+        while (i <= r.w) : (i += 1) {
+            const su: usize = if (i == r.w) 1 else 0;
+            var cell = [3]usize{ 0, 0, 0 };
+            cell[gd.nax] = s;
+            cell[gd.uax] = r.u + @min(i, r.w - 1);
+            cell[gd.vax] = r.v + @min(j, r.h - 1);
+            const ci = cmap[su][sv];
+            const ao = cornerAo(g, ctx.id_occluder, cell[0], cell[1], cell[2], face.ao_off[ci]);
+            const l = cornerLight(g, ctx.id_occluder, cell[0], cell[1], cell[2], base_n, face.ao_off[ci]);
+            const o = (j * tw + i) * 4;
+            texels[o + 0] = (l >> 4) * 17; // sky 0..15 -> 0..255
+            texels[o + 1] = (l & 0x0F) * 17; // block 0..15 -> 0..255
+            texels[o + 2] = ao;
+            texels[o + 3] = 255;
+            if (texels[o] != texels[0] or texels[o + 1] != texels[1] or texels[o + 2] != texels[2]) uniform = false;
+        }
+    }
+    if (uniform) {
+        // Constant light/AO: keep it per-vertex, reclaim the patch bytes.
+        const light = (texels[0] / 17) << 4 | (texels[1] / 17);
+        const ao = texels[2];
+        out.patches.shrinkRetainingCapacity(out.patches.items.len - tw * th * 4);
+        return .{ .light = light, .ao = ao };
+    }
+    try out.rects.append(alloc, .{ @intCast(tw), @intCast(th) });
+    return null;
+}
+
 /// Emit one merged greedy quad. Positions and UV are the unit face scaled across
-/// the merged w×h footprint (UV tiles via repeat-wrap); the per-corner AO/light
-/// come straight from the (uniform) merge key, so at w=h=1 this is byte-identical
-/// to `emitBaked`.
-fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, gd: GDir, di: usize, base: [3]usize, r: Rect) !void {
+/// the merged w×h footprint (UV tiles via repeat-wrap). Light/AO per vertex come
+/// from the merge key (flat mode), from `uni` (an atlas-mode rect that sampled
+/// uniform), or are placeholders for atlas-lit rects (the lightmap wins).
+fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, gd: GDir, di: usize, base: [3]usize, r: Rect, uni: ?LmUniform) !void {
     const g = ctx.g;
     const id = r.key.id;
     const face = ctx.cache[id].?.faces[@intCast(ctx.greedy_faces[id][di])];
@@ -727,7 +960,6 @@ fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, g
     const duv_u = [2]f32{ uv10[0] - uv00[0], uv10[1] - uv00[1] };
     const duv_v = [2]f32{ uv01[0] - uv00[0], uv01[1] - uv00[1] };
 
-    const vbase = mesh.vertex_count;
     for (face.verts, 0..) |vtx, ci| {
         const su = vtx.pos[gd.uax]; // 0 or 1
         const sv = vtx.pos[gd.vax]; // 0 or 1
@@ -742,24 +974,39 @@ fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, g
         });
         try mesh.layer.append(alloc, face.layer);
         const col = if (blend) blendedTint(ctx, face.tint, pos[0] - min_xf, pos[1] - min_yf, pos[2] - min_zf) else rgb;
-        try mesh.color.appendSlice(alloc, &.{ col[0], col[1], col[2], r.key.ao[ci] });
-        try mesh.normals.appendSlice(alloc, &.{ vtx.n[0], vtx.n[1], vtx.n[2], @bitCast(r.key.light[ci]) });
+        const v_ao = if (uni) |un| un.ao else r.key.ao[ci];
+        const v_light = if (uni) |un| un.light else r.key.light[ci];
+        try mesh.color.appendSlice(alloc, &.{ col[0], col[1], col[2], v_ao });
+        try mesh.normals.appendSlice(alloc, &.{ vtx.n[0], vtx.n[1], vtx.n[2], @bitCast(v_light) });
         try mesh.biome.append(alloc, bid_f);
+        if (ctx.atlas and uni == null) {
+            // Rect-LOCAL lightmap UV in half-texel units, so a vertex at
+            // corner (su·w, sv·h) samples texel centre (i + 0.5): value =
+            // 2·(su·w) + 1. The atlas packer adds 2·origin once rects have
+            // their final spots.
+            try mesh.lmuv.appendSlice(alloc, &.{
+                @as(u16, @intFromFloat(su * w_f)) * 2 + 1,
+                @as(u16, @intFromFloat(sv * h_f)) * 2 + 1,
+            });
+        }
     }
-    try mesh.indices.appendSlice(alloc, &.{ vbase + 0, vbase + 1, vbase + 2, vbase + 0, vbase + 2, vbase + 3 });
     mesh.vertex_count += 4;
 }
 
-/// One greedy direction's output: its own page-backed arena and mesh.
+/// One greedy direction's output: its own page-backed arena, the vertex-lit
+/// mesh, the atlas-lit mesh (joined after ALL vertex-lit geometry so the
+/// atlas region is one contiguous tail), and the lightmap patches.
 const GreedyPartial = struct {
     mesh: Mesh2 = .{},
+    lm_mesh: Mesh2 = .{},
+    lm: LmPartial = .{},
     arena: std.heap.ArenaAllocator,
     di: usize,
     err: ?anyerror = null,
 };
 
 fn greedyWorker(ctx: *const MeshCtx, p: *GreedyPartial) void {
-    meshGreedyDir(ctx, p.arena.allocator(), &p.mesh, p.di) catch |e| {
+    meshGreedyDir(ctx, p.arena.allocator(), &p.mesh, &p.lm_mesh, &p.lm, p.di) catch |e| {
         p.err = e;
     };
 }
@@ -948,7 +1195,6 @@ fn emitFluid(
         const is_side = tf.n[1] == 0;
         const flow_top = is_up and flowing;
         const layer = if (flow_top or is_side) layers.flow else layers.still;
-        const base = mesh.vertex_count;
         for (0..4) |i| {
             const cs = tf.corners[i];
             const py: f32 = if (cs[1] == 1) cornerH[@as(usize, cs[0])][@as(usize, cs[2])] else 0.0;
@@ -975,7 +1221,6 @@ fn emitFluid(
             try mesh.normals.appendSlice(arena, &.{ nrm[0], nrm[1], nrm[2], lp });
             try mesh.biome.append(arena, bid_f);
         }
-        try mesh.indices.appendSlice(arena, &.{ base, base + 1, base + 2, base, base + 2, base + 3 });
         mesh.vertex_count += 4;
     }
 }
@@ -1422,7 +1667,6 @@ fn addv(a: [3]i8, b: [3]i8) [3]i8 {
 /// per-vertex — AO brightness in the colour's alpha, packed sky/block light in
 /// the normal's spare 4th byte (equal across verts for flat-quality faces).
 fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, wx: f32, wy: f32, wz: f32, face: BakedFace, rgb: [3]u8, ao: [4]u8, light: [4]u8, bid: usize) !void {
-    const base = mesh.vertex_count;
     const bid_f: f32 = @floatFromInt(bid);
     const blend = ctx.blend_biomes and isBlendable(face.tint);
     const ox = wx - @as(f32, @floatFromInt(ctx.g.min_x));
@@ -1437,7 +1681,6 @@ fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, wx: f3
         try mesh.normals.appendSlice(arena, &.{ v.n[0], v.n[1], v.n[2], @bitCast(light[i]) });
         try mesh.biome.append(arena, bid_f);
     }
-    try mesh.indices.appendSlice(arena, &.{ base + 0, base + 1, base + 2, base + 0, base + 2, base + 3 });
     mesh.vertex_count += 4;
 }
 
@@ -1877,7 +2120,9 @@ test "greedy pass emits only interior cells (apron feeds reads, not geometry)" {
         .cave_y = null,
     };
     var out: Mesh2 = .{};
-    try meshGreedyDir(&ctx, a, &out, up);
+    var out_lm_mesh: Mesh2 = .{};
+    var out_lm: LmPartial = .{};
+    try meshGreedyDir(&ctx, a, &out, &out_lm_mesh, &out_lm, up);
     try std.testing.expectEqual(@as(u32, 4), out.vertex_count); // one merged quad
     // Every vertex lies within the interior box [1,3]×[1,3] (world == grid here).
     var i: usize = 0;
@@ -1887,6 +2132,147 @@ test "greedy pass emits only interior cells (apron feeds reads, not geometry)" {
         try std.testing.expect(px >= 1 and px <= 3);
         try std.testing.expect(pz >= 1 and pz <= 3);
     }
+}
+
+test "atlas mode: a merged rect yields one (w+1)x(h+1) lightmap patch + local lmuv" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    // A 4×2×4 grid: stone floor (y=0), air above (y=1) whose BLOCK light ramps
+    // along x — so the floor's merged up-face has a light gradient and must
+    // take the atlas path (uniform rects would elide themselves).
+    var ids = [_]u16{1} ** 16 ++ [_]u16{0} ** 16;
+    var light = [_]u8{0xF0} ** 32;
+    for (0..4) |z| {
+        for (0..4) |x| light[(1 * 4 + z) * 4 + x] = (15 << 4) | @as(u8, @intCast(x * 3));
+    }
+    var names = [_][]const u8{ "", "minecraft:stone" };
+    const g: grid.Grid = .{ .sx = 4, .sy = 2, .sz = 4, .min_x = 0, .min_y = 0, .min_z = 0, .ids = &ids, .names = &names, .light = &light };
+    const up = dirIndex(.up);
+    var faces_buf = [_]BakedFace{.{
+        .verts = .{
+            .{ .pos = .{ 0, 1, 0 }, .uv = .{ 0, 0 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 0, 1, 1 }, .uv = .{ 0, 1 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 1, 1, 1 }, .uv = .{ 1, 1 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 1, 1, 0 }, .uv = .{ 1, 0 }, .n = .{ 0, 1, 0 } },
+        },
+        .layer = 0,
+        .tint = .none,
+        .cull = .up,
+        .ao = false,
+        .greedy = true,
+        .ao_off = .{.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }} ** 4,
+    }};
+    var cache = [_]?Cached{ null, .{ .faces = &faces_buf, .occluder = true } };
+    var greedy_faces = [_][6]i16{ .{ -1, -1, -1, -1, -1, -1 }, .{ -1, -1, -1, -1, -1, -1 } };
+    greedy_faces[1][up] = 0;
+    const nkind = @as(usize, biome.Tint.count);
+    const tint = try a.alloc([3]u8, 1 * nkind);
+    @memset(tint, .{ 255, 255, 255 });
+    var id_occluder = [_]bool{ false, true };
+    const ctx: MeshCtx = .{
+        .g = g,
+        .cache = &cache,
+        .id_occluder = &id_occluder,
+        .is_water = &.{ false, false },
+        .is_lava = &.{ false, false },
+        .waterish = &.{ false, false },
+        .tint_colors = tint,
+        .nkind = nkind,
+        .quality = .smooth,
+        .blend_biomes = false,
+        .fluid_level = &.{ -1, -1 },
+        .greedy_faces = &greedy_faces,
+        .interior = .{ .x0 = 1, .z0 = 1, .x1 = 3, .z1 = 3 },
+        .cave_y = null,
+        .atlas = true,
+    };
+    var out: Mesh2 = .{};
+    var out_lm_mesh: Mesh2 = .{};
+    var out_lm: LmPartial = .{};
+    try meshGreedyDir(&ctx, a, &out, &out_lm_mesh, &out_lm, up);
+    // The gradient rect lands in the atlas-lit mesh, not the vertex-lit one.
+    try std.testing.expectEqual(@as(u32, 0), out.vertex_count);
+    try std.testing.expectEqual(@as(u32, 4), out_lm_mesh.vertex_count);
+    // One 2×2-block rect → a 3×3-texel patch, AO channel fully open (255).
+    try std.testing.expectEqual(@as(usize, 1), out_lm.rects.items.len);
+    try std.testing.expectEqual([2]u16{ 3, 3 }, out_lm.rects.items[0]);
+    try std.testing.expectEqual(@as(usize, 3 * 3 * 4), out_lm.patches.items.len);
+    try std.testing.expectEqual(@as(u8, 255), out_lm.patches.items[2]); // AO
+    // The block-light ramp along x lands in the G channel: blocks x=1,2 → 3·17, 6·17.
+    try std.testing.expectEqual(@as(u8, 51), out_lm.patches.items[1]);
+    try std.testing.expectEqual(@as(u8, 102), out_lm.patches.items[4 + 1]);
+    try std.testing.expectEqual(@as(u8, 255), out_lm.patches.items[0]); // sky 15
+    // Rect-local half-texel lmuv per vertex: corners at 0 or 2·w, +1 centre bias.
+    try std.testing.expectEqual(@as(usize, 8), out_lm_mesh.lmuv.items.len);
+    for (0..4) |vi| {
+        const lu = out_lm_mesh.lmuv.items[vi * 2];
+        const lv = out_lm_mesh.lmuv.items[vi * 2 + 1];
+        try std.testing.expect(lu == 1 or lu == 5);
+        try std.testing.expect(lv == 1 or lv == 5);
+    }
+    // The vertex-stream light/AO are placeholders for atlas-lit quads.
+    try std.testing.expectEqual(@as(i8, @bitCast(@as(u8, 255))), out_lm_mesh.normals.items[3]);
+}
+
+test "atlas mode: uniform-light rects stay vertex-lit and out of the atlas" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    // Same slab, but no light data: everything reads open sky — uniform.
+    var ids = [_]u16{1} ** 16;
+    var names = [_][]const u8{ "", "minecraft:stone" };
+    const g: grid.Grid = .{ .sx = 4, .sy = 1, .sz = 4, .min_x = 0, .min_y = 0, .min_z = 0, .ids = &ids, .names = &names };
+    const up = dirIndex(.up);
+    var faces_buf = [_]BakedFace{.{
+        .verts = .{
+            .{ .pos = .{ 0, 1, 0 }, .uv = .{ 0, 0 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 0, 1, 1 }, .uv = .{ 0, 1 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 1, 1, 1 }, .uv = .{ 1, 1 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 1, 1, 0 }, .uv = .{ 1, 0 }, .n = .{ 0, 1, 0 } },
+        },
+        .layer = 0,
+        .tint = .none,
+        .cull = .up,
+        .ao = false,
+        .greedy = true,
+        .ao_off = .{.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }} ** 4,
+    }};
+    var cache = [_]?Cached{ null, .{ .faces = &faces_buf, .occluder = true } };
+    var greedy_faces = [_][6]i16{ .{ -1, -1, -1, -1, -1, -1 }, .{ -1, -1, -1, -1, -1, -1 } };
+    greedy_faces[1][up] = 0;
+    const nkind = @as(usize, biome.Tint.count);
+    const tint = try a.alloc([3]u8, 1 * nkind);
+    @memset(tint, .{ 255, 255, 255 });
+    var id_occluder = [_]bool{ false, true };
+    const ctx: MeshCtx = .{
+        .g = g,
+        .cache = &cache,
+        .id_occluder = &id_occluder,
+        .is_water = &.{ false, false },
+        .is_lava = &.{ false, false },
+        .waterish = &.{ false, false },
+        .tint_colors = tint,
+        .nkind = nkind,
+        .quality = .smooth,
+        .blend_biomes = false,
+        .fluid_level = &.{ -1, -1 },
+        .greedy_faces = &greedy_faces,
+        .interior = .{ .x0 = 1, .z0 = 1, .x1 = 3, .z1 = 3 },
+        .cave_y = null,
+        .atlas = true,
+    };
+    var out: Mesh2 = .{};
+    var out_lm_mesh: Mesh2 = .{};
+    var out_lm: LmPartial = .{};
+    try meshGreedyDir(&ctx, a, &out, &out_lm_mesh, &out_lm, up);
+    try std.testing.expectEqual(@as(u32, 4), out.vertex_count);
+    try std.testing.expectEqual(@as(u32, 0), out_lm_mesh.vertex_count);
+    try std.testing.expectEqual(@as(usize, 0), out_lm.rects.items.len);
+    try std.testing.expectEqual(@as(usize, 0), out_lm.patches.items.len); // reclaimed
+    try std.testing.expectEqual(@as(usize, 0), out.lmuv.items.len);
+    // The uniform light (open sky, no block light) is baked per vertex.
+    try std.testing.expectEqual(@as(i8, @bitCast(@as(u8, 0xF0))), out.normals.items[3]);
 }
 
 test "fluid level parsing and base height" {

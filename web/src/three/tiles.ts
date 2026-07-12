@@ -29,7 +29,7 @@ import {
   type WorldManifest,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
-import { buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, type TileMeshes } from './terrain.js';
+import { buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, isSharedQuadIndex, sharedQuadIndex, type TileMeshes } from './terrain.js';
 
 export interface TileManagerOptions {
   manifest: WorldManifest;
@@ -41,6 +41,9 @@ export interface TileManagerOptions {
   material: THREE.ShaderMaterial;
   /** The shared water shader (from {@link createWaterMaterial}). */
   waterMaterial: THREE.ShaderMaterial;
+  /** The shared atlas-lit shader (from {@link createLightmappedMaterial});
+   *  required to draw VTL8 tiles' lightmapped geometry (manifest format 4+). */
+  lmMaterial?: THREE.ShaderMaterial;
   /** The shared lowres LOD shader (from {@link createLowresMaterial}); required
    *  to stream a format-2 manifest's lowres pyramid. */
   lowresMaterial?: THREE.ShaderMaterial;
@@ -86,6 +89,10 @@ interface Record_ {
   retryAt?: number;
   abort?: AbortController;
   terrain?: THREE.Mesh;
+  /** VTL8: the atlas-lit solid tail (drawn with the lightmapped material). */
+  terrainLm?: THREE.Mesh;
+  /** VTL8: the tile's lightmap texture, disposed with the tile. */
+  lightmapTex?: THREE.DataTexture;
   water?: THREE.Mesh;
   surface?: SurfaceMap;
   /** Lowres heightfield data, kept for the zoomed-out pivot height fallback. */
@@ -110,12 +117,15 @@ function releaseAfterUpload(geom: THREE.BufferGeometry): void {
   for (const name of Object.keys(geom.attributes)) {
     (geom.getAttribute(name) as THREE.BufferAttribute).onUpload(release);
   }
-  if (geom.index) geom.index.onUpload(release);
+  // The shared quad index keeps its CPU array: other geometries may still
+  // force a (re-)upload of the shared GPU buffer later.
+  if (geom.index && !isSharedQuadIndex(geom.index)) geom.index.onUpload(release);
 }
 
 export class TileManager {
-  private readonly opts: Required<Omit<TileManagerOptions, 'lowresMaterial'>>;
+  private readonly opts: Required<Omit<TileManagerOptions, 'lowresMaterial' | 'lmMaterial'>>;
   private readonly lowresMaterial: THREE.ShaderMaterial | null;
+  private readonly lmMaterial: THREE.ShaderMaterial | null;
   private readonly index = new Map<string, ManifestTile>();
   private readonly records = new Map<string, Record_>();
   private readonly emitter = new Emitter<TileEvents>();
@@ -148,7 +158,7 @@ export class TileManager {
   private maxY = 320;
 
   constructor(options: TileManagerOptions) {
-    const { lowresMaterial, ...rest } = options;
+    const { lowresMaterial, lmMaterial, ...rest } = options;
     this.opts = {
       viewDistance: 768,
       // Sized to fill the whole view-distance disc for 128-block tiles
@@ -159,7 +169,11 @@ export class TileManager {
       ...rest,
     };
     this.lowresMaterial = lowresMaterial ?? null;
+    this.lmMaterial = lmMaterial ?? null;
     this.tileBlocks = options.manifest.tileBlocks;
+    // Pre-size the shared quad index to the biggest section in the world, so
+    // streaming never grows (= re-uploads) it mid-pan.
+    if (options.manifest.maxSectionVerts) sharedQuadIndex(options.manifest.maxSectionVerts);
     for (const t of options.manifest.tiles) this.index.set(tileKey(t.x, t.z), t);
     this.lowLevels = this.lowresMaterial ? [...(options.manifest.lowres?.levels ?? [])].sort((a, b) => a.level - b.level) : [];
     for (const lvl of this.lowLevels) {
@@ -292,6 +306,7 @@ export class TileManager {
       if (!rec || rec.state !== 'built') continue; // unloaded while queued
       rec.state = 'ready';
       this.opts.scene.add(rec.terrain!);
+      if (rec.terrainLm) this.opts.scene.add(rec.terrainLm);
       if (rec.water) this.opts.scene.add(rec.water);
       this.coverageDirty = true;
       this.invalidate();
@@ -457,7 +472,7 @@ export class TileManager {
       if (q) {
         rec.biomes = summarizeSurfaceBiomes(q.surface, q.biomeNames, this.opts.palette);
         rec.surface = { ...q.surface, biome: q.surface.biome.slice(), height: q.surface.height.slice() };
-        meshes = buildQuantizedTileMeshes(q, this.opts.material, this.opts.waterMaterial);
+        meshes = buildQuantizedTileMeshes(q, this.opts.material, this.opts.waterMaterial, this.lmMaterial ?? undefined);
         rec.vertexCount = q.solid.vertexCount + q.fluid.vertexCount;
         rec.triangleCount = (q.solid.indexCount + q.fluid.indexCount) / 3;
       } else {
@@ -476,8 +491,11 @@ export class TileManager {
         rec.triangleCount = (tile.indexCount + (tile.fluid?.indexCount ?? 0)) / 3;
       }
       releaseAfterUpload(meshes.terrain.geometry);
+      if (meshes.terrainLm) releaseAfterUpload(meshes.terrainLm.geometry);
       if (meshes.water) releaseAfterUpload(meshes.water.geometry);
       rec.terrain = meshes.terrain;
+      rec.terrainLm = meshes.terrainLm;
+      rec.lightmapTex = meshes.lightmapTex;
       rec.water = meshes.water;
       this.minY = Math.min(this.minY, meshes.bounds.min.y);
       this.maxY = Math.max(this.maxY, meshes.bounds.max.y);
@@ -502,11 +520,15 @@ export class TileManager {
 
   private unload(key: string, rec: Record_): void {
     rec.abort?.abort();
-    for (const mesh of [rec.terrain, rec.water]) {
+    for (const mesh of [rec.terrain, rec.terrainLm, rec.water]) {
       if (!mesh) continue;
       this.opts.scene.remove(mesh);
+      // Detach the shared quad index first: dispose() deletes the GPU buffers
+      // of everything still attached, and the index is shared by every tile.
+      if (isSharedQuadIndex(mesh.geometry.index)) mesh.geometry.setIndex(null);
       mesh.geometry.dispose();
     }
+    rec.lightmapTex?.dispose();
     this.records.delete(key);
     this.failCounts.delete(key);
     this.coverageDirty = true; // an uncovered lowres parent may need to reappear

@@ -146,7 +146,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
 
         <dl className="hero-stats reveal">
           <div>
-            <dd>~5 s</dd>
+            <dd>~4 s</dd>
             <dt>to map a whole world</dt>
           </div>
           <div>
@@ -154,7 +154,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
             <dt>in your browser</dt>
           </div>
           <div>
-            <dd>8× smaller</dd>
+            <dd>26× smaller</dd>
             <dt>than raw geometry</dt>
           </div>
           <div>
@@ -208,16 +208,16 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
               <tr>
                 <th>Full render, start to finish</th>
                 <td className="compare-vantage compare-win">
-                  4.7 s <span className="compare-chip">6× faster</span>
+                  3.8 s <span className="compare-chip">7× faster</span>
                 </td>
                 <td>28.3 s</td>
               </tr>
               <tr>
                 <th>Map size on disk</th>
-                <td className="compare-vantage">132 MB</td>
-                <td className="compare-win">
-                  74 MB <span className="compare-chip">1.8× smaller</span>
+                <td className="compare-vantage compare-win">
+                  26 MB <span className="compare-chip">2.8× smaller</span>
                 </td>
+                <td>74 MB</td>
               </tr>
               <tr>
                 <th>Runtime</th>

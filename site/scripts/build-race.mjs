@@ -34,6 +34,14 @@ function lane(capture, { name, cmd, dropPatterns = [] }) {
   for (const { t, line } of capture.events) {
     if (line.startsWith('__EXIT__')) continue;
     if (dropPatterns.some((re) => re.test(line))) continue;
+    // vantage's pipe-friendly `rendering tiles [done/total]` lines are an
+    // in-place progress bar on a real TTY — feed them to the replay's
+    // progress bar as checkpoints instead of scrolling the terminal pane.
+    const tiles = /rendering tiles \[(\d+)\/(\d+)\]/.exec(line);
+    if (tiles) {
+      progress.push({ t, p: Number(tiles[1]) / Number(tiles[2]) });
+      continue;
+    }
     const pct = /(\d+(?:\.\d+)?)%/.exec(line);
     if (pct) progress.push({ t, p: Number(pct[1]) / 100 });
     lines.push({ t, text: cleanLine(line) });

@@ -71,7 +71,7 @@ fn printUsage() void {
         \\usage:
         \\  vantage render  <world-save-dir> [--assets <dir>] [--out <dir>] [--tile-chunks <n>]
         \\                  [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off] [--caves off|<y>]
-        \\                  [--threads <n>]
+        \\                  [--threads <n>] [--gz <1..12>]
         \\      Render the whole populated world as streamable tiles + manifest.json
         \\      (default out: web/public). --radius caps to a window around spawn.
         \\      Missing assets are extracted automatically from your newest client jar.
@@ -324,7 +324,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     for (g.biome_names[1..], 1..) |bn, i| display[i] = names.biomeName(a, bn);
 
     const surface = try grid.buildSurface(a, g, null);
-    const geo = try tile.serializeWithSurfaceQuantized(a, built.solid, built.fluid, surface, display);
+    const geo = try tile.serializeWithLightmap(a, built, surface, display);
     const tex_blob = try texture.serialize(a, arr);
 
     const tex_path = try texArrayPath(a, out_path);
@@ -417,6 +417,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var out_dir: []const u8 = "web/public";
     var tile_chunks: i32 = 8; // tile span in chunks (128×128 blocks)
     var radius: i32 = 0; // optional cap: only tiles within ±radius chunks of spawn/centre (0 = whole world)
+    var gz_level: i32 = 9; // libdeflate 1 (fastest) .. 12 (smallest)
     const quality = try parseLightQuality(args);
     const blend_biomes = try parseBiomeBlend(args);
     const cave_y = try parseCaveY(args);
@@ -434,6 +435,10 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         } else if (std.mem.eql(u8, arg, "--radius")) {
             const v = try flagValue(args, &argi);
             radius = std.fmt.parseInt(i32, v, 10) catch return badValue("--radius", v, "<chunks>");
+        } else if (std.mem.eql(u8, arg, "--gz")) {
+            const v = try flagValue(args, &argi);
+            const n = std.fmt.parseInt(i32, v, 10) catch return badValue("--gz", v, "1..12");
+            gz_level = std.math.clamp(n, 1, 12);
         } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
             std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads"))
         {
@@ -589,6 +594,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         .quality = quality,
         .blend_biomes = blend_biomes,
         .cave_y = cave_y,
+        .gz_level = gz_level,
         .mesh_threads = if (thread_count > 1) 1 else 0,
         .resolver = resolver,
         .builder = &builder,
@@ -624,6 +630,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var stats: grid.Stats = .{};
     var total_solid_verts: u64 = 0;
     var total_fluid_verts: u64 = 0;
+    var max_section_verts: u64 = 0;
     var total_tris: u64 = 0;
     var total_bytes: u64 = 0;
     var total_raw_bytes: u64 = 0;
@@ -657,6 +664,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         if (r.cmap) |cm| try color_maps.put(key, cm);
         total_solid_verts += r.solid_verts;
         total_fluid_verts += r.fluid_verts;
+        max_section_verts = @max(max_section_verts, @max(r.solid_verts, r.fluid_verts));
         total_tris += r.tris;
         total_bytes += r.entry.bytes;
         total_raw_bytes += r.raw_bytes;
@@ -790,6 +798,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         .biomes = world_display.items,
         .tiles = manifest_tiles.items,
         .lowres = lowres_levels.items,
+        .max_section_verts = max_section_verts,
     });
     const manifest_path = try std.fmt.allocPrint(a, "{s}/manifest.json", .{out_dir});
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = manifest_path, .data = manifest });
@@ -894,6 +903,8 @@ const RenderCtx = struct {
     quality: mesh.LightQuality,
     blend_biomes: bool,
     cave_y: ?i32,
+    /// libdeflate gzip level for tile payloads (1 fastest .. 12 smallest).
+    gz_level: i32,
     /// Thread budget for each tile's internal mesh pass: 1 when tiles already
     /// run in parallel, 0 (= all cores) for a single-worker render.
     mesh_threads: usize,
@@ -1034,7 +1045,7 @@ fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
     if (built.solid.vertex_count == 0 and built.fluid.vertex_count == 0) return;
 
     const surface = try grid.buildSurface(ta, g2, interior);
-    const geo = try tile.serializeWithSurfaceQuantized(ta, built.solid, built.fluid, surface, display_names);
+    const geo = try tile.serializeWithLightmap(ta, built, surface, display_names);
 
     // The tile's lowres source map (long-lived: feeds the pyramid later).
     const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
@@ -1045,7 +1056,7 @@ fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
     // Tiles ship gzip-wrapped (~8× smaller): any static host can serve
     // them and the viewer inflates via native DecompressionStream.
     const t_w0 = std.Io.Timestamp.now(ctx.io, .awake);
-    const zipped = try compress.gzipCompress(ta, geo, 6);
+    const zipped = try compress.gzipCompress(ta, geo, ctx.gz_level);
     const tile_path = try std.fmt.allocPrint(ta, "{s}/tiles/t.{d}.{d}.vtile", .{ ctx.out_dir, tx, tz });
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = tile_path, .data = zipped });
     res.write_ms = t_w0.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).toMilliseconds();
@@ -1077,6 +1088,9 @@ const ManifestInput = struct {
     biomes: []const []const u8,
     tiles: []const TileEntry,
     lowres: []const LowresLevel = &.{},
+    /// Largest per-section vertex count across every tile — the viewer sizes
+    /// its one shared quad index buffer from this before the first tile lands.
+    max_section_verts: u64 = 0,
 };
 
 /// Whether `name` is a render-owned tile file: `t.<x>.<z>.vtile` (hires) or
@@ -1171,8 +1185,9 @@ test "isTileFileName accepts render-owned tiles and nothing else" {
 /// Hand-rolled (the shape is tiny and fixed) to stay off the std.json churn.
 fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    try out.print(a, "{{\n  \"format\": 2,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"textures\": \"terrain.vtexarr\",\n", .{
-        m.tile_chunks, m.tile_chunks * 16,
+    // Format 4 = VTL8 tiles (compact quads + lightmap atlas) + maxSectionVerts.
+    try out.print(a, "{{\n  \"format\": 4,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"maxSectionVerts\": {d},\n  \"textures\": \"terrain.vtexarr\",\n", .{
+        m.tile_chunks, m.tile_chunks * 16, m.max_section_verts,
     });
     if (m.spawn) |s| try out.print(a, "  \"spawn\": {{ \"x\": {d}, \"y\": {d}, \"z\": {d} }},\n", .{ s[0], s[1], s[2] });
     try out.appendSlice(a, "  \"biomes\": [");

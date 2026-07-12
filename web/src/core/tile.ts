@@ -1,6 +1,6 @@
 // Decode a `.vtile` into typed, renderer-agnostic geometry. No three.js, no DOM.
 
-import { ByteReader, TILE_MAGIC, type TileMagic } from './format.js';
+import { ByteReader, TILE_MAGIC, UV_SCALE, type TileMagic } from './format.js';
 
 /**
  * One indexed geometry section. The solid terrain is the top-level section;
@@ -29,6 +29,11 @@ export interface MeshSection {
   /** `vertexCount` packed saved light `(sky << 4) | block` (each 0..15), carried
    *  in the normal's spare 4th byte. Textured tiles only. */
   light?: Uint8Array;
+  /** VTL8: the first vertex of the atlas-lit tail (== vertexCount when the
+   *  whole section is vertex-lit). */
+  lmStart?: number;
+  /** VTL8: the tail's lightmap UVs in half-texel units (delta coding undone). */
+  lmuv?: Uint16Array;
 }
 
 /**
@@ -66,6 +71,8 @@ export interface DecodedTile extends MeshSection {
   fluid?: MeshSection;
   /** Top-down surface map for picking (VTL5+). */
   surface?: SurfaceMap;
+  /** The baked light+AO atlas (VTL8 with atlas-lit geometry only). */
+  lightmap?: Lightmap;
 }
 
 /**
@@ -84,8 +91,11 @@ export interface QuantizedSection {
   posMin: [number, number, number];
   /** World units per quantization step, per axis. */
   posScale: [number, number, number];
-  /** `2 * vertexCount` texture coordinates. */
-  uv: Float32Array;
+  /** `2 * vertexCount` texture coordinates — f32 (VTL6) or i16 fixed point
+   *  (VTL7); multiply by {@link QuantizedSection.uvScale} for texture units. */
+  uv: Float32Array | Int16Array;
+  /** Texture units per stored uv step (1 for f32, 1/128 for VTL7's i16). */
+  uvScale: number;
   /** `4 * vertexCount` RGBA: tint RGB + packed AO/alpha. */
   colors: Uint8Array;
   /** `4 * vertexCount` int8: xyz normal + the packed light byte as the 4th
@@ -95,18 +105,87 @@ export interface QuantizedSection {
   layer: Uint16Array;
   /** `vertexCount` u16 biome ids. */
   biome: Uint16Array;
-  /** `indexCount` triangle indices. */
-  indices: Uint32Array;
+  /** `indexCount` triangle indices — `null` for VTL7+, whose canonical quad
+   *  topology `[b,b+1,b+2, b,b+2,b+3]` the renderer derives (and shares one
+   *  GPU index buffer across every tile). */
+  indices: Uint32Array | null;
+  /** VTL8: the first vertex of the atlas-lit tail (== vertexCount when the
+   *  whole section is vertex-lit). */
+  lmStart?: number;
+  /** VTL8: the tail's lightmap UVs in half-texel units, `2 * (vertexCount -
+   *  lmStart)` values (delta coding already undone). */
+  lmuv?: Uint16Array;
 }
 
-/** A VTL6 tile decoded without dequantization (see {@link QuantizedSection}). */
+/** A VTL8 tile's baked light+AO atlas, interleaved RGBA (R sky, G block,
+ *  B AO, A 255) ready for texture upload; sample bilinearly. */
+export interface Lightmap {
+  width: number;
+  height: number;
+  /** `4 * width * height` RGBA bytes. */
+  pixels: Uint8Array<ArrayBuffer>;
+}
+
+/** A VTL6/7/8 tile decoded without dequantization (see {@link QuantizedSection}). */
 export interface QuantizedTile {
-  magic: 'VTL6';
+  magic: 'VTL6' | 'VTL7' | 'VTL8';
   version: number;
   solid: QuantizedSection;
   fluid: QuantizedSection;
   surface: SurfaceMap;
   biomeNames: string[];
+  /** The baked light+AO atlas (VTL8 with atlas-lit geometry only). */
+  lightmap?: Lightmap;
+}
+
+/** The canonical quad index pattern for `vertexCount` vertices (4 verts / 6
+ *  indices per face) — the topology every Vantage mesher emits. */
+export function canonicalQuadIndices(vertexCount: number): Uint32Array {
+  const out = new Uint32Array((vertexCount / 4) * 6);
+  for (let b = 0, o = 0; b < vertexCount; b += 4) {
+    out[o++] = b;
+    out[o++] = b + 1;
+    out[o++] = b + 2;
+    out[o++] = b;
+    out[o++] = b + 2;
+    out[o++] = b + 3;
+  }
+  return out;
+}
+
+/** Undo VTL7's per-component zigzag delta coding: returns a fresh Uint16Array
+ *  of absolute quantized positions (the source view stays untouched, so the
+ *  same buffer can be parsed more than once). */
+function decodeDeltaPositions(zz: Uint16Array, vertexCount: number): Uint16Array {
+  const out = new Uint16Array(3 * vertexCount);
+  let px = 0, py = 0, pz = 0;
+  for (let i = 0; i < vertexCount; i++) {
+    let z = zz[i * 3]!;
+    px = (px + ((z >>> 1) ^ -(z & 1))) & 0xffff;
+    out[i * 3] = px;
+    z = zz[i * 3 + 1]!;
+    py = (py + ((z >>> 1) ^ -(z & 1))) & 0xffff;
+    out[i * 3 + 1] = py;
+    z = zz[i * 3 + 2]!;
+    pz = (pz + ((z >>> 1) ^ -(z & 1))) & 0xffff;
+    out[i * 3 + 2] = pz;
+  }
+  return out;
+}
+
+/** Undo the zigzag delta coding of a 2-component u16 stream (VTL8 lmuv). */
+function decodeDeltaPairs(zz: Uint16Array): Uint16Array {
+  const out = new Uint16Array(zz.length);
+  let pu = 0, pv = 0;
+  for (let i = 0; i * 2 < zz.length; i++) {
+    let z = zz[i * 2]!;
+    pu = (pu + ((z >>> 1) ^ -(z & 1))) & 0xffff;
+    out[i * 2] = pu;
+    z = zz[i * 2 + 1]!;
+    pv = (pv + ((z >>> 1) ^ -(z & 1))) & 0xffff;
+    out[i * 2 + 1] = pv;
+  }
+  return out;
 }
 
 /** Expand packed int8 `xyzw` normals into float `xyz`. */
@@ -200,25 +279,157 @@ function readQuantizedSectionRaw(r: ByteReader): QuantizedSection {
   const layer = r.u16a(vertexCount);
   const biome = r.u16a(vertexCount);
   r.align4(); // skip the section's tail padding
-  return { vertexCount, indexCount, positions, posMin, posScale, uv, colors, normals, layer, biome, indices };
+  return { vertexCount, indexCount, positions, posMin, posScale, uv, uvScale: 1, colors, normals, layer, biome, indices };
+}
+
+/** Read a VTL7 compact section: no index array, i16 uv, delta-coded positions.
+ *  Everything except positions stays a zero-copy view; positions decode into a
+ *  fresh absolute-u16 array (one cheap linear pass). */
+function readCompactSectionRaw(r: ByteReader): QuantizedSection {
+  const vertexCount = r.u32();
+  const uv = r.i16a(2 * vertexCount);
+  const colors = r.u8a(4 * vertexCount);
+  const normals = r.i8a(4 * vertexCount);
+  const bbox = r.f32(6); // min xyz, scale xyz
+  const posMin: [number, number, number] = [bbox[0]!, bbox[1]!, bbox[2]!];
+  const posScale: [number, number, number] = [bbox[3]!, bbox[4]!, bbox[5]!];
+  const positions = decodeDeltaPositions(r.u16a(3 * vertexCount), vertexCount);
+  const layer = r.u16a(vertexCount);
+  const biome = r.u16a(vertexCount);
+  r.align4(); // skip the section's tail padding
+  return {
+    vertexCount,
+    indexCount: (vertexCount / 4) * 6,
+    positions, posMin, posScale,
+    uv, uvScale: 1 / UV_SCALE,
+    colors, normals, layer, biome,
+    indices: null,
+  };
+}
+
+/** Read a VTL8 lit section: a VTL7 compact section with `lmStart` after the
+ *  vertex count and the atlas tail's delta-coded lmuv after the biome ids. */
+function readLitSectionRaw(r: ByteReader): QuantizedSection {
+  const vertexCount = r.u32();
+  const lmStart = r.u32();
+  const uv = r.i16a(2 * vertexCount);
+  const colors = r.u8a(4 * vertexCount);
+  const normals = r.i8a(4 * vertexCount);
+  const bbox = r.f32(6); // min xyz, scale xyz
+  const posMin: [number, number, number] = [bbox[0]!, bbox[1]!, bbox[2]!];
+  const posScale: [number, number, number] = [bbox[3]!, bbox[4]!, bbox[5]!];
+  const positions = decodeDeltaPositions(r.u16a(3 * vertexCount), vertexCount);
+  const layer = r.u16a(vertexCount);
+  const biome = r.u16a(vertexCount);
+  const lmuv = decodeDeltaPairs(r.u16a(2 * (vertexCount - lmStart)));
+  r.align4(); // skip the section's tail padding
+  return {
+    vertexCount,
+    indexCount: (vertexCount / 4) * 6,
+    positions, posMin, posScale,
+    uv, uvScale: 1 / UV_SCALE,
+    colors, normals, layer, biome,
+    indices: null,
+    lmStart, lmuv,
+  };
+}
+
+/** Read a VTL8 atlas: three planar channels expanded to interleaved RGBA. */
+function readLightmap(r: ByteReader): Lightmap | undefined {
+  const width = r.u32();
+  const height = r.u32();
+  const n = width * height;
+  if (n === 0) return undefined;
+  const sky = r.u8a(n);
+  const blk = r.u8a(n);
+  const ao = r.u8a(n);
+  const pixels = new Uint8Array(4 * n);
+  for (let i = 0; i < n; i++) {
+    pixels[i * 4 + 0] = sky[i]!;
+    pixels[i * 4 + 1] = blk[i]!;
+    pixels[i * 4 + 2] = ao[i]!;
+    pixels[i * 4 + 3] = 255;
+  }
+  return { width, height, pixels };
+}
+
+/** Expand a raw quantized section the classic on-CPU way (shape-identical to
+ *  the VTL3..6 readers): f32 uv/positions, synthesized canonical indices. */
+function expandSection(raw: QuantizedSection): MeshSection {
+  const { vertexCount, indexCount } = raw;
+  const positions = new Float32Array(3 * vertexCount);
+  const uv = new Float32Array(2 * vertexCount);
+  const layer = new Float32Array(vertexCount);
+  const biome = new Float32Array(vertexCount);
+  const [mnx, mny, mnz] = raw.posMin;
+  const [scx, scy, scz] = raw.posScale;
+  for (let i = 0; i < vertexCount; i++) {
+    positions[i * 3 + 0] = mnx + raw.positions[i * 3 + 0]! * scx;
+    positions[i * 3 + 1] = mny + raw.positions[i * 3 + 1]! * scy;
+    positions[i * 3 + 2] = mnz + raw.positions[i * 3 + 2]! * scz;
+    uv[i * 2 + 0] = raw.uv[i * 2 + 0]! * raw.uvScale;
+    uv[i * 2 + 1] = raw.uv[i * 2 + 1]! * raw.uvScale;
+    layer[i] = raw.layer[i]!;
+    biome[i] = raw.biome[i]!;
+  }
+  return {
+    vertexCount, indexCount, positions, uv, layer, biome,
+    colors: raw.colors,
+    normals: expandNormals(raw.normals, vertexCount),
+    light: extractLight(raw.normals, vertexCount),
+    indices: canonicalQuadIndices(vertexCount),
+    ...(raw.lmStart !== undefined ? { lmStart: raw.lmStart, lmuv: raw.lmuv } : {}),
+  };
+}
+
+function readCompactSection(r: ByteReader): MeshSection {
+  return expandSection(readCompactSectionRaw(r));
+}
+
+/** Write the atlas' corner texels back into the tail's per-vertex light/AO.
+ *  A vertex's lmuv points at a texel CENTRE (half-texel units, +1 bias), so
+ *  `(v - 1) / 2` recovers the exact integer texel = that corner's sample. */
+function bakeVertexLight(sec: MeshSection, lm: Lightmap): void {
+  const { lmStart, lmuv } = sec;
+  if (lmStart === undefined || !lmuv || lmStart >= sec.vertexCount) return;
+  const colors = sec.colors!.slice(); // the zero-copy view must stay pristine
+  const light = sec.light!;
+  for (let i = lmStart; i < sec.vertexCount; i++) {
+    const k = i - lmStart;
+    const u = (lmuv[k * 2]! - 1) >> 1;
+    const v = (lmuv[k * 2 + 1]! - 1) >> 1;
+    const o = (v * lm.width + u) * 4;
+    const sky = Math.round(lm.pixels[o]! / 17);
+    const blk = Math.round(lm.pixels[o + 1]! / 17);
+    light[i] = (sky << 4) | blk;
+    colors[i * 4 + 3] = lm.pixels[o + 2]!; // AO
+  }
+  sec.colors = colors;
 }
 
 /**
- * Decode a VTL6 `.vtile` in its quantized on-disk encoding: every array is a
- * zero-copy view and positions/layer/biome stay u16 for the vertex shader to
- * dequantize (the streaming fast path — no per-vertex CPU work). Returns `null`
- * for any other tile version; callers fall back to {@link parseTile}.
+ * Decode a VTL6/7 `.vtile` in its quantized on-disk encoding: arrays are
+ * zero-copy views (VTL7 positions take one linear delta-decode pass) and stay
+ * u16/i16 for the vertex shader to dequantize (the streaming fast path — no
+ * per-vertex float expansion). Returns `null` for any other tile version;
+ * callers fall back to {@link parseTile}.
  */
 export function parseTileQuantized(buffer: ArrayBuffer): QuantizedTile | null {
   const r = new ByteReader(buffer);
-  if (r.magic() !== TILE_MAGIC.VTL6) return null;
+  const magic = r.magic();
+  if (magic !== TILE_MAGIC.VTL6 && magic !== TILE_MAGIC.VTL7 && magic !== TILE_MAGIC.VTL8) return null;
   r.off = 4;
   const version = r.u32();
-  const solid = readQuantizedSectionRaw(r);
-  const fluid = readQuantizedSectionRaw(r);
+  const readSection =
+    magic === TILE_MAGIC.VTL8 ? readLitSectionRaw
+    : magic === TILE_MAGIC.VTL7 ? readCompactSectionRaw
+    : readQuantizedSectionRaw;
+  const solid = readSection(r);
+  const fluid = readSection(r);
+  const lightmap = magic === TILE_MAGIC.VTL8 ? readLightmap(r) : undefined;
   const surface = readSurface(r);
   const biomeNames = readLegend(r);
-  return { magic: TILE_MAGIC.VTL6, version, solid, fluid, surface, biomeNames };
+  return { magic, version, solid, fluid, surface, biomeNames, ...(lightmap ? { lightmap } : {}) };
 }
 
 /** Read the VTL5 surface map at the reader's cursor. */
@@ -256,6 +467,34 @@ export function parseTile(buffer: ArrayBuffer): DecodedTile {
   const magic = r.magic();
   r.off = 4;
   const version = r.u32();
+
+  // VTL8 = VTL7 + the per-tile lightmap atlas for the greedy vertex tail.
+  if (magic === TILE_MAGIC.VTL8) {
+    const solid = expandSection(readLitSectionRaw(r));
+    const fluid = expandSection(readLitSectionRaw(r));
+    const lightmap = readLightmap(r);
+    // The atlas-lit tail carries placeholder vertex light; bake the atlas'
+    // CORNER texels back into per-vertex values so non-atlas renderers (the
+    // classic buildTerrain path) still light this geometry. (The streaming
+    // path samples the atlas per fragment instead — full gradients.)
+    if (lightmap) bakeVertexLight(solid, lightmap);
+    const surface = readSurface(r);
+    const biomeNames = readLegend(r);
+    return {
+      magic, version, textured: true, hasBiome: true, ...solid, biomeNames, fluid, surface,
+      ...(lightmap ? { lightmap } : {}),
+    };
+  }
+
+  // VTL7 = VTL6 minus the (derivable) index array, with delta-coded positions
+  // and i16 fixed-point uv. Same section count + surface + legend.
+  if (magic === TILE_MAGIC.VTL7) {
+    const solid = readCompactSection(r);
+    const fluid = readCompactSection(r);
+    const surface = readSurface(r);
+    const biomeNames = readLegend(r);
+    return { magic, version, textured: true, hasBiome: true, ...solid, biomeNames, fluid, surface };
+  }
 
   // VTL6 = VTL5 with quantized vertices (u16 positions + layer/biome). Same
   // section count + surface + legend; only the per-vertex decode differs.
@@ -310,5 +549,5 @@ export function parseTile(buffer: ArrayBuffer): DecodedTile {
     };
   }
 
-  throw new Error(`vantage: unrecognized tile magic "${magic}" (expected VTL1–VTL6)`);
+  throw new Error(`vantage: unrecognized tile magic "${magic}" (expected VTL1–VTL7)`);
 }

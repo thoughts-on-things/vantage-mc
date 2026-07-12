@@ -20,9 +20,19 @@ export const TILE_MAGIC = {
   VTL5: 'VTL5',
   /** Quantized vertices: u16 positions (bbox transform) + u16 layer/biome. */
   VTL6: 'VTL6',
+  /** Compact quads: no index array (canonical quad topology is derived),
+   *  delta-coded u16 positions, i16 fixed-point UV. */
+  VTL7: 'VTL7',
+  /** + a per-tile lightmap atlas: the greedy vertex tail samples baked
+   *  light/AO from a texture instead of vertices, so lighting gradients no
+   *  longer fragment greedy merges (~23% fewer vertices). */
+  VTL8: 'VTL8',
 } as const;
 
 export type TileMagic = (typeof TILE_MAGIC)[keyof typeof TILE_MAGIC];
+
+/** VTL7 UV fixed-point steps per texture unit (uv = stored / UV_SCALE). */
+export const UV_SCALE = 128;
 
 /** Texture-array magic. */
 export const TEXTURE_MAGIC = 'VTA1' as const;

@@ -2,11 +2,13 @@
 // Use this layer to read Vantage tiles anywhere (browser, worker, Node) without
 // pulling in three.js or the DOM.
 
-export { ByteReader, TILE_MAGIC, TEXTURE_MAGIC, type TileMagic } from './format.js';
+export { ByteReader, TILE_MAGIC, TEXTURE_MAGIC, UV_SCALE, type TileMagic } from './format.js';
 export {
+  canonicalQuadIndices,
   parseTile,
   parseTileQuantized,
   type DecodedTile,
+  type Lightmap,
   type MeshSection,
   type QuantizedSection,
   type QuantizedTile,

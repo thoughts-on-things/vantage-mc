@@ -49,9 +49,17 @@ describe('parseManifest', () => {
     expect(m.lowres?.levels[0]?.tiles[0]?.path).toBe('tiles/l1.0.0.vlr');
   });
 
+  it('accepts a format-3 manifest and its maxSectionVerts hint', () => {
+    const m = parseManifest({ ...good, format: 3, maxSectionVerts: 524288 });
+    expect(m.format).toBe(3);
+    expect(m.maxSectionVerts).toBe(524288);
+    // The hint is optional (and absent on format ≤ 2 manifests).
+    expect(parseManifest(good).maxSectionVerts).toBeUndefined();
+  });
+
   it('rejects wrong format versions and malformed shapes', () => {
     expect(() => parseManifest(null)).toThrow(/not an object/);
-    expect(() => parseManifest({ ...good, format: 3 })).toThrow(/format/);
+    expect(() => parseManifest({ ...good, format: 5 })).toThrow(/format/);
     expect(() => parseManifest({ ...good, tiles: [{ x: 0 }] })).toThrow(/tile 0/);
     expect(() => parseManifest({ ...good, biomes: [1] })).toThrow(/biomes/);
     expect(() => parseManifest({ ...good, format: 2, lowres: { grid: 0, levels: [] } })).toThrow(/lowres/);

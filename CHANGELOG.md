@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.1.1...v0.2.0) (2026-07-12)
+
+
+### Features
+
+* fluid fidelity — animated water & lava, real lava geometry, flow textures ([#13](https://github.com/thoughts-on-things/vantage-mc/issues/13)) ([9f44c81](https://github.com/thoughts-on-things/vantage-mc/commit/9f44c8101a06b0fdedcfb74fdcb4c0b79dae9576))
+
+
+### Bug Fixes
+
+* stream world reads, bound grid height, pipe-friendly progress ([#15](https://github.com/thoughts-on-things/vantage-mc/issues/15)) ([8506a10](https://github.com/thoughts-on-things/vantage-mc/commit/8506a102bdbe91ba1b7dfd04a47426d940c0cca7))
+
 ## [0.1.1](https://github.com/thoughts-on-things/vantage-mc/compare/v0.1.0...v0.1.1) (2026-07-11)
 
 

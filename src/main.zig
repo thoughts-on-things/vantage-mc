@@ -571,6 +571,13 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     const results = try a.alloc(TileResult, tile_keys.len);
     for (results) |*r| r.* = .{};
     var next_tile = std.atomic.Value(usize).init(0);
+    var done_tiles = std.atomic.Value(usize).init(0);
+
+    // std.Progress paints its live bar only on a TTY. When stderr is piped —
+    // CI, or a supervisor like beacon tailing the process — emit plain
+    // `rendering tiles [done/total]` lines instead (throttled to ~1% steps)
+    // so the wrapper can surface real progress.
+    const plain_progress = !(std.Io.File.stderr().isTty(init.io) catch false);
 
     var ctx: RenderCtx = .{
         .io = init.io,
@@ -595,6 +602,8 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         .world_biome_ids = &world_biome_ids,
         .results = results,
         .next = &next_tile,
+        .done = &done_tiles,
+        .plain_progress = plain_progress,
         .progress = tiles_node,
     };
 
@@ -622,12 +631,18 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var light_ms: i64 = 0;
     var mesh_ms: i64 = 0;
     var write_ms: i64 = 0;
+    var tiles_failed: usize = 0;
+    var first_tile_err: ?anyerror = null;
     for (results, tile_keys) |*r, key| {
         if (r.err) |e| {
+            // One bad tile (a corrupt region, a decode blow-up) must not
+            // take down the whole map — render everything else and say so.
             const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
             const tz: i32 = @bitCast(@as(u32, @truncate(key)));
             std.debug.print("tile ({d},{d}) failed: {s}\n", .{ tx, tz, @errorName(e) });
-            return e;
+            tiles_failed += 1;
+            if (first_tile_err == null) first_tile_err = e;
+            continue;
         }
         stats.chunks_loaded += r.stats.chunks_loaded;
         stats.chunks_missing += r.stats.chunks_missing;
@@ -646,6 +661,15 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         total_bytes += r.entry.bytes;
         total_raw_bytes += r.raw_bytes;
     }
+
+    // Every tile failing means something systemic (not one corrupt spot) —
+    // surface the first error instead of shipping an empty manifest that
+    // would wipe the previous render.
+    if (tiles_failed > 0 and tiles_failed == tile_keys.len) return first_tile_err.?;
+    if (tiles_failed > 0) std.debug.print(
+        "  note: {d} tile(s) failed and were skipped — the map has gaps there (details above)\n",
+        .{tiles_failed},
+    );
 
     // A world saved before 1.18 stores chunks in the legacy `Level` layout and
     // decodes to nothing — explain that instead of writing an empty map.
@@ -885,6 +909,13 @@ const RenderCtx = struct {
     world_biome_ids: *std.StringHashMap(u16),
     results: []TileResult,
     next: *std.atomic.Value(usize),
+    /// Count of finished tiles (any outcome) — drives the plain-text
+    /// progress lines. Distinct from `next`, which hands out work and runs
+    /// ahead of completion.
+    done: *std.atomic.Value(usize),
+    /// Emit `rendering tiles [done/total]` lines (stderr is not a TTY, so
+    /// std.Progress' live bar is invisible to whoever is reading us).
+    plain_progress: bool,
     progress: std.Progress.Node,
 };
 
@@ -920,6 +951,15 @@ fn tileWorker(ctx: *RenderCtx) void {
             ctx.results[idx].err = e;
         };
         ctx.progress.completeOne();
+        const done = ctx.done.fetchAdd(1, .monotonic) + 1;
+        if (ctx.plain_progress) {
+            // ~1% steps (every tile on small worlds) keeps the line count
+            // bounded no matter how many tiles a world has.
+            const total = ctx.tile_keys.len;
+            const step = @max(total / 100, 1);
+            if (done % step == 0 or done == total)
+                std.debug.print("rendering tiles [{d}/{d}]\n", .{ done, total });
+        }
     }
 }
 
@@ -939,7 +979,7 @@ fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
     const cz1 = (tz + 1) * tile_chunks;
 
     const t_r0 = std.Io.Timestamp.now(ctx.io, .awake);
-    const g = try world.assembleWindow(ta, ctx.loaded, cx0, cz0, cx1, cz1, &res.stats, null);
+    const g = try world.assembleWindow(ta, ctx.io, ctx.loaded, cx0, cz0, cx1, cz1, &res.stats, null);
     res.read_ms = t_r0.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).toMilliseconds();
     if (g.ids.len == 0) return;
 

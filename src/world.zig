@@ -16,7 +16,11 @@ const nbt = @import("nbt.zig");
 pub const LoadedRegion = struct {
     x: i32,
     z: i32,
-    bytes: []const u8,
+    /// The file's location table — its first 4 KiB (shorter if truncated).
+    /// Chunk payloads are NOT held here: they're read from `path` per tile
+    /// window, so memory stays flat no matter how many regions a world has.
+    table: []const u8,
+    path: []const u8,
 };
 
 pub const ChunkBounds = struct {
@@ -60,7 +64,10 @@ fn dirHasMca(io: std.Io, path: []const u8) !bool {
     return false;
 }
 
-/// Read every `r.X.Z.mca` file in a region directory into memory (once).
+/// Index every `r.X.Z.mca` file in a region directory (once). Only the 4 KiB
+/// location table of each file is read here — a large world's region set can
+/// be tens of GB, which used to be loaded whole and held for the entire
+/// render, OOM-killing the process. Payloads stream in `assembleWindow`.
 pub fn loadRegions(arena: std.mem.Allocator, io: std.Io, region_dir: []const u8) ![]LoadedRegion {
     var out: std.ArrayList(LoadedRegion) = .empty;
     var dir = try std.Io.Dir.cwd().openDir(io, region_dir, .{ .iterate = true });
@@ -70,10 +77,18 @@ pub fn loadRegions(arena: std.mem.Allocator, io: std.Io, region_dir: []const u8)
         if (e.kind != .file) continue;
         const xz = parseRegionName(e.name) orelse continue;
         const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ region_dir, e.name });
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch continue;
-        try out.append(arena, .{ .x = xz[0], .z = xz[1], .bytes = bytes });
+        const table = readLocationTable(arena, io, path) catch continue;
+        try out.append(arena, .{ .x = xz[0], .z = xz[1], .table = table, .path = path });
     }
     return out.toOwnedSlice(arena);
+}
+
+fn readLocationTable(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const buf = try arena.alloc(u8, region.SECTOR);
+    const n = try file.readPositionalAll(io, buf, 0);
+    return buf[0..n];
 }
 
 /// "r.-2.1.mca" -> {-2, 1}.
@@ -97,12 +112,12 @@ pub fn populatedBounds(regions: []const LoadedRegion) ChunkBounds {
         .max_cz = std.math.minInt(i32),
     };
     for (regions) |r| {
-        if (r.bytes.len < region.SECTOR) continue;
+        if (r.table.len < region.SECTOR) continue;
         var i: usize = 0;
         while (i < 1024) : (i += 1) {
             const e = i * 4;
-            const off = (@as(u32, r.bytes[e]) << 16) | (@as(u32, r.bytes[e + 1]) << 8) | r.bytes[e + 2];
-            if (off == 0 and r.bytes[e + 3] == 0) continue;
+            const off = (@as(u32, r.table[e]) << 16) | (@as(u32, r.table[e + 1]) << 8) | r.table[e + 2];
+            if (off == 0 and r.table[e + 3] == 0) continue;
             const cx = r.x * 32 + @as(i32, @intCast(i % 32));
             const cz = r.z * 32 + @as(i32, @intCast(i / 32));
             b.min_cx = @min(b.min_cx, cx);
@@ -128,12 +143,12 @@ pub fn packChunk(cx: i32, cz: i32) u64 {
 pub fn populatedChunks(arena: std.mem.Allocator, regions: []const LoadedRegion) !std.AutoHashMap(u64, void) {
     var set = std.AutoHashMap(u64, void).init(arena);
     for (regions) |r| {
-        if (r.bytes.len < region.SECTOR) continue;
+        if (r.table.len < region.SECTOR) continue;
         var i: usize = 0;
         while (i < 1024) : (i += 1) {
             const e = i * 4;
-            const off = (@as(u32, r.bytes[e]) << 16) | (@as(u32, r.bytes[e + 1]) << 8) | r.bytes[e + 2];
-            if (off == 0 and r.bytes[e + 3] == 0) continue;
+            const off = (@as(u32, r.table[e]) << 16) | (@as(u32, r.table[e + 1]) << 8) | r.table[e + 2];
+            if (off == 0 and r.table[e + 3] == 0) continue;
             const cx = r.x * 32 + @as(i32, @intCast(i % 32));
             const cz = r.z * 32 + @as(i32, @intCast(i / 32));
             try set.put(packChunk(cx, cz), {});
@@ -175,11 +190,15 @@ pub fn readSpawn(arena: std.mem.Allocator, io: std.Io, save_dir: []const u8) ?[3
 }
 
 /// Assemble a grid over the world-chunk window [cx0..cx1] x [cz0..cz1] (inclusive,
-/// world chunk coords), reading from whichever loaded regions overlap it. Decoded
-/// chunks share one grid, so faces cull across region boundaries. `prog`, if
-/// given, advances once per chunk attempted.
+/// world chunk coords), reading from whichever loaded regions overlap it. Chunk
+/// payloads are read from disk here (positional reads guided by the in-memory
+/// location tables) into `arena` — a tile's window is the only chunk data ever
+/// resident, so memory doesn't scale with world size. Decoded chunks share one
+/// grid, so faces cull across region boundaries. `prog`, if given, advances
+/// once per chunk attempted.
 pub fn assembleWindow(
     arena: std.mem.Allocator,
+    io: std.Io,
     loaded: []const LoadedRegion,
     cx0: i32,
     cz0: i32,
@@ -195,7 +214,14 @@ pub fn assembleWindow(
         const rcx1 = rcx0 + 31;
         const rcz1 = rcz0 + 31;
         if (rcx1 < cx0 or rcx0 > cx1 or rcz1 < cz0 or rcz0 > cz1) continue;
-        const reg = region.Region.fromBytes(r.bytes);
+        // One handle per overlapping region for the whole window — workers on
+        // other tiles hold their own, so there's no shared-seek state.
+        var file = std.Io.Dir.cwd().openFile(io, r.path, .{}) catch {
+            // The file vanished or turned unreadable since the scan; its
+            // chunks are counted missing as the window walks them below.
+            continue;
+        };
+        defer file.close(io);
         var wz = @max(cz0, rcz0);
         while (wz <= @min(cz1, rcz1)) : (wz += 1) {
             var wx = @max(cx0, rcx0);
@@ -203,7 +229,11 @@ pub fn assembleWindow(
                 if (prog) |p| p.completeOne();
                 const lx: u5 = @intCast(wx - rcx0);
                 const lz: u5 = @intCast(wz - rcz0);
-                const ch = grid.decodeChunk(arena, reg, lx, lz) catch |err| {
+                const loc = region.locate(r.table, lx, lz) orelse {
+                    stats.chunks_missing += 1;
+                    continue;
+                };
+                const ch = decodeChunkAt(arena, io, file, loc) catch |err| {
                     switch (err) {
                         error.PreModernChunk => stats.chunks_premodern += 1,
                         error.UnsupportedCompression, error.ExternalChunk => stats.chunks_unreadable += 1,
@@ -225,6 +255,21 @@ pub fn assembleWindow(
         }
     }
     return grid.buildGrid(arena, chunks.items, stats);
+}
+
+/// Read one chunk's sectors from an open region file and decode it. The raw
+/// sector buffer, NBT bytes, and decoded sections all come from `arena` (the
+/// caller's per-tile arena), freed together when the tile completes.
+fn decodeChunkAt(arena: std.mem.Allocator, io: std.Io, file: std.Io.File, loc: region.Loc) !?chunk.Chunk {
+    const size: usize = @as(usize, loc.sector_count) * region.SECTOR;
+    if (size == 0) return null;
+    const buf = try arena.alloc(u8, size);
+    const n = try file.readPositionalAll(io, buf, @as(u64, loc.offset_sectors) * region.SECTOR);
+    const raw = (try region.rawChunkFromSectors(buf[0..n])) orelse return null;
+    const nbt_bytes = try region.decompress(arena, raw);
+    var parser = nbt.Parser{ .buf = nbt_bytes, .arena = arena };
+    const root = try parser.parseRoot();
+    return try chunk.decode(arena, root);
 }
 
 test "parseRegionName" {

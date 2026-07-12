@@ -29,6 +29,37 @@ pub const RawChunk = struct {
     data: []const u8,
 };
 
+pub const Loc = struct { offset_sectors: u32, sector_count: u8 };
+
+/// Look up a chunk's location-table entry. `table` is the start of a region
+/// file — the full buffer, or just its first 4 KiB (the location table) when
+/// the payloads are read from disk on demand.
+pub fn locate(table: []const u8, lx: u5, lz: u5) ?Loc {
+    const idx: usize = (@as(usize, lz) * 32 + lx) * 4;
+    if (idx + 4 > table.len) return null;
+    const off: u32 = (@as(u32, table[idx]) << 16) | (@as(u32, table[idx + 1]) << 8) | table[idx + 2];
+    const cnt: u8 = table[idx + 3];
+    if (off == 0 and cnt == 0) return null; // chunk absent
+    return .{ .offset_sectors = off, .sector_count = cnt };
+}
+
+/// Parse a raw chunk out of its sector-aligned payload — `buf` starts at the
+/// chunk's first sector (offset `Loc.offset_sectors * SECTOR` in the file) and
+/// spans at most `Loc.sector_count` sectors.
+pub fn rawChunkFromSectors(buf: []const u8) !?RawChunk {
+    if (buf.len < 5) return error.Truncated;
+    const len = std.mem.readInt(u32, buf[0..4], .big);
+    if (len == 0) return null;
+    // High bit of the compression byte marks an external .mcc chunk,
+    // which is not supported.
+    const comp_byte = buf[4];
+    if (comp_byte & 0x80 != 0) return error.ExternalChunk;
+    const comp: Compression = @enumFromInt(comp_byte);
+    const data_len: usize = len - 1; // length counts the compression byte
+    if (5 + data_len > buf.len) return error.Truncated;
+    return RawChunk{ .compression = comp, .data = buf[5 .. 5 + data_len] };
+}
+
 pub const Region = struct {
     bytes: []const u8,
 
@@ -36,34 +67,13 @@ pub const Region = struct {
         return .{ .bytes = bytes };
     }
 
-    const Loc = struct { offset_sectors: u32, sector_count: u8 };
-
-    fn locate(self: Region, lx: u5, lz: u5) ?Loc {
-        const idx: usize = (@as(usize, lz) * 32 + lx) * 4;
-        if (idx + 4 > self.bytes.len) return null;
-        const b = self.bytes;
-        const off: u32 = (@as(u32, b[idx]) << 16) | (@as(u32, b[idx + 1]) << 8) | b[idx + 2];
-        const cnt: u8 = b[idx + 3];
-        if (off == 0 and cnt == 0) return null; // chunk absent
-        return .{ .offset_sectors = off, .sector_count = cnt };
-    }
-
     /// Return the raw (still-compressed) chunk at local coords, or null if absent.
     pub fn rawChunk(self: Region, lx: u5, lz: u5) !?RawChunk {
-        const loc = self.locate(lx, lz) orelse return null;
+        const loc = locate(self.bytes, lx, lz) orelse return null;
         const start: usize = @as(usize, loc.offset_sectors) * SECTOR;
-        if (start + 5 > self.bytes.len) return error.Truncated;
-        const len = std.mem.readInt(u32, self.bytes[start..][0..4], .big);
-        if (len == 0) return null;
-        // High bit of the compression byte marks an external .mcc chunk,
-        // which is not supported.
-        const comp_byte = self.bytes[start + 4];
-        if (comp_byte & 0x80 != 0) return error.ExternalChunk;
-        const comp: Compression = @enumFromInt(comp_byte);
-        const data_start = start + 5;
-        const data_len: usize = len - 1; // length counts the compression byte
-        if (data_start + data_len > self.bytes.len) return error.Truncated;
-        return RawChunk{ .compression = comp, .data = self.bytes[data_start .. data_start + data_len] };
+        if (start >= self.bytes.len) return error.Truncated;
+        const end = @min(self.bytes.len, start + @as(usize, loc.sector_count) * SECTOR);
+        return rawChunkFromSectors(self.bytes[start..end]);
     }
 };
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.2.0...v0.3.0) (2026-07-12)
+
+
+### Features
+
+* VTL7+VTL8 — compact quads & lightmap atlases (5× smaller, 23% fewer verts, faster bakes) ([#16](https://github.com/thoughts-on-things/vantage-mc/issues/16)) ([14dcb60](https://github.com/thoughts-on-things/vantage-mc/commit/14dcb608a58a016cbcdca02d8ec5f17aa1b43dc5))
+
 ## [0.2.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.1.1...v0.2.0) (2026-07-12)
 
 

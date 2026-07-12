@@ -8,6 +8,7 @@ export {
   parseTile,
   parseTileQuantized,
   type DecodedTile,
+  type Lightmap,
   type MeshSection,
   type QuantizedSection,
   type QuantizedTile,

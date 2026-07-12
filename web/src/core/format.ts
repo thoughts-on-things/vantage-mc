@@ -23,6 +23,10 @@ export const TILE_MAGIC = {
   /** Compact quads: no index array (canonical quad topology is derived),
    *  delta-coded u16 positions, i16 fixed-point UV. */
   VTL7: 'VTL7',
+  /** + a per-tile lightmap atlas: the greedy vertex tail samples baked
+   *  light/AO from a texture instead of vertices, so lighting gradients no
+   *  longer fragment greedy merges (~23% fewer vertices). */
+  VTL8: 'VTL8',
 } as const;
 
 export type TileMagic = (typeof TILE_MAGIC)[keyof typeof TILE_MAGIC];

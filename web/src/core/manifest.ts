@@ -68,8 +68,8 @@ export function parseManifest(data: unknown): WorldManifest {
   if (typeof data !== 'object' || data === null) throw new Error('vantage: manifest is not an object');
   const m = data as Record<string, unknown>;
   const format = m['format'];
-  if (format !== 1 && format !== 2 && format !== 3) {
-    throw new Error(`vantage: unsupported manifest format ${String(format)} (expected 1..3)`);
+  if (format !== 1 && format !== 2 && format !== 3 && format !== 4) {
+    throw new Error(`vantage: unsupported manifest format ${String(format)} (expected 1..4)`);
   }
   const tileChunks = m['tileChunks'];
   const tileBlocks = m['tileBlocks'];

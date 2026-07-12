@@ -21,7 +21,7 @@ import {
   worldFromUrl,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
-import { createLowresMaterial, createSky, createTerrainMaterial, createWaterMaterial, SKY_HORIZON } from './materials.js';
+import { createLightmappedMaterial, createLowresMaterial, createSky, createTerrainMaterial, createWaterMaterial, SKY_HORIZON } from './materials.js';
 import { pickBiome } from './pick.js';
 import { buildTerrain } from './terrain.js';
 import { TileManager, type TileStats } from './tiles.js';
@@ -393,6 +393,8 @@ export class VantageViewer {
     const shader = createTerrainMaterial(texData, { quantized: true, palette });
     const waterShader = createWaterMaterial(shader);
     shader.uniforms['uFogRadial']!.value = 1.0; // fog radially from the focus, not by view depth
+    // Format 4+ (VTL8): the atlas-lit sibling material for lightmapped tails.
+    const lmShader = manifest.format >= 4 ? createLightmappedMaterial(shader) : undefined;
     // Lowres pyramid (format 2): coarse whole-world rings under the hires disc.
     const lowresShader = manifest.lowres ? createLowresMaterial(shader) : undefined;
     this.shader = shader;
@@ -406,6 +408,7 @@ export class VantageViewer {
       scene: this.scene,
       material: shader,
       waterMaterial: waterShader,
+      ...(lmShader ? { lmMaterial: lmShader } : {}),
       ...(lowresShader ? { lowresMaterial: lowresShader } : {}),
       palette,
       ...this.options.streaming,
@@ -442,7 +445,7 @@ export class VantageViewer {
     this._biomes = [];
     this.emitter.emit('load', {
       // Streamed worlds: the tile format follows the manifest schema version.
-      magic: manifest.format >= 3 ? 'VTL7' : 'VTL6',
+      magic: manifest.format >= 4 ? 'VTL8' : manifest.format >= 3 ? 'VTL7' : 'VTL6',
       vertexCount: 0,
       triangleCount: 0,
       size,

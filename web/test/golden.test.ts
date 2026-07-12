@@ -14,6 +14,32 @@ async function fixture(name: string): Promise<ArrayBuffer> {
 }
 
 describe('golden fixtures from the Zig generator', () => {
+  it('decodes a generator-produced VTL8 tile', async () => {
+    const buffer = await fixture('golden-v8.vtile');
+    const tile = parseTile(buffer);
+    expect(tile.magic).toBe('VTL8');
+    expect(tile.vertexCount).toBeGreaterThan(0);
+    expect(tile.vertexCount % 4).toBe(0); // strict quads
+    expect(tile.lmStart).toBeLessThanOrEqual(tile.vertexCount);
+    expect(tile.surface!.width).toBe(16);
+    expect(summarizeBiomes(tile).length).toBeGreaterThan(0);
+
+    const q = parseTileQuantized(buffer);
+    expect(q).not.toBeNull();
+    expect(q!.solid.vertexCount).toBe(tile.vertexCount);
+    expect(q!.solid.lmStart).toBe(tile.lmStart);
+    expect(q!.solid.indices).toBeNull();
+    if (q!.lightmap) {
+      // Every tail vertex's lmuv must land inside the atlas.
+      const { width, height } = q!.lightmap;
+      const lmuv = q!.solid.lmuv!;
+      for (let i = 0; i < lmuv.length; i += 2) {
+        expect(lmuv[i]! / 2).toBeLessThanOrEqual(width);
+        expect(lmuv[i + 1]! / 2).toBeLessThanOrEqual(height);
+      }
+    }
+  });
+
   it('decodes a generator-produced VTL7 tile', async () => {
     const buffer = await fixture('golden-v7.vtile');
     const tile = parseTile(buffer);

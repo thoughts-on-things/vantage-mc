@@ -49,12 +49,14 @@ versioned binary tile contract, so each can evolve independently.
 | ![Zoomed out to a whole-world satellite view](./docs/render-world.jpg) | ![The biome layer with its legend](./docs/render-biomes.jpg) |
 
 Measured on a dense 7,225-chunk 1.21 world (Windows, 16 threads, ReleaseFast):
-**~3.3 s** end-to-end for 81 tiles + a 3-level LOD pyramid, **25 MB on disk**
+**~3.4 s** end-to-end for 81 tiles + a 3-level LOD pyramid, **~25 MB on disk**
 (the compact quad encoding ships no index data, delta-codes positions, and
-stores fixed-point UVs — 5× smaller than the previous format for byte-identical
-rendering), streaming at 120+ FPS with ~16M triangles resident. Tiles render in
-parallel across all cores by default; `--gz 6` trades ~17% size for a ~2.3 s
-bake, `--gz 12` squeezes out another ~12% when render time doesn't matter.
+stores fixed-point UVs — 5× smaller than the previous format), streaming at
+120+ FPS. Baked light and AO live in per-tile lightmap atlases, so greedy
+meshing merges across lighting gradients: ~23% fewer vertices (~12.8M
+triangles resident for the whole world) with per-block light fidelity intact.
+Tiles render in parallel across all cores by default; `--gz` trades size
+against write time (1..12, default 9).
 
 ## Quick start
 

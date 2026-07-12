@@ -8,13 +8,14 @@ import {
   LOWRES_EMPTY,
   type DecodedTextureArray,
   type DecodedTile,
+  type Lightmap,
   type LowresTile,
   type MeshSection,
   type QuantizedSection,
   type QuantizedTile,
   type Rgb,
 } from '../core/index.js';
-import { createTerrainMaterial, createWaterMaterial } from './materials.js';
+import { createLightmappedMaterial, createTerrainMaterial, createWaterMaterial } from './materials.js';
 
 /** The objects and metadata produced from a tile. */
 export interface TerrainObjects {
@@ -80,8 +81,44 @@ const WATER_FALLBACK: Rgb = [0.3, 0.5, 0.85];
 /** The meshes built from one tile with caller-provided (shared) materials. */
 export interface TileMeshes {
   terrain: THREE.Mesh;
+  /** The atlas-lit tail of the solid geometry (VTL8), drawn with the
+   *  lightmapped sibling material. */
+  terrainLm?: THREE.Mesh;
+  /** The tail's lightmap texture — dispose it with the tile. */
+  lightmapTex?: THREE.DataTexture;
   water?: THREE.Mesh;
   bounds: THREE.Box3;
+}
+
+/** Upload-ready texture for a tile's baked light+AO atlas. Bilinear, no mips,
+ *  clamped — texel centres are block corners, so LinearFilter interpolation
+ *  reproduces per-vertex smooth lighting exactly per block. */
+function lightmapTexture(lm: Lightmap): THREE.DataTexture {
+  const tex = new THREE.DataTexture(lm.pixels, lm.width, lm.height, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/** A zero-copy sub-range view of a quantized section ([start, end) vertices).
+ *  The bbox transform is section-wide, so slices dequantize identically. */
+function sliceSection(sec: QuantizedSection, start: number, end: number): QuantizedSection {
+  return {
+    ...sec,
+    vertexCount: end - start,
+    indexCount: ((end - start) / 4) * 6,
+    positions: sec.positions.subarray(start * 3, end * 3),
+    uv: sec.uv.subarray(start * 2, end * 2),
+    colors: sec.colors.subarray(start * 4, end * 4),
+    normals: sec.normals.subarray(start * 4, end * 4),
+    layer: sec.layer.subarray(start, end),
+    biome: sec.biome.subarray(start, end),
+    indices: null,
+  };
 }
 
 /**
@@ -163,7 +200,11 @@ export function isSharedQuadIndex(attr: THREE.BufferAttribute | null): boolean {
  *  layer/biome); the shared QUANTIZED shader dequantizes per vertex, fed the
  *  section's bbox transform via onBeforeRender. Bounds come from the header,
  *  so building a tile does zero passes over its vertex data. */
-function quantizedMesh(sec: QuantizedSection, material: THREE.ShaderMaterial): THREE.Mesh {
+function quantizedMesh(
+  sec: QuantizedSection,
+  material: THREE.ShaderMaterial,
+  lm?: { tex: THREE.DataTexture; size: THREE.Vector2 },
+): THREE.Mesh {
   const geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.BufferAttribute(sec.positions, 3, false));
   geom.setAttribute('anrm', new THREE.BufferAttribute(sec.normals, 4, false));
@@ -174,7 +215,7 @@ function quantizedMesh(sec: QuantizedSection, material: THREE.ShaderMaterial): T
   if (sec.indices) {
     geom.setIndex(new THREE.BufferAttribute(sec.indices, 1));
   } else {
-    // VTL7: canonical quad topology — one shared GPU index buffer for every
+    // VTL7+: canonical quad topology — one shared GPU index buffer for every
     // tile, this section drawing only its own range of it.
     geom.setIndex(sharedQuadIndex(sec.vertexCount));
     geom.setDrawRange(0, sec.indexCount);
@@ -195,6 +236,10 @@ function quantizedMesh(sec: QuantizedSection, material: THREE.ShaderMaterial): T
     (m.uniforms['uPosMin']!.value as THREE.Vector3).copy(posMin);
     (m.uniforms['uPosScale']!.value as THREE.Vector3).copy(posScale);
     m.uniforms['uUvScale']!.value = uvScale;
+    if (lm) {
+      m.uniforms['uLightmap']!.value = lm.tex;
+      (m.uniforms['uLmSize']!.value as THREE.Vector2).copy(lm.size);
+    }
     // The material is shared by every tile; three only refreshes ShaderMaterial
     // uniforms once per frame per material unless told otherwise. This flag
     // forces the upload for THIS draw (it's the documented per-object-uniform
@@ -205,24 +250,46 @@ function quantizedMesh(sec: QuantizedSection, material: THREE.ShaderMaterial): T
 }
 
 /**
- * Build a VTL6 tile's meshes in the quantized fast path: shared QUANTIZED
+ * Build a VTL6/7/8 tile's meshes in the quantized fast path: shared QUANTIZED
  * materials (from `createTerrainMaterial(tex, { quantized: true, palette })`),
  * zero per-vertex CPU work. This is what the streaming TileManager uses.
+ *
+ * A VTL8 tile's atlas-lit vertex tail becomes its own mesh (`terrainLm`) drawn
+ * with `lmMaterial` (from {@link createLightmappedMaterial}) — pass it whenever
+ * the world is format 4+, or the tail would render full-bright.
  */
 export function buildQuantizedTileMeshes(
   tile: QuantizedTile,
   material: THREE.ShaderMaterial,
   waterMaterial: THREE.ShaderMaterial,
+  lmMaterial?: THREE.ShaderMaterial,
 ): TileMeshes {
-  const terrain = quantizedMesh(tile.solid, material);
+  const solid = tile.solid;
+  const lmStart = solid.lmStart ?? solid.vertexCount;
+  const hasLm = tile.lightmap !== undefined && lmMaterial !== undefined && lmStart < solid.vertexCount;
+
+  // The vertex-lit head (everything, when there's no atlas tail to split off).
+  const head = hasLm ? sliceSection(solid, 0, lmStart) : solid;
+  const terrain = quantizedMesh(head, material);
   const bounds = terrain.geometry.boundingBox!.clone();
+
+  let terrainLm: THREE.Mesh | undefined;
+  let lightmapTex: THREE.DataTexture | undefined;
+  if (hasLm) {
+    const lm = tile.lightmap!;
+    lightmapTex = lightmapTexture(lm);
+    const tail = sliceSection(solid, lmStart, solid.vertexCount);
+    terrainLm = quantizedMesh(tail, lmMaterial!, { tex: lightmapTex, size: new THREE.Vector2(lm.width, lm.height) });
+    terrainLm.geometry.setAttribute('almuv', new THREE.BufferAttribute(solid.lmuv!, 2, false));
+  }
+
   let water: THREE.Mesh | undefined;
   if (tile.fluid.vertexCount > 0) {
     water = quantizedMesh(tile.fluid, waterMaterial);
     water.renderOrder = 1; // after opaque
     bounds.union(water.geometry.boundingBox!); // water can sit above the highest solid block
   }
-  return { terrain, water, bounds };
+  return { terrain, terrainLm, lightmapTex, water, bounds };
 }
 
 /**

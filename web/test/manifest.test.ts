@@ -59,7 +59,7 @@ describe('parseManifest', () => {
 
   it('rejects wrong format versions and malformed shapes', () => {
     expect(() => parseManifest(null)).toThrow(/not an object/);
-    expect(() => parseManifest({ ...good, format: 4 })).toThrow(/format/);
+    expect(() => parseManifest({ ...good, format: 5 })).toThrow(/format/);
     expect(() => parseManifest({ ...good, tiles: [{ x: 0 }] })).toThrow(/tile 0/);
     expect(() => parseManifest({ ...good, biomes: [1] })).toThrow(/biomes/);
     expect(() => parseManifest({ ...good, format: 2, lowres: { grid: 0, levels: [] } })).toThrow(/lowres/);

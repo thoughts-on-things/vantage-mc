@@ -11,6 +11,7 @@ import {
   encodeVTL5,
   encodeVTL6,
   encodeVTL7,
+  encodeVTL8,
   LEGEND,
 } from './encode.js';
 
@@ -126,6 +127,24 @@ describe('parseTile', () => {
     expect(t.biomeNames).toEqual(LEGEND);
   });
 
+  it('decodes VTL8 (lightmap atlas) and bakes corner light into the tail vertices', () => {
+    const t = parseTile(encodeVTL8());
+    expect(t.magic).toBe('VTL8');
+    expect(t.vertexCount).toBe(8);
+    expect(t.lmStart).toBe(4);
+    expect(t.lightmap).toBeDefined();
+    expect(t.lightmap!.width).toBe(4);
+    expect(t.lightmap!.height).toBe(2);
+    // Planar channels re-interleave to RGBA: texel (1,0) = sky 17, blk 34, ao 255.
+    expect(Array.from(t.lightmap!.pixels.slice(4, 8))).toEqual([17, 34, 255, 255]);
+    // Head vertices keep their shipped light; tail vertices get the atlas'
+    // corner texels baked back in: lmuv (3,1) → texel (1,0) → sky 1, blk 2.
+    expect(t.light![4]).toBe((1 << 4) | 2);
+    // lmuv (5,3) → texel (2,1) → sky ramp value 102/17 = 6.
+    expect(t.light![6]).toBe((6 << 4) | 2);
+    expect(t.colors![4 * 4 + 3]).toBe(255); // AO from the atlas
+  });
+
   it('throws on an unrecognized magic', () => {
     const buf = new ArrayBuffer(16);
     new Uint8Array(buf).set([88, 88, 88, 88]); // "XXXX"
@@ -179,6 +198,24 @@ describe('parseTileQuantized', () => {
     expect(s.uvScale).toBeCloseTo(1 / 128, 8);
     expect(s.uv[2]! * s.uvScale).toBeCloseTo(17, 5);
     expect(Array.from(s.layer)).toEqual([3, 3, 3, 3]);
+    expect(q!.biomeNames).toEqual(LEGEND);
+  });
+
+  it('keeps VTL8 sections quantized with the lm split and the interleaved atlas', () => {
+    const q = parseTileQuantized(encodeVTL8());
+    expect(q).not.toBeNull();
+    expect(q!.magic).toBe('VTL8');
+    const s = q!.solid;
+    expect(s.vertexCount).toBe(8);
+    expect(s.lmStart).toBe(4);
+    expect(s.indices).toBeNull();
+    // The lmuv tail un-deltas back to the absolute half-texel values.
+    expect(Array.from(s.lmuv!)).toEqual([3, 1, 3, 3, 5, 3, 5, 1]);
+    expect(q!.lightmap).toBeDefined();
+    expect(q!.lightmap!.width).toBe(4);
+    expect(Array.from(q!.lightmap!.pixels.slice(0, 4))).toEqual([0, 34, 255, 255]);
+    // Surface + legend still parse after the atlas block.
+    expect(Array.from(q!.surface.height)).toEqual([64, 65, 66, 67]);
     expect(q!.biomeNames).toEqual(LEGEND);
   });
 

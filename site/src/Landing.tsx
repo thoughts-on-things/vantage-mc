@@ -208,14 +208,14 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
               <tr>
                 <th>Full render, start to finish</th>
                 <td className="compare-vantage compare-win">
-                  3.9 s <span className="compare-chip">7× faster</span>
+                  3.8 s <span className="compare-chip">7× faster</span>
                 </td>
                 <td>28.3 s</td>
               </tr>
               <tr>
                 <th>Map size on disk</th>
                 <td className="compare-vantage compare-win">
-                  27 MB <span className="compare-chip">2.7× smaller</span>
+                  26 MB <span className="compare-chip">2.8× smaller</span>
                 </td>
                 <td>74 MB</td>
               </tr>

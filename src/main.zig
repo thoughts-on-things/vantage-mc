@@ -324,7 +324,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     for (g.biome_names[1..], 1..) |bn, i| display[i] = names.biomeName(a, bn);
 
     const surface = try grid.buildSurface(a, g, null);
-    const geo = try tile.serializeWithSurfaceCompact(a, built.solid, built.fluid, surface, display);
+    const geo = try tile.serializeWithLightmap(a, built, surface, display);
     const tex_blob = try texture.serialize(a, arr);
 
     const tex_path = try texArrayPath(a, out_path);
@@ -1045,7 +1045,7 @@ fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
     if (built.solid.vertex_count == 0 and built.fluid.vertex_count == 0) return;
 
     const surface = try grid.buildSurface(ta, g2, interior);
-    const geo = try tile.serializeWithSurfaceCompact(ta, built.solid, built.fluid, surface, display_names);
+    const geo = try tile.serializeWithLightmap(ta, built, surface, display_names);
 
     // The tile's lowres source map (long-lived: feeds the pyramid later).
     const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
@@ -1185,8 +1185,8 @@ test "isTileFileName accepts render-owned tiles and nothing else" {
 /// Hand-rolled (the shape is tiny and fixed) to stay off the std.json churn.
 fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    // Format 3 = VTL7 tiles (compact quad encoding) + maxSectionVerts.
-    try out.print(a, "{{\n  \"format\": 3,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"maxSectionVerts\": {d},\n  \"textures\": \"terrain.vtexarr\",\n", .{
+    // Format 4 = VTL8 tiles (compact quads + lightmap atlas) + maxSectionVerts.
+    try out.print(a, "{{\n  \"format\": 4,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"maxSectionVerts\": {d},\n  \"textures\": \"terrain.vtexarr\",\n", .{
         m.tile_chunks, m.tile_chunks * 16, m.max_section_verts,
     });
     if (m.spawn) |s| try out.print(a, "  \"spawn\": {{ \"x\": {d}, \"y\": {d}, \"z\": {d} }},\n", .{ s[0], s[1], s[2] });

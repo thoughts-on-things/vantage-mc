@@ -284,6 +284,67 @@ export function encodeVTL7(): ArrayBuffer {
   return w.buffer();
 }
 
+/** One VTL8 lit section: a compact section with lm_start + a delta-coded
+ *  lmuv tail (mirrors the Zig writer). */
+export interface LSectionInput extends CSectionInput {
+  lmStart: number;
+  lmuv: number[]; // 2 * (V - lmStart), ABSOLUTE half-texel values
+}
+
+function writeLitSection(w: Writer, V: number, s: LSectionInput): void {
+  w.u32(V).u32(s.lmStart);
+  w.i16a(s.uvQ).u8a(s.colors).i8a(s.normals);
+  w.f32a([...s.min, ...s.scale]);
+  const zz: number[] = [];
+  const prev = [0, 0, 0];
+  for (let i = 0; i < s.posQ.length; i++) {
+    const k = i % 3;
+    zz.push(zigzagDelta(s.posQ[i]!, prev[k]!));
+    prev[k] = s.posQ[i]!;
+  }
+  w.u16a(zz).u16a(s.layer).u16a(s.biome);
+  const lz: number[] = [];
+  const lprev = [0, 0];
+  for (let i = 0; i < s.lmuv.length; i++) {
+    lz.push(zigzagDelta(s.lmuv[i]!, lprev[i % 2]!));
+    lprev[i % 2] = s.lmuv[i]!;
+  }
+  w.u16a(lz);
+  while (w.off % 4 !== 0) w.u8a([0]); // tail pad to a 4-byte boundary
+}
+
+export function encodeVTL8(): ArrayBuffer {
+  const w = new Writer();
+  w.magic('VTL8').u32(8);
+  // Two quads: a vertex-lit one, then an atlas-lit one whose 1×2-block rect
+  // sits at atlas texels (1,0)..(2,1) — lmuv half-texel corners 3/5 and 1/3.
+  const solid: LSectionInput = {
+    uvQ: Array.from({ length: 16 }, (_, i) => (i % 2) * 128),
+    colors: Array.from({ length: 32 }, () => 255),
+    normals: Array.from({ length: 32 }, (_, i) => (i % 4 === 2 ? 1 : i % 4 === 3 ? -16 : 0)),
+    min: [0, 0, 0],
+    scale: [64 / 65535, 64 / 65535, 0],
+    posQ: [0, 0, 0, 65535, 0, 0, 65535, 65535, 0, 0, 65535, 0, 0, 0, 0, 65535, 0, 0, 65535, 65535, 0, 0, 65535, 0],
+    layer: [3, 3, 3, 3, 3, 3, 3, 3],
+    biome: [1, 1, 1, 1, 2, 2, 2, 2],
+    lmStart: 4,
+    lmuv: [3, 1, 3, 3, 5, 3, 5, 1],
+  };
+  writeLitSection(w, 8, solid);
+  writeLitSection(w, 0, { ...solid, uvQ: [], colors: [], normals: [], posQ: [], layer: [], biome: [], lmStart: 0, lmuv: [] });
+  // 4×2 planar atlas: sky plane ramps 0..7 ×17-ish, block plane 34s, AO 255s.
+  w.u32(4).u32(2);
+  w.u8a([0, 17, 34, 51, 68, 85, 102, 119]); // sky plane
+  w.u8a(Array.from({ length: 8 }, () => 34)); // block plane
+  w.u8a(Array.from({ length: 8 }, () => 255)); // AO plane
+  // surface map: 2x2 columns at origin (0,0)
+  w.u32(2).u32(2).i32(0).i32(0);
+  w.u16a([1, 2, 1, 2]); // biome ids
+  w.i16a([64, 65, 66, 67]); // heights
+  writeLegend(w, LEGEND);
+  return w.buffer();
+}
+
 export interface EncodedAnim {
   base: number;
   count: number;

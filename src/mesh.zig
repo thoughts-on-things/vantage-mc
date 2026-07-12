@@ -118,11 +118,14 @@ pub const Mesh2 = struct {
     layer: std.ArrayList(f32) = .empty, // 1/vert (texture-array layer)
     color: std.ArrayList(u8) = .empty, // 4/vert (tint multiply RGBA)
     biome: std.ArrayList(f32) = .empty, // 1/vert (grid biome id, for the biome layer)
-    indices: std.ArrayList(u32) = .empty,
     vertex_count: u32 = 0,
 
+    // No index list: every emitter writes strict quads (4 verts, two CCW
+    // triangles `[b,b+1,b+2, b,b+2,b+3]`), so indices are pure derivation —
+    // serializers that still ship them synthesize the pattern (see tile.zig).
+
     pub fn triangleCount(self: Mesh2) usize {
-        return self.indices.items.len / 3;
+        return self.vertex_count / 2; // per quad: 4 verts, 2 triangles
     }
 };
 
@@ -519,17 +522,15 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
     }
 }
 
-/// Append `src`'s vertex streams to `dst`, offsetting indices by `dst`'s current
-/// vertex count — concatenates a thread's partial mesh into the combined one.
+/// Append `src`'s vertex streams to `dst` — concatenates a thread's partial
+/// mesh into the combined one. Quad topology is positional, so no index rebase.
 fn appendMesh(alloc: std.mem.Allocator, dst: *Mesh2, src: *const Mesh2) !void {
-    const base = dst.vertex_count;
     try dst.positions.appendSlice(alloc, src.positions.items);
     try dst.uv.appendSlice(alloc, src.uv.items);
     try dst.layer.appendSlice(alloc, src.layer.items);
     try dst.color.appendSlice(alloc, src.color.items);
     try dst.normals.appendSlice(alloc, src.normals.items);
     try dst.biome.appendSlice(alloc, src.biome.items);
-    for (src.indices.items) |idx| try dst.indices.append(alloc, idx + base);
     dst.vertex_count += src.vertex_count;
 }
 
@@ -727,7 +728,6 @@ fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, g
     const duv_u = [2]f32{ uv10[0] - uv00[0], uv10[1] - uv00[1] };
     const duv_v = [2]f32{ uv01[0] - uv00[0], uv01[1] - uv00[1] };
 
-    const vbase = mesh.vertex_count;
     for (face.verts, 0..) |vtx, ci| {
         const su = vtx.pos[gd.uax]; // 0 or 1
         const sv = vtx.pos[gd.vax]; // 0 or 1
@@ -746,7 +746,6 @@ fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, g
         try mesh.normals.appendSlice(alloc, &.{ vtx.n[0], vtx.n[1], vtx.n[2], @bitCast(r.key.light[ci]) });
         try mesh.biome.append(alloc, bid_f);
     }
-    try mesh.indices.appendSlice(alloc, &.{ vbase + 0, vbase + 1, vbase + 2, vbase + 0, vbase + 2, vbase + 3 });
     mesh.vertex_count += 4;
 }
 
@@ -948,7 +947,6 @@ fn emitFluid(
         const is_side = tf.n[1] == 0;
         const flow_top = is_up and flowing;
         const layer = if (flow_top or is_side) layers.flow else layers.still;
-        const base = mesh.vertex_count;
         for (0..4) |i| {
             const cs = tf.corners[i];
             const py: f32 = if (cs[1] == 1) cornerH[@as(usize, cs[0])][@as(usize, cs[2])] else 0.0;
@@ -975,7 +973,6 @@ fn emitFluid(
             try mesh.normals.appendSlice(arena, &.{ nrm[0], nrm[1], nrm[2], lp });
             try mesh.biome.append(arena, bid_f);
         }
-        try mesh.indices.appendSlice(arena, &.{ base, base + 1, base + 2, base, base + 2, base + 3 });
         mesh.vertex_count += 4;
     }
 }
@@ -1422,7 +1419,6 @@ fn addv(a: [3]i8, b: [3]i8) [3]i8 {
 /// per-vertex — AO brightness in the colour's alpha, packed sky/block light in
 /// the normal's spare 4th byte (equal across verts for flat-quality faces).
 fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, wx: f32, wy: f32, wz: f32, face: BakedFace, rgb: [3]u8, ao: [4]u8, light: [4]u8, bid: usize) !void {
-    const base = mesh.vertex_count;
     const bid_f: f32 = @floatFromInt(bid);
     const blend = ctx.blend_biomes and isBlendable(face.tint);
     const ox = wx - @as(f32, @floatFromInt(ctx.g.min_x));
@@ -1437,7 +1433,6 @@ fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, wx: f3
         try mesh.normals.appendSlice(arena, &.{ v.n[0], v.n[1], v.n[2], @bitCast(light[i]) });
         try mesh.biome.append(arena, bid_f);
     }
-    try mesh.indices.appendSlice(arena, &.{ base + 0, base + 1, base + 2, base + 0, base + 2, base + 3 });
     mesh.vertex_count += 4;
 }
 

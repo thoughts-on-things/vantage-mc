@@ -123,6 +123,41 @@ function quantizedBox(sec: QuantizedSection): THREE.Box3 {
   return new THREE.Box3(new THREE.Vector3(mx, my, mz), new THREE.Vector3(mx + 65535 * sx, my + 65535 * sy, mz + 65535 * sz));
 }
 
+// One canonical quad index buffer shared by every VTL7 section: the topology is
+// identical for all tiles (only the length differs), so a single GPU buffer
+// sized to the largest section serves everyone via per-geometry draw ranges.
+// Tiles must detach it before geometry.dispose() (see isSharedQuadIndex) or
+// three would delete the shared GPU buffer with the first unloaded tile.
+let sharedQuadIndexAttr: THREE.BufferAttribute | null = null;
+
+/** The shared canonical quad index attribute, grown (with headroom) to cover at
+ *  least `vertexCount` vertices. Pre-size it from the manifest's
+ *  `maxSectionVerts` so streaming never re-uploads a grown buffer mid-pan. */
+export function sharedQuadIndex(vertexCount: number): THREE.BufferAttribute {
+  const needed = (vertexCount / 4) * 6;
+  if (!sharedQuadIndexAttr || sharedQuadIndexAttr.count < needed) {
+    // 1.5× headroom so a slightly-larger tile doesn't rebuild again; the
+    // manifest hint makes growth a can't-happen path in practice.
+    const verts = Math.ceil((vertexCount * (sharedQuadIndexAttr ? 1.5 : 1)) / 4) * 4;
+    const out = new Uint32Array((verts / 4) * 6);
+    for (let b = 0, o = 0; b < verts; b += 4) {
+      out[o++] = b;
+      out[o++] = b + 1;
+      out[o++] = b + 2;
+      out[o++] = b;
+      out[o++] = b + 2;
+      out[o++] = b + 3;
+    }
+    sharedQuadIndexAttr = new THREE.BufferAttribute(out, 1);
+  }
+  return sharedQuadIndexAttr;
+}
+
+/** Whether `attr` is the live shared quad index (never dispose its buffer). */
+export function isSharedQuadIndex(attr: THREE.BufferAttribute | null): boolean {
+  return attr !== null && attr === sharedQuadIndexAttr;
+}
+
 /** Build one mesh from a quantized section: every attribute is the on-disk
  *  typed-array view uploaded verbatim (u16 positions, i8 normals+light, u16
  *  layer/biome); the shared QUANTIZED shader dequantizes per vertex, fed the
@@ -132,11 +167,18 @@ function quantizedMesh(sec: QuantizedSection, material: THREE.ShaderMaterial): T
   const geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.BufferAttribute(sec.positions, 3, false));
   geom.setAttribute('anrm', new THREE.BufferAttribute(sec.normals, 4, false));
-  geom.setAttribute('uv', new THREE.BufferAttribute(sec.uv, 2));
+  geom.setAttribute('uv', new THREE.BufferAttribute(sec.uv, 2, false));
   geom.setAttribute('atint', new THREE.BufferAttribute(sec.colors, 4, true));
   geom.setAttribute('alayer', new THREE.BufferAttribute(sec.layer, 1, false));
   geom.setAttribute('abiome', new THREE.BufferAttribute(sec.biome, 1, false));
-  geom.setIndex(new THREE.BufferAttribute(sec.indices, 1));
+  if (sec.indices) {
+    geom.setIndex(new THREE.BufferAttribute(sec.indices, 1));
+  } else {
+    // VTL7: canonical quad topology — one shared GPU index buffer for every
+    // tile, this section drawing only its own range of it.
+    geom.setIndex(sharedQuadIndex(sec.vertexCount));
+    geom.setDrawRange(0, sec.indexCount);
+  }
 
   const box = quantizedBox(sec);
   geom.boundingBox = box;
@@ -147,10 +189,12 @@ function quantizedMesh(sec: QuantizedSection, material: THREE.ShaderMaterial): T
   const mesh = new THREE.Mesh(geom, material);
   const posMin = new THREE.Vector3(...sec.posMin);
   const posScale = new THREE.Vector3(...sec.posScale);
+  const uvScale = sec.uvScale;
   mesh.onBeforeRender = (_r, _s, _c, _g, mat) => {
     const m = mat as THREE.ShaderMaterial;
     (m.uniforms['uPosMin']!.value as THREE.Vector3).copy(posMin);
     (m.uniforms['uPosScale']!.value as THREE.Vector3).copy(posScale);
+    m.uniforms['uUvScale']!.value = uvScale;
     // The material is shared by every tile; three only refreshes ShaderMaterial
     // uniforms once per frame per material unless told otherwise. This flag
     // forces the upload for THIS draw (it's the documented per-object-uniform

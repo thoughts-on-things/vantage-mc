@@ -22,6 +22,8 @@ const VERT = /* glsl */ `
   in vec4 anrm;
   uniform vec3 uPosMin;
   uniform vec3 uPosScale;
+  uniform float uUvScale; // texture units per stored uv step (1 = f32 VTL6,
+                          // 1/128 = VTL7's i16 fixed point); set per mesh
   uniform sampler2D uPalette;
 #else
   in vec3 abcol;
@@ -40,17 +42,18 @@ const VERT = /* glsl */ `
   out float vSky;                                  // saved sky light, 0..1
   out float vBlk;                                  // saved block light, 0..1
   void main() {
-    vUv = uv;
     vTint = atint;
     vLayer = alayer;
     vBiome = abiome;
 #ifdef QUANTIZED
+    vUv = uv * uUvScale;
     vec3 pos = uPosMin + position * uPosScale;
     vec3 nrm = anrm.xyz;
     // The light byte was stored as the int8 normal's 4th lane; undo the sign.
     float light = anrm.w < 0.0 ? anrm.w + 256.0 : anrm.w;
     vBcol = texelFetch(uPalette, ivec2(int(abiome + 0.5), 0), 0).rgb;
 #else
+    vUv = uv;
     vec3 pos = position;
     vec3 nrm = normal;
     float light = alight;
@@ -314,6 +317,7 @@ export function createTerrainMaterial(texData: DecodedTextureArray, opts: Terrai
       // (quantized path only; inert otherwise).
       uPosMin: { value: new THREE.Vector3() },
       uPosScale: { value: new THREE.Vector3(1, 1, 1) },
+      uUvScale: { value: 1.0 },
       uPalette: { value: opts.quantized ? paletteTexture(opts.palette ?? []) : null },
       uFogCenter: { value: new THREE.Vector2() }, // streaming focus (world XZ)
       uFogRadial: { value: 0.0 }, // 1 = radial fog around uFogCenter (streaming)

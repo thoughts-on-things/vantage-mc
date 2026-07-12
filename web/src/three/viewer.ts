@@ -441,7 +441,8 @@ export class VantageViewer {
     this.bounds.getSize(size);
     this._biomes = [];
     this.emitter.emit('load', {
-      magic: 'VTL6',
+      // Streamed worlds: the tile format follows the manifest schema version.
+      magic: manifest.format >= 3 ? 'VTL7' : 'VTL6',
       vertexCount: 0,
       triangleCount: 0,
       size,

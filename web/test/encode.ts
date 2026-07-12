@@ -225,6 +225,65 @@ export function encodeVTL6(): ArrayBuffer {
   return w.buffer();
 }
 
+/** One VTL7 compact section: i16 fixed-point uv, no indices, bbox + zigzag
+ *  delta-coded u16 positions (mirrors the Zig writer). */
+export interface CSectionInput {
+  uvQ: number[]; // 2V (i16, uv × 128)
+  colors: number[]; // 4V
+  normals: number[]; // 4V (xyzw int8)
+  min: [number, number, number];
+  scale: [number, number, number];
+  posQ: number[]; // 3V (u16, ABSOLUTE — delta-coded here)
+  layer: number[]; // V (u16)
+  biome: number[]; // V (u16)
+}
+
+function zigzagDelta(cur: number, prev: number): number {
+  const d16 = (cur - prev) & 0xffff;
+  const d = d16 >= 0x8000 ? d16 - 0x10000 : d16; // interpret mod-diff as i16
+  return ((d << 1) ^ (d >> 15)) & 0xffff;
+}
+
+function writeCompactSection(w: Writer, V: number, s: CSectionInput): void {
+  w.u32(V);
+  w.i16a(s.uvQ).u8a(s.colors).i8a(s.normals);
+  w.f32a([...s.min, ...s.scale]);
+  const zz: number[] = [];
+  const prev = [0, 0, 0];
+  for (let i = 0; i < s.posQ.length; i++) {
+    const k = i % 3;
+    zz.push(zigzagDelta(s.posQ[i]!, prev[k]!));
+    prev[k] = s.posQ[i]!;
+  }
+  w.u16a(zz).u16a(s.layer).u16a(s.biome);
+  while (w.off % 4 !== 0) w.u8a([0]); // tail pad to a 4-byte boundary
+}
+
+export function encodeVTL7(): ArrayBuffer {
+  const w = new Writer();
+  w.magic('VTL7').u32(7);
+  // One quad spanning x∈[-100,200], y∈[0,64]; uv includes a negative
+  // flow-texture value and a tiled greedy run (17.0).
+  const solid: CSectionInput = {
+    uvQ: [0, 0, 17 * 128, 0, 17 * 128, 128, -32, 128],
+    colors: Array.from({ length: 16 }, (_, i) => (i * 7) % 256),
+    normals: [0, 0, 1, -16, 0, 0, 1, -16, 0, 0, 1, -16, 0, 0, 1, -16],
+    min: [-100, 0, 0],
+    scale: [300 / 65535, 64 / 65535, 0],
+    posQ: [0, 0, 0, 65535, 0, 0, 65535, 65535, 0, 0, 65535, 0],
+    layer: [3, 3, 3, 3],
+    biome: [1, 2, 1, 2],
+  };
+  writeCompactSection(w, 4, solid);
+  writeCompactSection(w, 4, { ...solid, posQ: Array.from({ length: 12 }, () => 0), layer: [0, 0, 0, 0], biome: [1, 1, 1, 1] });
+  // surface map: 2x2 columns at origin (0,0)
+  w.u32(2).u32(2).i32(0).i32(0);
+  w.u16a([1, 2, 1, 2]); // biome ids
+  w.i16a([64, 65, 66, 67]); // heights
+  writeLegend(w, LEGEND);
+  return w.buffer();
+}
+
 export interface EncodedAnim {
   base: number;
   count: number;

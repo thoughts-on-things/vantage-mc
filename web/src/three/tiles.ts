@@ -29,7 +29,7 @@ import {
   type WorldManifest,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
-import { buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, type TileMeshes } from './terrain.js';
+import { buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, isSharedQuadIndex, sharedQuadIndex, type TileMeshes } from './terrain.js';
 
 export interface TileManagerOptions {
   manifest: WorldManifest;
@@ -110,7 +110,9 @@ function releaseAfterUpload(geom: THREE.BufferGeometry): void {
   for (const name of Object.keys(geom.attributes)) {
     (geom.getAttribute(name) as THREE.BufferAttribute).onUpload(release);
   }
-  if (geom.index) geom.index.onUpload(release);
+  // The shared quad index keeps its CPU array: other geometries may still
+  // force a (re-)upload of the shared GPU buffer later.
+  if (geom.index && !isSharedQuadIndex(geom.index)) geom.index.onUpload(release);
 }
 
 export class TileManager {
@@ -160,6 +162,9 @@ export class TileManager {
     };
     this.lowresMaterial = lowresMaterial ?? null;
     this.tileBlocks = options.manifest.tileBlocks;
+    // Pre-size the shared quad index to the biggest section in the world, so
+    // streaming never grows (= re-uploads) it mid-pan.
+    if (options.manifest.maxSectionVerts) sharedQuadIndex(options.manifest.maxSectionVerts);
     for (const t of options.manifest.tiles) this.index.set(tileKey(t.x, t.z), t);
     this.lowLevels = this.lowresMaterial ? [...(options.manifest.lowres?.levels ?? [])].sort((a, b) => a.level - b.level) : [];
     for (const lvl of this.lowLevels) {
@@ -505,6 +510,9 @@ export class TileManager {
     for (const mesh of [rec.terrain, rec.water]) {
       if (!mesh) continue;
       this.opts.scene.remove(mesh);
+      // Detach the shared quad index first: dispose() deletes the GPU buffers
+      // of everything still attached, and the index is shared by every tile.
+      if (isSharedQuadIndex(mesh.geometry.index)) mesh.geometry.setIndex(null);
       mesh.geometry.dispose();
     }
     this.records.delete(key);

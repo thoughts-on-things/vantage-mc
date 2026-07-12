@@ -825,7 +825,7 @@ test "VTL7 drops indices, delta-codes positions, and round-trips" {
     // a tiled greedy run (17.0).
     const px = [_]f32{
         -100, 0, 0, 200, 0, 0, 200, 64, 0, -100, 64, 0,
-        0,    0, 5, 1,   0, 5, 1,   1, 5, 0,    1,  5,
+        0,    0, 5, 1,   0, 5, 1,   1,  5, 0,    1,  5,
     };
     const uvs = [_]f32{ 0, 0, 17.0, 0, 17.0, 1, 0, 1, -0.25, 0.5, 0.5, 0.5, 0.5, 1, -0.25, 1 };
     try solid.positions.appendSlice(a, &px);

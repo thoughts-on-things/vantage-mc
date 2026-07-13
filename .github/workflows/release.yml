@@ -55,6 +55,18 @@ jobs:
         with:
           version: 0.16.0
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # Build the standalone viewer first so `vantage serve` ships it inside
+      # the binary (build.zig embeds web/dist-viewer when present).
+      - name: Build embedded viewer
+        run: npm ci && npm run build:viewer
+        working-directory: web
+
       - name: Cross-compile
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 

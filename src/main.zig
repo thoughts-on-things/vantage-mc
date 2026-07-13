@@ -26,6 +26,7 @@ const lang = @import("lang.zig");
 const world = @import("world.zig");
 const lowres = @import("lowres.zig");
 const extract = @import("extract.zig");
+const serve = @import("serve.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -42,6 +43,8 @@ pub fn main(init: std.process.Init) !void {
         return;
     } else if (std.mem.eql(u8, args[1], "render")) {
         return runRender(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "serve")) {
+        return runServe(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "extract")) {
         return runExtract(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "mesh")) {
@@ -75,6 +78,10 @@ fn printUsage() void {
         \\      Render the whole populated world as streamable tiles + manifest.json
         \\      (default out: web/public). --radius caps to a window around spawn.
         \\      Missing assets are extracted automatically from your newest client jar.
+        \\  vantage serve   [render-dir] [--port <n>] [--host <addr>] [--open]
+        \\      View a render in your browser — a local web server with the viewer
+        \\      built in (default dir: web/public, port: 8268). --open launches the
+        \\      browser; --host 0.0.0.0 shares the map on your local network.
         \\  vantage extract [client.jar]
         \\      Extract the assets a render needs into ~/.cache/vantage/assets/<version>.
         \\      With no argument, uses the newest jar in your .minecraft/versions.
@@ -818,7 +825,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         \\mesh:    {d} vertices, {d} triangles ({d} water verts)
         \\out:     {s}/manifest.json
         \\
-        \\→ view it:  just serve   then open http://127.0.0.1:8753/   (first run: cd web && npm install)
+        \\→ view it:  vantage serve {s} --open
         \\
     , .{
         bounds.count,
@@ -835,6 +842,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         total_solid_verts + total_fluid_verts,
         total_tris,
         total_fluid_verts,
+        out_dir,
         out_dir,
     });
     if (stale_removed > 0) std.debug.print("cleanup: removed {d} stale tile file(s) from a previous render\n", .{stale_removed});
@@ -1241,6 +1249,30 @@ fn appendJsonString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8
 /// `vantage extract [client.jar]` — populate the asset cache from a client jar.
 /// With no argument, auto-discovers the newest jar in the local Minecraft
 /// installation, so a fresh `vantage render <save>` works with zero setup.
+/// `vantage serve [render-dir] [--port n] [--host addr] [--open]` — host a
+/// rendered world plus the embedded web viewer on a local HTTP server.
+fn runServe(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    var opts: serve.Options = .{ .dir = "web/public" };
+    var argi: usize = 0;
+    while (argi < args.len) : (argi += 1) {
+        const arg = args[argi];
+        if (std.mem.eql(u8, arg, "--port")) {
+            const v = try flagValue(args, &argi);
+            opts.port = std.fmt.parseInt(u16, v, 10) catch return badValue("--port", v, "1..65535");
+        } else if (std.mem.eql(u8, arg, "--host")) {
+            opts.host = try flagValue(args, &argi);
+        } else if (std.mem.eql(u8, arg, "--open")) {
+            opts.open = true;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            opts.dir = arg;
+        } else {
+            std.debug.print("unknown flag for serve: {s} (see `vantage --help`)\n", .{arg});
+            return error.InvalidArgument;
+        }
+    }
+    return serve.run(init.io, a, opts);
+}
+
 fn runExtract(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
     const home = init.environ_map.get("HOME") orelse
         init.environ_map.get("USERPROFILE") orelse "";
@@ -1564,4 +1596,5 @@ test {
     _ = biome;
     _ = lang;
     _ = world;
+    _ = serve;
 }

@@ -23,6 +23,11 @@ export interface MapNavProps {
   home?: boolean;
   /** Show the centred-coordinate readout. Default `true`. */
   coords?: boolean;
+  /** Show the screenshot (PNG download) button. Default `true`. */
+  screenshot?: boolean;
+  /** Show the fullscreen toggle. Default `true` (hidden automatically where
+   *  the Fullscreen API is unavailable, e.g. iPhone Safari). */
+  fullscreen?: boolean;
   className?: string;
 }
 
@@ -53,14 +58,48 @@ const Icon = {
       <path d="M14.5 1.5 7.9 8.1" />
     </svg>
   ),
+  camera: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 5h2.2L6 3h4l1.8 2H14v8H2z" />
+      <circle cx="8" cy="9" r="2.4" />
+    </svg>
+  ),
+  expand: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 2.5H2.5V6" />
+      <path d="M10 2.5h3.5V6" />
+      <path d="M6 13.5H2.5V10" />
+      <path d="M10 13.5h3.5V10" />
+    </svg>
+  ),
+  compress: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2.5 6H6V2.5" />
+      <path d="M13.5 6H10V2.5" />
+      <path d="M2.5 10H6v3.5" />
+      <path d="M13.5 10H10v3.5" />
+    </svg>
+  ),
 };
 
-export function MapNav({ compass = true, tilt = true, fly = true, zoom = true, home = true, coords = true, className }: MapNavProps) {
+export function MapNav({
+  compass = true,
+  tilt = true,
+  fly = true,
+  zoom = true,
+  home = true,
+  coords = true,
+  screenshot = true,
+  fullscreen = true,
+  className,
+}: MapNavProps) {
   const { viewer } = useVantage();
+  const navRef = useRef<HTMLDivElement>(null);
   const needleRef = useRef<SVGGElement>(null);
   const coordRef = useRef<HTMLSpanElement>(null);
   const tiltRef = useRef<HTMLButtonElement>(null);
   const [flying, setFlying] = useState(false);
+  const [isFs, setIsFs] = useState(false);
 
   // Free-flight is the one nav state that drives a real re-render (rare toggle),
   // so the button can reflect active styling and the tilt/home buttons can hide.
@@ -69,6 +108,13 @@ export function MapNav({ compass = true, tilt = true, fly = true, zoom = true, h
     setFlying(viewer.isFlying);
     return viewer.on('mode', ({ fly }) => setFlying(fly));
   }, [viewer]);
+
+  // Track fullscreen from the document so Esc / F11 keep the icon honest.
+  useEffect(() => {
+    const sync = () => setIsFs(document.fullscreenElement != null);
+    document.addEventListener('fullscreenchange', sync);
+    return () => document.removeEventListener('fullscreenchange', sync);
+  }, []);
 
   // Drive the compass needle, tilt label, and coordinate text from the live
   // camera each frame — imperatively, no React state, no re-render churn.
@@ -112,8 +158,28 @@ export function MapNav({ compass = true, tilt = true, fly = true, zoom = true, h
   // Toggle between a clean north-up flat map (2D) and the default aerial tilt (3D).
   const toggleTilt = () => (viewer.tilt > TILT_THRESHOLD ? viewer.flatten() : viewer.setTilt(DEFAULT_ORBIT_ANGLE));
 
+  // Save the current view as a PNG, named after the world coordinate.
+  const takeScreenshot = () => {
+    const p = viewer.controls.position;
+    const a = document.createElement('a');
+    a.href = viewer.screenshot();
+    a.download = `vantage_${Math.round(p.x)}_${Math.round(p.z)}.png`;
+    a.click();
+  };
+
+  // Fullscreen the whole viewer root (canvas + overlay panels), not just the
+  // canvas — the legend and this nav should survive the transition. Requests
+  // can still be denied at runtime (e.g. a sandboxed iframe that reports
+  // fullscreenEnabled anyway), so rejections are swallowed, not thrown.
+  const canFullscreen = typeof document !== 'undefined' && document.fullscreenEnabled;
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement != null) document.exitFullscreen().catch(() => {});
+    else
+      (navRef.current?.closest('.vtg-root') ?? document.documentElement).requestFullscreen().catch(() => {});
+  };
+
   return (
-    <div className={className ? `vtg-nav vtg-glass ${className}` : 'vtg-nav vtg-glass'} role="group" aria-label="map navigation">
+    <div ref={navRef} className={className ? `vtg-nav vtg-glass ${className}` : 'vtg-nav vtg-glass'} role="group" aria-label="map navigation">
       {compass && (
         <button type="button" className="vtg-compass" title="Face north" aria-label="Face north" onClick={() => viewer.resetNorth()}>
           <svg viewBox="-16 -16 32 32" aria-hidden="true">
@@ -153,7 +219,7 @@ export function MapNav({ compass = true, tilt = true, fly = true, zoom = true, h
         </span>
       )}
 
-      {!flying && (zoom || home) && <span className="vtg-nav-sep" />}
+      {(screenshot || (fullscreen && canFullscreen) || (!flying && (zoom || home))) && <span className="vtg-nav-sep" />}
 
       {zoom && !flying && (
         <>
@@ -169,6 +235,25 @@ export function MapNav({ compass = true, tilt = true, fly = true, zoom = true, h
       {home && !flying && (
         <button type="button" className="vtg-navbtn" title="Reset view" aria-label="Reset view" onClick={() => viewer.resetView()}>
           {Icon.home}
+        </button>
+      )}
+
+      {screenshot && (
+        <button type="button" className="vtg-navbtn" title="Save a screenshot (PNG)" aria-label="Save a screenshot" onClick={takeScreenshot}>
+          {Icon.camera}
+        </button>
+      )}
+
+      {fullscreen && canFullscreen && (
+        <button
+          type="button"
+          className={isFs ? 'vtg-navbtn vtg-on' : 'vtg-navbtn'}
+          title={isFs ? 'Exit fullscreen' : 'Fullscreen'}
+          aria-label="Toggle fullscreen"
+          aria-pressed={isFs}
+          onClick={toggleFullscreen}
+        >
+          {isFs ? Icon.compress : Icon.expand}
         </button>
       )}
     </div>

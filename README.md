@@ -93,10 +93,15 @@ and the extracted assets, renders **the whole populated world** as streamable
 tiles, and shows a progress bar:
 
 ```sh
-just render "~/.minecraft/saves/My World"
-just serve         # → http://127.0.0.1:8753/
+vantage render "~/.minecraft/saves/My World" --out my-map
+vantage serve my-map --open      # → http://127.0.0.1:8268/
 #   drag to pan · right-drag to orbit · scroll to zoom · B = biome layer
 ```
+
+`vantage serve` is a tiny local web server with the whole viewer embedded in
+the binary — no Node needed to *view* a map, only to develop the viewer
+itself (`just serve` runs the hot-reloading dev server instead). Pass
+`--host 0.0.0.0` to share the map with your local network.
 
 The renderer only ever reads the world — it never writes to it. Useful flags:
 

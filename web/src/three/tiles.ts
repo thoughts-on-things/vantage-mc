@@ -51,7 +51,8 @@ export interface TileManagerOptions {
   palette: Rgb[];
   /** Stream-in radius around the focus, in blocks. Default `768`. */
   viewDistance?: number;
-  /** Hard cap on resident tiles (nearest win). Default `96`. */
+  /** Hard cap on resident tiles (nearest win). Default `120` (fills the
+   *  default view-distance disc; matches the settings panel's "med" preset). */
   maxTiles?: number;
   /** Concurrent tile fetches. Default `4`. */
   concurrency?: number;
@@ -89,6 +90,9 @@ interface Record_ {
   retryAt?: number;
   abort?: AbortController;
   terrain?: THREE.Mesh;
+  /** When the tile entered the scene — drives its stream-in fade. Undefined
+   *  means "no fade" (already fully opaque). */
+  fadeStart?: number;
   /** VTL8: the atlas-lit solid tail (drawn with the lightmapped material). */
   terrainLm?: THREE.Mesh;
   /** VTL8: the tile's lightmap texture, disposed with the tile. */
@@ -136,6 +140,8 @@ export class TileManager {
   private readonly lowIndex = new Map<number, Set<string>>();
   /** Set when residency changed and lowres visibility needs recomputing. */
   private coverageDirty = false;
+  /** Tiles mid stream-in fade; drained by update(), keeps the viewer drawing. */
+  private readonly fadingKeys = new Set<string>();
 
   private queue: { ref: ManifestTile; level: number }[] = [];
   /** Built tiles awaiting scene insertion — flushed ONE per update() call so
@@ -207,6 +213,18 @@ export class TileManager {
     if (this.disposed) return;
     this.flushOne();
     this.retrySweep();
+    // Retire finished fades: the tile is now fully opaque, so the lowres
+    // underlay below it can finally be hidden (coverage re-runs).
+    if (this.fadingKeys.size > 0) {
+      const now = performance.now();
+      for (const key of this.fadingKeys) {
+        const rec = this.records.get(key);
+        if (!rec || rec.fadeStart === undefined || now - rec.fadeStart >= TileManager.FADE_MS) {
+          this.fadingKeys.delete(key);
+          this.coverageDirty = true;
+        }
+      }
+    }
     if (this.coverageDirty) this.applyCoverage();
     // Re-plan only when the focus has moved a quarter tile; otherwise just keep
     // the fetch pipeline full. (The first call always plans: lastFocus = ∞.)
@@ -305,6 +323,13 @@ export class TileManager {
       const rec = this.records.get(key);
       if (!rec || rec.state !== 'built') continue; // unloaded while queued
       rec.state = 'ready';
+      // Dissolve in rather than pop: the tile starts fully transparent and
+      // fades up over FADE_MS (alpha-to-coverage dither under MSAA). The
+      // lowres placeholder keeps showing beneath until the fade retires, so
+      // the hires lighting eases in over the flat-lit underlay instead of
+      // snapping on — the "lighting pop-in" fix.
+      rec.fadeStart = performance.now();
+      this.fadingKeys.add(key);
       this.opts.scene.add(rec.terrain!);
       if (rec.terrainLm) this.opts.scene.add(rec.terrainLm);
       if (rec.water) this.opts.scene.add(rec.water);
@@ -312,6 +337,31 @@ export class TileManager {
       this.invalidate();
       this.emitter.emit('change', this.stats);
       budget--;
+    }
+  }
+
+  /** Stream-in fade length. Long enough to read as a dissolve, short enough
+   *  that a fast pan still feels instant. */
+  static readonly FADE_MS = 280;
+
+  /** Whether any tile is mid stream-in fade — the viewer keeps drawing while
+   *  true so the dissolve actually animates under render-on-demand. */
+  get fading(): boolean {
+    return this.fadingKeys.size > 0;
+  }
+
+  /** Chain a per-draw uFade write onto each mesh's onBeforeRender (after the
+   *  dequantize-uniform hook terrain.ts installs). Every TileManager mesh gets
+   *  one — the materials are shared, so each draw must set its own fade. */
+  private attachFade(rec: Record_, ...meshes: (THREE.Mesh | undefined)[]): void {
+    for (const mesh of meshes) {
+      if (!mesh) continue;
+      const orig = mesh.onBeforeRender;
+      mesh.onBeforeRender = (renderer, scene, camera, geometry, material, group) => {
+        orig.call(mesh, renderer, scene, camera, geometry, material, group);
+        const u = (material as THREE.ShaderMaterial).uniforms?.['uFade'];
+        if (u) u.value = rec.fadeStart === undefined ? 1 : Math.min(1, (performance.now() - rec.fadeStart) / TileManager.FADE_MS);
+      };
     }
   }
 
@@ -331,10 +381,12 @@ export class TileManager {
    */
   private applyCoverage(): void {
     this.coverageDirty = false;
-    // Areas shown at the finer level, seeded with resident hires tiles.
+    // Areas shown at the finer level, seeded with resident hires tiles. A tile
+    // still fading in does NOT cover yet — its placeholder must keep showing
+    // through the dissolve.
     let shown = new Set<string>();
-    for (const rec of this.records.values()) {
-      if (rec.level === 0 && rec.state === 'ready') shown.add(tileKey(rec.ref.x, rec.ref.z));
+    for (const [key, rec] of this.records) {
+      if (rec.level === 0 && rec.state === 'ready' && !this.fadingKeys.has(key)) shown.add(tileKey(rec.ref.x, rec.ref.z));
     }
     let finerIndex: { has(key: string): boolean } = this.index;
     for (const lvl of this.lowLevels) {
@@ -400,6 +452,7 @@ export class TileManager {
       mesh.renderOrder = -level;
       releaseAfterUpload(mesh.geometry);
       rec.terrain = mesh;
+      this.attachFade(rec, mesh);
       // Keep the (36 KB) heightfield for the zoomed-out pivot-height fallback —
       // copied so it doesn't pin the decoded buffer.
       rec.low = {
@@ -497,6 +550,7 @@ export class TileManager {
       rec.terrainLm = meshes.terrainLm;
       rec.lightmapTex = meshes.lightmapTex;
       rec.water = meshes.water;
+      this.attachFade(rec, meshes.terrain, meshes.terrainLm, meshes.water);
       this.minY = Math.min(this.minY, meshes.bounds.min.y);
       this.maxY = Math.max(this.maxY, meshes.bounds.max.y);
       // Don't insert into the scene here: adds are staggered one per frame so
@@ -531,6 +585,7 @@ export class TileManager {
     rec.lightmapTex?.dispose();
     this.records.delete(key);
     this.failCounts.delete(key);
+    this.fadingKeys.delete(key);
     this.coverageDirty = true; // an uncovered lowres parent may need to reappear
     this.invalidate();
     this.emitter.emit('change', this.stats);

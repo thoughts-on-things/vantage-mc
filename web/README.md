@@ -70,6 +70,16 @@ scene, or call `viewer.invalidate()` after mutating it externally.
 `viewer.screenshot()` returns the current view as a PNG data URL (`<MapNav>`
 has a button for it, next to its fullscreen toggle).
 
+Worlds baked with `vantage render --caves full` unlock the **cave view**: a
+depth slice that cuts the world open at any Y — press `C`, click `<MapNav>`'s
+layers button, or drag the `<DepthSlider>` gauge that appears on the left
+edge. The cut peels open with an eased reveal, a warm rim outlines the
+section, unexplored rock reads as a dark chunk-gridded floor, and the slice
+depth rides the URL hash (`#@x,y,z,dist,rot,tilt,sliceY`) so cave finds are
+shareable links. Engine API: `viewer.setSlice(y | null)`,
+`viewer.toggleSlice()`, `viewer.slice`, `viewer.sliceRange`,
+`viewer.hasCaves`, and a `'slice'` event.
+
 Format-2 manifests carry a **lowres LOD pyramid** (`.vlr` colored
 heightfields): the viewer keeps coarse rings resident far beyond the hires
 disc — level 1 also underlays it as a loading placeholder — so the whole world
@@ -182,7 +192,7 @@ returns only the fields a given version carries (`textured`, `hasBiome`, `fluid`
 `TileInfo`, `ViewMode`. Re-exports all of `core`.
 
 **`@thoughts-on-things/vantage-mc/react`** — `<VantageViewer>`, `<BiomeLayer>`, `<SettingsPanel>`,
-`<LightPanel>`, `<MapNav>`, `<Reticle>`, `<Panel>`, `useVantage`,
+`<LightPanel>`, `<MapNav>`, `<DepthSlider>`, `<Reticle>`, `<Panel>`, `useVantage`,
 `injectStyles`, `QUALITY_PRESETS`; types `VantageViewerProps`,
 `BiomeLayerProps`, `SettingsPanelProps`, `VantageContextValue`,
 `VantageStatus`. Re-exports the engine and core types.

@@ -4,6 +4,7 @@ import worldShot from './assets/render-world.jpg';
 import biomesShot from './assets/render-biomes.jpg';
 import { DEMO_MANIFEST } from './App.js';
 import { RaceReplay } from './RaceReplay.js';
+import { CaveReveal } from './CaveReveal.js';
 
 const GITHUB = 'https://github.com/thoughts-on-things/vantage-mc';
 const RELEASES = `${GITHUB}/releases`;
@@ -58,6 +59,12 @@ const FEATURES = [
     wide: false,
   },
   {
+    icon: '⛏️',
+    title: 'X-ray for your world',
+    body: 'The cave view slices the map at any depth — mineshafts, geodes, and lava lakes laid bare. Press C, drag the gauge.',
+    wide: false,
+  },
+  {
     icon: '🧭',
     title: 'Layers & flight',
     body: 'A clickable biome legend, day/night lighting, quality presets, and a free-flight camera. Press B, fly around.',
@@ -98,6 +105,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
         </a>
         <div className="nav-links">
           <a href="#numbers">numbers</a>
+          <a href="#caves">cave view</a>
           <a href="#how">how it works</a>
           <a href={BEACON} rel="noreferrer" title="Beacon — the home for self-hosted Minecraft">
             beacon ↗
@@ -244,6 +252,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
           </p>
         </div>
       </section>
+
+      <CaveReveal />
 
       <section className="features" id="features">
         <p className="kicker reveal">why vantage</p>

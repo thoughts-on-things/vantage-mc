@@ -1215,3 +1215,163 @@ h2 em {
 .viewer-error button:hover {
   border-color: var(--blue);
 }
+
+/* ---------- the cave view ---------- */
+
+.cave {
+  text-align: center;
+}
+
+.cave .lede {
+  margin-inline: auto;
+}
+
+.cave-video {
+  margin: 0;
+}
+
+.cave-video video {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.cave-video figcaption,
+.cave-wipe figcaption {
+  margin-top: 14px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-faint);
+}
+
+.cave-row {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 30px;
+  align-items: center;
+  text-align: left;
+  margin-top: 40px;
+}
+
+@media (max-width: 900px) {
+  .cave-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cave-wipe {
+  margin: 0;
+}
+
+.wipe {
+  position: relative;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  cursor: ew-resize;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.wipe:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.wipe img {
+  display: block;
+  width: 100%;
+  height: auto;
+  pointer-events: none;
+}
+
+.wipe-top {
+  position: absolute;
+  inset: 0;
+}
+
+.wipe-top img {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  object-fit: cover;
+}
+
+.wipe-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--blue);
+  box-shadow: 0 0 18px rgba(91, 155, 255, 0.7);
+}
+
+.wipe-handle span {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-content: center;
+  border-radius: 50%;
+  background: var(--blue);
+  color: #071022;
+  font-size: 15px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+}
+
+.wipe-tag {
+  position: absolute;
+  bottom: 10px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font: 600 11px var(--mono);
+  letter-spacing: 0.04em;
+  background: rgba(11, 14, 20, 0.66);
+  color: var(--ink-dim);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.wipe-tag-l {
+  left: 10px;
+}
+
+.wipe-tag-r {
+  right: 10px;
+}
+
+.cave-notes h3 {
+  margin: 0 0 12px;
+  font-size: 19px;
+  letter-spacing: -0.01em;
+}
+
+.cave-notes pre {
+  margin: 0 0 16px;
+  padding: 13px 15px;
+  background: rgba(5, 8, 13, 0.75);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
+.cave-notes .p {
+  color: var(--green);
+}
+
+.cave-notes ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--ink-dim);
+  display: grid;
+  gap: 9px;
+  font-size: 15px;
+}

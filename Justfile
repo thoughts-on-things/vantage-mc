@@ -94,7 +94,7 @@ site-install:
 
 # Render the committed demo world into the site dev server (once, ~3 s).
 site-demo: build
-    {{bin}} render site/demo-world --out site/public/demo
+    {{bin}} render site/demo-world --caves full --out site/public/demo
 
 # Serve the site locally (needs `just site-install` and `just site-demo` once).
 site-serve:

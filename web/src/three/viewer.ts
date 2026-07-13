@@ -158,6 +158,8 @@ interface ViewerEvents extends Record<string, unknown> {
   biomelayer: { enabled: boolean; highlight: number | null };
   /** Camera control scheme changed (map ⇄ free-flight). */
   mode: { fly: boolean };
+  /** The depth slice (cave view) moved or toggled. `null` = off. */
+  slice: { y: number | null };
 }
 
 async function fetchBuffer(url: string): Promise<ArrayBuffer> {
@@ -261,6 +263,19 @@ export class VantageViewer {
   private highlight: number | null = null;
   private mixTarget = 0;
   private mixCurrent = 0;
+
+  // Depth slice (cave view): everything above the clip plane is cut away,
+  // revealing cave floors below. `sliceTarget` is where the user set it (null =
+  // off); `sliceCurrent` eases toward it each frame, so toggling peels the
+  // world open instead of popping. `sliceActive` stays true through the
+  // toggle-off ease until the plane has lifted clear.
+  private sliceTarget: number | null = null;
+  private sliceCurrent = 0;
+  private sliceActive = false;
+  /** The last depth used, so re-opening the cave view returns there. */
+  private lastSliceY: number | null = null;
+  /** The dark "unexplored rock" floor under a sliced world. */
+  private slicePlane: THREE.Mesh | null = null;
 
   // Live lighting appearance (applied to the shader on load and on change).
   private light: Required<LightSettings> = { ...DEFAULT_LIGHT };
@@ -434,7 +449,7 @@ export class VantageViewer {
 
     // The pivot rides the streamed terrain; picking and the legend aggregate
     // across whatever is resident.
-    this.controls.heightAt = this.tiles.heightAt;
+    this.setHeightSampler(this.tiles.heightAt);
     this.tilesUnsub = this.tiles.on('change', (stats) => {
       this.needsRender = true; // tiles entered/left the scene (or coverage flipped)
       this.emitter.emit('stats', stats);
@@ -455,6 +470,7 @@ export class VantageViewer {
     this.applyBiomeUniforms();
     this.applyLight();
     this.applyDisplay();
+    this.applySlice(); // seed the fresh shader's clip plane (deep link / re-load)
 
     // Seed streaming at the framed pivot so the first tiles arrive immediately.
     this.tiles.update(this.controls.position.x, this.controls.position.z);
@@ -580,13 +596,14 @@ export class VantageViewer {
 
     // Let the controls' pivot ride the terrain surface, from
     // the same top-down heightmap the biome picker uses.
-    this.controls.heightAt = makeHeightSampler(tile.surface);
+    this.setHeightSampler(makeHeightSampler(tile.surface));
     this._biomes = summarizeBiomes(tile, built.palette);
     this.frameCamera(view);
     if (this.options.urlState) this.applyViewHash(window.location.hash);
     this.applyBiomeUniforms();
     this.applyLight();
     this.applyDisplay();
+    this.applySlice();
 
     const size = new THREE.Vector3();
     this.bounds.getSize(size);
@@ -759,10 +776,165 @@ export class VantageViewer {
 
   private applyLight(): void {
     if (!this.shader) return;
-    this.shader.uniforms['uAmbient']!.value = this.light.ambient;
+    // The cave view floors ambient so unlit passages read as terrain instead
+    // of a black void; torch-lit builds still glow warm well above the floor.
+    const ambient = this.sliceActive ? Math.max(this.light.ambient, 0.32) : this.light.ambient;
+    this.shader.uniforms['uAmbient']!.value = ambient;
     this.shader.uniforms['uDay']!.value = this.light.daylight;
     this.shader.uniforms['uExposure']!.value = this.light.exposure;
     this.needsRender = true;
+  }
+
+  // --- depth slice (cave view) -------------------------------------------------
+
+  /** Whether the loaded world was baked with full cave geometry
+   *  (`vantage render --caves full`) — i.e. the depth slice has real caves to
+   *  reveal. The slice API works regardless; this is the "show the UI?" bit. */
+  get hasCaves(): boolean {
+    return this.manifest?.caves ?? false;
+  }
+
+  /** The world-Y bounds for the depth slice, from the manifest's baked extent
+   *  (falling back to the loaded bounds / vanilla build limits). */
+  get sliceRange(): { min: number; max: number } {
+    const yr = this.manifest?.yRange;
+    if (yr) return { min: yr.min, max: yr.max };
+    if (Number.isFinite(this.bounds.min.y) && this.bounds.min.y < this.bounds.max.y) {
+      return { min: this.bounds.min.y, max: this.bounds.max.y };
+    }
+    return { min: -64, max: 320 };
+  }
+
+  /** The current depth-slice Y, or `null` when the cave view is off. */
+  get slice(): number | null {
+    return this.sliceTarget;
+  }
+
+  /** Slice the world at world-Y `y` (everything above is cut away, exposing
+   *  the caves below — the cave / X-ray view); `null` turns it off. The plane
+   *  eases to its target, so toggling peels the world open. Emits `'slice'`. */
+  setSlice(y: number | null): void {
+    const r = this.sliceRange;
+    const target = y === null ? null : Math.min(Math.max(y, r.min + 2), r.max);
+    if (target === this.sliceTarget) return;
+    if (target !== null) {
+      // Fresh activation peels down from above the world top; a move while
+      // active eases from wherever the plane is now.
+      if (!this.sliceActive) this.sliceCurrent = r.max + 24;
+      this.sliceActive = true;
+      this.lastSliceY = target;
+    }
+    this.sliceTarget = target;
+    this.applySlice();
+    this.queueHashWrite();
+    this.emitter.emit('slice', { y: target });
+  }
+
+  /** Toggle the cave view: off → the last used depth (or a sensible cave
+   *  depth on first open), on → off. */
+  toggleSlice(): void {
+    if (this.sliceTarget !== null) {
+      this.setSlice(null);
+      return;
+    }
+    const r = this.sliceRange;
+    this.setSlice(this.lastSliceY ?? Math.round(r.min + (r.max - r.min) * 0.25));
+  }
+
+  /** Push slice state to the shader + scene: clip uniform, ambient floor, and
+   *  the void floor's presence. Also called on (re)load to seed a fresh shader. */
+  private applySlice(): void {
+    if (!this.shader) return;
+    this.shader.uniforms['uClipY']!.value = this.sliceActive ? this.sliceCurrent : 1e9;
+    if (this.sliceActive && !this.slicePlane) {
+      this.slicePlane = this.buildSlicePlane();
+      this.scene.add(this.slicePlane);
+    } else if (!this.sliceActive && this.slicePlane) {
+      this.scene.remove(this.slicePlane);
+      this.slicePlane.geometry.dispose();
+      (this.slicePlane.material as THREE.Material).dispose();
+      this.slicePlane = null;
+    }
+    this.applyLight();
+  }
+
+  /** The "unexplored rock" floor under a sliced world: a huge dark plane at
+   *  the world's bottom, so solid ground reads as solid where no cave is
+   *  exposed (instead of sky bleeding through the planet). Carries a faint
+   *  16-block chunk grid for scale and shares the terrain's fog uniforms so
+   *  its distance haze matches. Follows the camera focus each frame. */
+  private buildSlicePlane(): THREE.Mesh {
+    const t = this.shader!.uniforms;
+    const mat = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      uniforms: {
+        uFogColor: t['uFogColor']!,
+        uFog: t['uFog']!,
+        uFogCenter: t['uFogCenter']!,
+        uFogRadial: t['uFogRadial']!,
+        uFogDensity: t['uFogDensity']!,
+      },
+      vertexShader: /* glsl */ `
+        out vec2 vXZ;
+        out float vViewZ;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vXZ = wp.xz;
+          vec4 mv = viewMatrix * wp;
+          vViewZ = -mv.z;
+          gl_Position = projectionMatrix * mv;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        uniform vec3 uFogColor;
+        uniform vec2 uFog;
+        uniform vec2 uFogCenter;
+        uniform float uFogRadial;
+        uniform float uFogDensity;
+        in vec2 vXZ;
+        in float vViewZ;
+        out vec4 frag;
+        void main() {
+          // A faint 16-block chunk grid, antialiased via screen-space
+          // derivatives and faded with the fog so it never shimmers.
+          vec2 cell = vXZ / 16.0;
+          vec2 q = abs(fract(cell) - 0.5);
+          vec2 w = max(fwidth(cell), vec2(1e-5));
+          vec2 d = (0.5 - q) / w;
+          float g = 1.0 - smoothstep(0.8, 2.2, min(d.x, d.y));
+          // Radial fog must be computed HERE, not in the vertex shader: this
+          // plane is two screen-covering triangles, and distance() is not
+          // affine — interpolating it from far-away corners fogs the whole
+          // interior solid. The view-depth term IS affine, so it interpolates
+          // exactly as a varying.
+          float fogd = mix(vViewZ, distance(vXZ, uFogCenter), uFogRadial);
+          float f = smoothstep(uFog.x, uFog.y, fogd) * uFogDensity;
+          // Authored sRGB, straight to the canvas (like the sky dome).
+          vec3 c = mix(vec3(0.055, 0.06, 0.075), vec3(0.115, 0.125, 0.155), g * (1.0 - f));
+          frag = vec4(mix(c, uFogColor, f), 1.0);
+        }
+      `,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.scale.setScalar(400000); // far beyond any far plane — fog owns the edge
+    mesh.frustumCulled = false;
+    return mesh;
+  }
+
+  /** Install the terrain-follow height source, wrapped so the controls' pivot
+   *  never rides the (now invisible) surface above an open depth slice —
+   *  zooming in descends to the exposed cave level instead of stopping at the
+   *  clipped-away hilltops. */
+  private setHeightSampler(base: HeightSampler | null): void {
+    this.controls.heightAt = base
+      ? (x, z) => {
+          const h = base(x, z);
+          if (h == null || this.sliceTarget == null) return h;
+          return Math.min(h, this.sliceTarget);
+        }
+      : null;
   }
 
   // --- display fidelity ------------------------------------------------------
@@ -785,10 +957,14 @@ export class VantageViewer {
   }
 
   /** devicePixelRatio × renderScale, capped by maxPixelRatio (and a hard 4 so a
-   *  fat-fingered scale can't allocate a giant framebuffer). */
+   *  fat-fingered scale can't allocate a giant framebuffer). Floored at 0.25:
+   *  a hidden/headless window can report devicePixelRatio 0, which would
+   *  otherwise zero the framebuffer and break screenshot() and the first
+   *  visible frame. */
   private targetPixelRatio(): number {
-    const want = window.devicePixelRatio * this.display.renderScale;
-    return Math.min(want, this.options.maxPixelRatio * Math.max(1, this.display.renderScale), 4);
+    const dpr = window.devicePixelRatio || 1;
+    const want = dpr * this.display.renderScale;
+    return Math.max(0.25, Math.min(want, this.options.maxPixelRatio * Math.max(1, this.display.renderScale), 4));
   }
 
   private applyDisplay(): void {
@@ -827,21 +1003,24 @@ export class VantageViewer {
 
   // --- URL-hash deep links ----------------------------------------------------
 
-  /** The current view serialized as a `#@x,y,z,dist,rot,tilt` hash fragment —
-   *  paste-able into any URL serving the same world. */
+  /** The current view serialized as a `#@x,y,z,dist,rot,tilt[,sliceY]` hash
+   *  fragment — paste-able into any URL serving the same world. The trailing
+   *  component appears only while the cave view is open, so those deep links
+   *  reopen sliced at the same depth. */
   getViewHash(): string {
     const p = this.controls.position;
     const r1 = (v: number) => Math.round(v * 10) / 10;
     const r3 = (v: number) => Math.round(v * 1000) / 1000;
-    return `#@${r1(p.x)},${r1(p.y)},${r1(p.z)},${r1(this.controls.distance)},${r3(this.controls.rotation)},${r3(this.controls.angle)}`;
+    const slice = this.sliceTarget !== null ? `,${r1(this.sliceTarget)}` : '';
+    return `#@${r1(p.x)},${r1(p.y)},${r1(p.z)},${r1(this.controls.distance)},${r3(this.controls.rotation)},${r3(this.controls.angle)}${slice}`;
   }
 
-  /** Apply a `#@x,y,z,dist,rot,tilt` hash to the camera (leading `#` optional).
-   *  Returns whether the hash parsed. */
+  /** Apply a `#@x,y,z,dist,rot,tilt[,sliceY]` hash to the camera (leading `#`
+   *  optional). Returns whether the hash parsed. */
   applyViewHash(hash: string): boolean {
-    const m = /^#?@(-?[\d.]+),(-?[\d.]+),(-?[\d.]+),([\d.]+),(-?[\d.]+),(-?[\d.]+)$/.exec(hash);
+    const m = /^#?@(-?[\d.]+),(-?[\d.]+),(-?[\d.]+),([\d.]+),(-?[\d.]+),(-?[\d.]+)(?:,(-?[\d.]+))?$/.exec(hash);
     if (!m) return false;
-    const [x, y, z, distance, rotation, angle] = m.slice(1).map(Number);
+    const [x, y, z, distance, rotation, angle] = m.slice(1, 7).map(Number);
     if (![x, y, z, distance, rotation, angle].every(Number.isFinite)) return false;
     this.controls.setView({
       position: new THREE.Vector3(x, y, z),
@@ -850,6 +1029,8 @@ export class VantageViewer {
       angle: angle!,
       floorY: y!,
     });
+    const slice = m[7] !== undefined ? Number(m[7]) : null;
+    this.setSlice(Number.isFinite(slice as number) ? slice : null);
     // setView jumps the camera outside update()'s motion detection.
     this.needsRender = true;
     return true;
@@ -858,10 +1039,7 @@ export class VantageViewer {
   /** Debounced camera→hash sync plus hashchange→camera (pasted links apply
    *  live). `history.replaceState` avoids history spam and hashchange echo. */
   private bindUrlState(): void {
-    const onChange = () => {
-      if (this.hashTimer !== null) clearTimeout(this.hashTimer);
-      this.hashTimer = setTimeout(() => this.writeHash(), 250);
-    };
+    const onChange = () => this.queueHashWrite();
     this.controls.addEventListener('change', onChange);
     const onHash = () => {
       if (window.location.hash === this.lastWrittenHash) return;
@@ -874,6 +1052,13 @@ export class VantageViewer {
       if (this.hashTimer !== null) clearTimeout(this.hashTimer);
       this.hashTimer = null;
     };
+  }
+
+  /** Debounce a hash write — camera motion and slice changes funnel here. */
+  private queueHashWrite(): void {
+    if (!this.options.urlState) return;
+    if (this.hashTimer !== null) clearTimeout(this.hashTimer);
+    this.hashTimer = setTimeout(() => this.writeHash(), 250);
   }
 
   private writeHash(): void {
@@ -1030,6 +1215,9 @@ export class VantageViewer {
     if (this.tiles) {
       const focus = this.controls.flyMode ? this.camera.position : this.controls.position;
       this.tiles.update(focus.x, focus.z);
+      // Keep drawing while tiles dissolve in — the stream-in fade is the one
+      // scene animation that lives in the manager, not the viewer.
+      if (this.tiles.fading) this.needsRender = true;
       // Radial fog tracks the same focus streaming plans around, so the clear
       // disc and the resident disc stay concentric.
       if (this.shader) (this.shader.uniforms['uFogCenter']!.value as THREE.Vector2).set(focus.x, focus.z);
@@ -1041,6 +1229,28 @@ export class VantageViewer {
       if (Math.abs(this.mixCurrent - this.mixTarget) < 0.0015) this.mixCurrent = this.mixTarget;
       this.shader.uniforms['uBiomeMix']!.value = this.mixCurrent;
       this.needsRender = true;
+    }
+
+    // Ease the depth slice: opening peels the plane down from above the world,
+    // closing lifts it clear and only then switches the clip off. The void
+    // floor tracks the camera focus so it never runs out underneath the view.
+    if (this.sliceActive && this.shader) {
+      const goal = this.sliceTarget ?? this.sliceRange.max + 24;
+      if (this.sliceCurrent !== goal) {
+        this.sliceCurrent += (goal - this.sliceCurrent) * (1 - Math.exp(-dtMs / 110));
+        if (Math.abs(this.sliceCurrent - goal) < 0.05) this.sliceCurrent = goal;
+        this.needsRender = true;
+      }
+      if (this.sliceTarget === null && this.sliceCurrent === goal) {
+        this.sliceActive = false;
+        this.applySlice(); // clip off, void floor removed, ambient restored
+      } else {
+        this.shader.uniforms['uClipY']!.value = this.sliceCurrent;
+        if (this.slicePlane) {
+          const focus = this.controls.flyMode ? this.camera.position : this.controls.position;
+          this.slicePlane.position.set(focus.x, this.sliceRange.min - 0.4, focus.z);
+        }
+      }
     }
 
     this.pickHover();
@@ -1096,6 +1306,17 @@ export class VantageViewer {
   }
 
   private disposeCurrent(): void {
+    // The slice plane's material shares the outgoing shader's uniform objects —
+    // drop it (and the slice state) with the world it was cut into. A slice in
+    // the URL hash re-applies to the next load.
+    if (this.slicePlane) {
+      this.scene.remove(this.slicePlane);
+      this.slicePlane.geometry.dispose();
+      (this.slicePlane.material as THREE.Material).dispose();
+      this.slicePlane = null;
+    }
+    this.sliceTarget = null;
+    this.sliceActive = false;
     // The viewer created every material and texture it holds — single-tile ones
     // inside buildTerrain (setTile), streaming ones in loadWorld — so it owns
     // their GPU memory in both modes and must release it on reload/dispose.

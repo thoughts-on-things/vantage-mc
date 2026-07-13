@@ -40,6 +40,12 @@ export interface WorldManifest {
   textures: string;
   /** World spawn point, when the generator could read level.dat. */
   spawn?: { x: number; y: number; z: number };
+  /** True when the render kept full cave geometry (`--caves full`) — the
+   *  viewer's depth-slice cave view has real caves to reveal. */
+  caves?: boolean;
+  /** World-Y extent across all tiles (min inclusive, max exclusive) — the
+   *  bounds for the cave view's depth slider. */
+  yRange?: { min: number; max: number };
   /** Biome display names indexed by the per-vertex biome id (0 = no data).
    *  Globally consistent across every tile of the render. */
   biomes: string[];
@@ -132,6 +138,12 @@ export function parseManifest(data: unknown): WorldManifest {
     spawn = { x: s['x'], y: s['y'], z: s['z'] };
   }
 
+  let yRange: WorldManifest['yRange'];
+  const yr = m['yRange'] as Record<string, unknown> | undefined;
+  if (typeof yr === 'object' && yr !== null && typeof yr['min'] === 'number' && typeof yr['max'] === 'number' && yr['min'] < yr['max']) {
+    yRange = { min: yr['min'], max: yr['max'] };
+  }
+
   const maxSectionVerts = m['maxSectionVerts'];
   return {
     format,
@@ -140,6 +152,8 @@ export function parseManifest(data: unknown): WorldManifest {
     textures,
     ...(typeof maxSectionVerts === 'number' && maxSectionVerts > 0 ? { maxSectionVerts } : {}),
     ...(spawn ? { spawn } : {}),
+    ...(m['caves'] === true ? { caves: true } : {}),
+    ...(yRange ? { yRange } : {}),
     ...(lowres ? { lowres } : {}),
     biomes: biomes as string[],
     tiles: parsedTiles,

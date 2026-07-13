@@ -73,7 +73,7 @@ fn printUsage() void {
     std.debug.print(
         \\usage:
         \\  vantage render  <world-save-dir> [--assets <dir>] [--out <dir>] [--tile-chunks <n>]
-        \\                  [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off] [--caves off|<y>]
+        \\                  [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
         \\                  [--threads <n>] [--gz <1..12>]
         \\      Render the whole populated world as streamable tiles + manifest.json
         \\      (default out: web/public). --radius caps to a window around spawn.
@@ -109,16 +109,19 @@ fn parseLightQuality(args: []const []const u8) error{InvalidArgument}!mesh.Light
     return .smooth;
 }
 
-/// Scan args for `--caves off|<y>` (default `55`). Faces
+/// Scan args for `--caves full|<y>` (default `55`). Faces
 /// below this world Y that only look into dark (sky-light-0) cells are culled —
 /// they are invisible from any above-ground view and dominate tile size on
-/// modern worlds. `off` renders full cave geometry.
+/// modern worlds. `full` keeps every cave: tiles grow, but the viewer's
+/// depth-slice cave view has real geometry to reveal (the manifest gains
+/// `"caves": true` so the UI knows to offer it). `off` is an alias of `full`
+/// kept for old scripts.
 fn parseCaveY(args: []const []const u8) error{InvalidArgument}!?i32 {
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
         if (!std.mem.eql(u8, args[i], "--caves")) continue;
-        if (std.mem.eql(u8, args[i + 1], "off")) return null;
-        return std.fmt.parseInt(i32, args[i + 1], 10) catch badValue("--caves", args[i + 1], "off|<y>");
+        if (std.mem.eql(u8, args[i + 1], "full") or std.mem.eql(u8, args[i + 1], "off")) return null;
+        return std.fmt.parseInt(i32, args[i + 1], 10) catch badValue("--caves", args[i + 1], "full|<y>");
     }
     return 55;
 }
@@ -638,6 +641,8 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var total_solid_verts: u64 = 0;
     var total_fluid_verts: u64 = 0;
     var max_section_verts: u64 = 0;
+    var world_y_min: i32 = std.math.maxInt(i32);
+    var world_y_max: i32 = std.math.minInt(i32);
     var total_tris: u64 = 0;
     var total_bytes: u64 = 0;
     var total_raw_bytes: u64 = 0;
@@ -672,6 +677,8 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         total_solid_verts += r.solid_verts;
         total_fluid_verts += r.fluid_verts;
         max_section_verts = @max(max_section_verts, @max(r.solid_verts, r.fluid_verts));
+        world_y_min = @min(world_y_min, r.y_min);
+        world_y_max = @max(world_y_max, r.y_max);
         total_tris += r.tris;
         total_bytes += r.entry.bytes;
         total_raw_bytes += r.raw_bytes;
@@ -806,6 +813,8 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         .tiles = manifest_tiles.items,
         .lowres = lowres_levels.items,
         .max_section_verts = max_section_verts,
+        .caves = cave_y == null,
+        .y_range = if (world_y_min < world_y_max) .{ world_y_min, world_y_max } else null,
     });
     const manifest_path = try std.fmt.allocPrint(a, "{s}/manifest.json", .{out_dir});
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = manifest_path, .data = manifest });
@@ -945,6 +954,10 @@ const TileResult = struct {
     written: bool = false,
     entry: TileEntry = .{ .tx = 0, .tz = 0, .bytes = 0 },
     cmap: ?*lowres.ColorMap = null,
+    /// World-Y extent of this tile's grid (min inclusive, max exclusive) —
+    /// aggregated into the manifest's `yRange` for the viewer's depth slider.
+    y_min: i32 = 0,
+    y_max: i32 = 0,
     solid_verts: u64 = 0,
     fluid_verts: u64 = 0,
     tris: u64 = 0,
@@ -1070,6 +1083,8 @@ fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
     res.write_ms = t_w0.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).toMilliseconds();
 
     res.entry = .{ .tx = tx, .tz = tz, .bytes = zipped.len };
+    res.y_min = g2.min_y;
+    res.y_max = g2.min_y + @as(i32, @intCast(g2.sy));
     res.solid_verts = built.solid.vertex_count;
     res.fluid_verts = built.fluid.vertex_count;
     res.tris = built.solid.triangleCount() + built.fluid.triangleCount();
@@ -1099,6 +1114,11 @@ const ManifestInput = struct {
     /// Largest per-section vertex count across every tile — the viewer sizes
     /// its one shared quad index buffer from this before the first tile lands.
     max_section_verts: u64 = 0,
+    /// True when cave culling was off (`--caves full`) — the tiles carry every
+    /// cave, so the viewer can offer its depth-slice cave view.
+    caves: bool = false,
+    /// World-Y extent across all tiles [min, max) — bounds for the depth slider.
+    y_range: ?[2]i32 = null,
 };
 
 /// Whether `name` is a render-owned tile file: `t.<x>.<z>.vtile` (hires) or
@@ -1197,6 +1217,8 @@ fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     try out.print(a, "{{\n  \"format\": 4,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"maxSectionVerts\": {d},\n  \"textures\": \"terrain.vtexarr\",\n", .{
         m.tile_chunks, m.tile_chunks * 16, m.max_section_verts,
     });
+    if (m.caves) try out.appendSlice(a, "  \"caves\": true,\n");
+    if (m.y_range) |yr| try out.print(a, "  \"yRange\": {{ \"min\": {d}, \"max\": {d} }},\n", .{ yr[0], yr[1] });
     if (m.spawn) |s| try out.print(a, "  \"spawn\": {{ \"x\": {d}, \"y\": {d}, \"z\": {d} }},\n", .{ s[0], s[1], s[2] });
     try out.appendSlice(a, "  \"biomes\": [");
     for (m.biomes, 0..) |name, i| {
@@ -1244,6 +1266,40 @@ fn appendJsonString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8
         },
     };
     try out.append(a, '"');
+}
+
+test "parseCaveY: full/off disable culling, a number sets the horizon" {
+    try std.testing.expectEqual(@as(?i32, 55), try parseCaveY(&.{}));
+    try std.testing.expectEqual(@as(?i32, null), try parseCaveY(&.{ "--caves", "full" }));
+    try std.testing.expectEqual(@as(?i32, null), try parseCaveY(&.{ "--caves", "off" }));
+    try std.testing.expectEqual(@as(?i32, 40), try parseCaveY(&.{ "--caves", "40" }));
+    // The reject path (`--caves deep`) prints its complaint to stderr, which
+    // `zig build test` treats as failure — covered by manual CLI use instead.
+}
+
+test "buildManifest carries caves + yRange for the depth slider" {
+    const a = std.testing.allocator;
+    const json = try buildManifest(a, .{
+        .tile_chunks = 8,
+        .spawn = null,
+        .biomes = &.{""},
+        .tiles = &.{.{ .tx = 0, .tz = 0, .bytes = 1 }},
+        .caves = true,
+        .y_range = .{ -64, 320 },
+    });
+    defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"caves\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"yRange\": { \"min\": -64, \"max\": 320 }") != null);
+    // Default (culled) renders advertise neither key.
+    const plain = try buildManifest(a, .{
+        .tile_chunks = 8,
+        .spawn = null,
+        .biomes = &.{""},
+        .tiles = &.{.{ .tx = 0, .tz = 0, .bytes = 1 }},
+    });
+    defer a.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "caves") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "yRange") == null);
 }
 
 /// `vantage extract [client.jar]` — populate the asset cache from a client jar.

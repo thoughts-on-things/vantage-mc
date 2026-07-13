@@ -23,6 +23,9 @@ export interface MapNavProps {
   home?: boolean;
   /** Show the centred-coordinate readout. Default `true`. */
   coords?: boolean;
+  /** Show the cave-view (depth slice) toggle. Default `true` — hidden
+   *  automatically unless the world was baked with `--caves full`. */
+  caves?: boolean;
   /** Show the screenshot (PNG download) button. Default `true`. */
   screenshot?: boolean;
   /** Show the fullscreen toggle. Default `true` (hidden automatically where
@@ -64,6 +67,13 @@ const Icon = {
       <circle cx="8" cy="9" r="2.4" />
     </svg>
   ),
+  layers: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 2.2 14 5.4 8 8.6 2 5.4z" />
+      <path d="M2.8 8.5 8 11.3l5.2-2.8" />
+      <path d="M2.8 11.3 8 14.1l5.2-2.8" />
+    </svg>
+  ),
   expand: (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M6 2.5H2.5V6" />
@@ -89,17 +99,19 @@ export function MapNav({
   zoom = true,
   home = true,
   coords = true,
+  caves = true,
   screenshot = true,
   fullscreen = true,
   className,
 }: MapNavProps) {
-  const { viewer } = useVantage();
+  const { viewer, info } = useVantage();
   const navRef = useRef<HTMLDivElement>(null);
   const needleRef = useRef<SVGGElement>(null);
   const coordRef = useRef<HTMLSpanElement>(null);
   const tiltRef = useRef<HTMLButtonElement>(null);
   const [flying, setFlying] = useState(false);
   const [isFs, setIsFs] = useState(false);
+  const [sliced, setSliced] = useState(false);
 
   // Free-flight is the one nav state that drives a real re-render (rare toggle),
   // so the button can reflect active styling and the tilt/home buttons can hide.
@@ -107,6 +119,13 @@ export function MapNav({
     if (!viewer) return;
     setFlying(viewer.isFlying);
     return viewer.on('mode', ({ fly }) => setFlying(fly));
+  }, [viewer]);
+
+  // Cave-view state, so the layers button reads as a toggle.
+  useEffect(() => {
+    if (!viewer) return;
+    setSliced(viewer.slice !== null);
+    return viewer.on('slice', ({ y }) => setSliced(y !== null));
   }, [viewer]);
 
   // Track fullscreen from the document so Esc / F11 keep the icon honest.
@@ -171,6 +190,10 @@ export function MapNav({
   // canvas — the legend and this nav should survive the transition. Requests
   // can still be denied at runtime (e.g. a sandboxed iframe that reports
   // fullscreenEnabled anyway), so rejections are swallowed, not thrown.
+  // The cave view needs real cave geometry to reveal — the button only shows
+  // on worlds baked with `--caves full` (manifest `caves: true`), once loaded.
+  const showCaves = caves && info !== null && (viewer.hasCaves || sliced);
+
   const canFullscreen = typeof document !== 'undefined' && document.fullscreenEnabled;
   const toggleFullscreen = () => {
     if (document.fullscreenElement != null) document.exitFullscreen().catch(() => {});
@@ -209,6 +232,19 @@ export function MapNav({
           onClick={() => viewer.toggleFly()}
         >
           {Icon.fly}
+        </button>
+      )}
+
+      {showCaves && (
+        <button
+          type="button"
+          className={sliced ? 'vtg-navbtn vtg-on' : 'vtg-navbtn'}
+          title={sliced ? 'Close the cave view (C)' : 'Cave view — slice into the world (C)'}
+          aria-label="Toggle cave view"
+          aria-pressed={sliced}
+          onClick={() => viewer.toggleSlice()}
+        >
+          {Icon.layers}
         </button>
       )}
 

@@ -6,7 +6,7 @@
 
 import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BiomeLayer, LightPanel, MapNav, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
+import { BiomeLayer, DepthSlider, LightPanel, MapNav, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
@@ -59,7 +59,7 @@ function Hud() {
           <>
             {k('drag')} pan · {k('right-drag')} orbit · {k('scroll')} zoom
             <br />
-            {k('WASD')} move · {k('Q/E')} turn · {k('R/F')} tilt · {k('B')} biomes
+            {k('WASD')} move · {k('Q/E')} turn · {k('R/F')} tilt · {k('B')} biomes · {k('C')} caves
           </>
         )}
       </div>
@@ -85,6 +85,7 @@ function App({ streamed }: { streamed: boolean }) {
       <LightPanel />
       <SettingsPanel />
       <MapNav />
+      <DepthSlider />
     </VantageViewer>
   );
 }

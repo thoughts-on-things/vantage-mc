@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.3.0...v0.4.0) (2026-07-13)
+
+
+### Features
+
+* depth-slice cave view + stream-in tile fade ([#19](https://github.com/thoughts-on-things/vantage-mc/issues/19)) ([f9aafef](https://github.com/thoughts-on-things/vantage-mc/commit/f9aafef8004fccd32ae675205a2a653536609e0a))
+* merged water sheets, render-on-demand, vantage serve, screenshot/fullscreen ([#18](https://github.com/thoughts-on-things/vantage-mc/issues/18)) ([84aa076](https://github.com/thoughts-on-things/vantage-mc/commit/84aa076180b6a38a87f922771ece90dd9f482ba6))
+
 ## [0.3.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.2.0...v0.3.0) (2026-07-12)
 
 

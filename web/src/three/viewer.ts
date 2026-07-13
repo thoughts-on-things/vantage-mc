@@ -1053,7 +1053,10 @@ export class VantageViewer {
     if (!this.needsRender) return;
     this.needsRender = false;
     this.lastRenderMs = now;
+    this.draw(now);
+  }
 
+  private draw(now: number): void {
     this.sky.position.copy(this.camera.position); // keep the dome centred on the eye
     // Advance the texture-animation clock (water, lava, magma, … step through
     // their baked frames). Wall-clock, wrapped hourly so the f32 uniform keeps
@@ -1067,6 +1070,14 @@ export class VantageViewer {
     this.renderer.render(this.scene, this.camera);
     this.renderer.setRenderTarget(null);
     this.renderer.render(this.present, this.presentCamera);
+  }
+
+  /** Draw a fresh frame and return the canvas as a PNG data URL, for a
+   *  screenshot button / download link. Draws synchronously first because the
+   *  default framebuffer is not preserved between the on-demand renders. */
+  screenshot(): string {
+    this.draw(performance.now());
+    return this.renderer.domElement.toDataURL('image/png');
   }
 
   private resize(): void {

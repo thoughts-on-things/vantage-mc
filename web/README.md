@@ -61,6 +61,15 @@ pasting a new hash into the address bar pans there live. Pass
 `urlState={false}` if your page owns its hash (e.g. a router); the plain
 engine keeps it opt-in (`new VantageViewer(el, { urlState: true })`).
 
+The viewer **renders on demand**: a frame draws only when something changed —
+camera motion, tiles streaming in, a setting — plus a gentle 10 fps tick while
+animated textures (water, lava) are on screen, so an idle map costs ~0 GPU/CPU
+instead of a render loop. Input still draws the same frame it arrives. Pass
+`renderOnDemand: false` to the engine if you drive per-frame effects off its
+scene, or call `viewer.invalidate()` after mutating it externally.
+`viewer.screenshot()` returns the current view as a PNG data URL (`<MapNav>`
+has a button for it, next to its fullscreen toggle).
+
 Format-2 manifests carry a **lowres LOD pyramid** (`.vlr` colored
 heightfields): the viewer keeps coarse rings resident far beyond the hires
 disc — level 1 also underlays it as a loading placeholder — so the whole world

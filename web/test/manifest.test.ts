@@ -57,6 +57,17 @@ describe('parseManifest', () => {
     expect(parseManifest(good).maxSectionVerts).toBeUndefined();
   });
 
+  it('carries the caves flag and yRange for the depth slice', () => {
+    const m = parseManifest({ ...good, caves: true, yRange: { min: -64, max: 320 } });
+    expect(m.caves).toBe(true);
+    expect(m.yRange).toEqual({ min: -64, max: 320 });
+    // Optional: absent on culled renders, and junk values are dropped.
+    expect(parseManifest(good).caves).toBeUndefined();
+    expect(parseManifest(good).yRange).toBeUndefined();
+    expect(parseManifest({ ...good, caves: 'yes' }).caves).toBeUndefined();
+    expect(parseManifest({ ...good, yRange: { min: 5, max: 5 } }).yRange).toBeUndefined();
+  });
+
   it('rejects wrong format versions and malformed shapes', () => {
     expect(() => parseManifest(null)).toThrow(/not an object/);
     expect(() => parseManifest({ ...good, format: 5 })).toThrow(/format/);

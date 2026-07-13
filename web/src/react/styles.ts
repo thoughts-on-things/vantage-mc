@@ -177,6 +177,63 @@ export const CSS = `
 }
 .vtg-coords b { color: var(--vtg-dim); font-weight: 600; margin-right: 1px; }
 
+/* --- cave-view depth gauge ------------------------------------------------- */
+.vtg-depth {
+  position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 10px 8px; width: 58px;
+  animation: vtg-rise-y 0.3s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.vtg-depth-val {
+  font: 11px var(--vtg-mono); color: var(--vtg-text); font-variant-numeric: tabular-nums;
+  display: flex; flex-direction: column; align-items: center; line-height: 1.3;
+}
+.vtg-depth-val b { color: var(--vtg-dim); font-weight: 600; font-size: 9px; letter-spacing: 0.08em; }
+/* The interactive rail: the thumb and landmark labels hang outside the track,
+   so the rail stays unclipped while the track clips its own paint. */
+.vtg-depth-rail {
+  position: relative; width: 14px; height: min(320px, 38vh);
+  cursor: ns-resize; touch-action: none;
+}
+.vtg-depth-rail:focus-visible { outline: 2px solid var(--vtg-accent); outline-offset: 4px; border-radius: 7px; }
+.vtg-depth-track {
+  position: absolute; inset: 0; border-radius: 7px; overflow: hidden; pointer-events: none;
+  /* A core sample: sky, grass, stone, deepslate, bedrock. */
+  background: linear-gradient(180deg, #6f9bce 0%, #6e9150 12%, #6e6f74 48%, #3e424b 76%, #16181d 100%);
+  border: 1px solid var(--vtg-line);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+/* The stratum the slice removed: struck through with hazard stripes. */
+.vtg-depth-cut {
+  position: absolute; inset: 0 0 auto 0;
+  background: repeating-linear-gradient(-45deg, rgba(10, 13, 19, 0.75) 0 4px, rgba(24, 30, 42, 0.55) 4px 8px);
+}
+.vtg-depth-thumb {
+  position: absolute; left: -3px; right: -3px; height: 0; pointer-events: none;
+}
+.vtg-depth-thumb::before {
+  content: ''; position: absolute; left: 0; right: 0; top: -1.5px; height: 3px;
+  background: var(--vtg-accent); border-radius: 2px;
+  box-shadow: 0 0 6px rgba(91, 155, 255, 0.8), 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.vtg-depth-mark {
+  position: absolute; left: 0; right: 0; height: 0; pointer-events: none;
+}
+.vtg-depth-mark i { position: absolute; left: -4px; width: 4px; top: -0.5px; height: 1px; background: rgba(230, 238, 251, 0.55); }
+.vtg-depth-mark span {
+  position: absolute; left: 17px; top: -5px; font: 9px var(--vtg-mono); color: var(--vtg-dim);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+.vtg-depth-close {
+  width: 24px; height: 24px; flex: none; display: grid; place-items: center;
+  border-radius: 7px; border: 1px solid transparent; background: transparent;
+  color: var(--vtg-muted); cursor: pointer; padding: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.vtg-depth-close:hover { background: rgba(132, 170, 230, 0.14); color: var(--vtg-text); border-color: var(--vtg-line); }
+.vtg-depth-close svg { width: 13px; height: 13px; display: block; }
+@keyframes vtg-rise-y { from { opacity: 0; transform: translate(-8px, -50%); } to { opacity: 1; transform: translate(0, -50%); } }
+
 /* --- centre reticle (navigation reference) -------------------------------- */
 .vtg-reticle {
   position: absolute; left: 50%; top: 50%; width: 30px; height: 30px;

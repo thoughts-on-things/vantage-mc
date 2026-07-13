@@ -31,6 +31,12 @@ _default:
 build:
     zig build
 
+# Build the standalone viewer bundle, then a binary that embeds it — this is
+# what release binaries ship, so `vantage serve` carries the whole viewer.
+build-full:
+    cd web && npm run build:viewer
+    zig build -Doptimize=ReleaseFast
+
 # Run all unit tests.
 test:
     zig build test

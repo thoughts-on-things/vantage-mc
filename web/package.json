@@ -49,6 +49,7 @@
     "dev": "vite",
     "build": "tsup",
     "build:demo": "vite build",
+    "build:viewer": "vite build -c vite.viewer.config.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

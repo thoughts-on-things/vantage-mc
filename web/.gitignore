@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-demo/
+dist-viewer/
 
 # Rendered tiles (regenerate with `just render` / `vantage meshtex`)
 public/*.vtile

@@ -113,6 +113,10 @@ const FRAG = /* glsl */ `
   uniform float uFogDensity; // atmospheric haze amount (1 = full, 0 = clear)
   uniform float uClipY;      // depth-slice plane: fragments above this world Y
                              // are cut away (1e9 = slice off). See setSlice().
+  uniform float uFade;       // per-tile stream-in fade (set per mesh, 0..1):
+                             // alpha-to-coverage dithers it under MSAA, so new
+                             // tiles dissolve in over the lowres placeholder
+                             // instead of popping their lighting on.
   in vec2 vUv;
   in vec4 vTint;
   in vec3 vBcol;
@@ -243,7 +247,7 @@ const FRAG = /* glsl */ `
       vec3 wlit = grade(wcol * (0.62 + 0.28 * SUN * ndl2) * lightAmt * lightCol * uExposure);
       float wf = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity;
       float wa = mix(0.5, 0.74, depth);                         // blue tint, seabed still reads through
-      frag = vec4(toSRGB(mix(wlit, fogCol, wf)), wa);
+      frag = vec4(toSRGB(mix(wlit, fogCol, wf)), wa * uFade);
       return;
     }
 
@@ -271,7 +275,7 @@ const FRAG = /* glsl */ `
     float cut = 1.0 - smoothstep(0.0, 1.5, uClipY - vWorldY);
     lit += vec3(1.0, 0.72, 0.35) * (0.2 * cut);
     float f = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity; // aerial depth into the horizon
-    frag = vec4(toSRGB(mix(lit, fogCol, f)), uAlpha * t.a);   // alpha → MSAA coverage (foliage AA)
+    frag = vec4(toSRGB(mix(lit, fogCol, f)), uAlpha * t.a * uFade); // alpha → MSAA coverage (foliage AA)
   }
 `;
 
@@ -382,6 +386,7 @@ export function createTerrainMaterial(texData: DecodedTextureArray, opts: Terrai
       uContrast: { value: 1.0 },   // colour contrast (1 = neutral)
       uFogDensity: { value: 1.0 }, // atmospheric haze amount (1 = full)
       uClipY: { value: 1e9 },      // depth-slice plane (1e9 = off)
+      uFade: { value: 1.0 },       // stream-in fade; written per mesh each draw
     },
     vertexShader: VERT,
     fragmentShader: FRAG,
@@ -455,6 +460,9 @@ export function createLowresMaterial(terrain: THREE.ShaderMaterial): THREE.Shade
       uSaturation: t['uSaturation']!,
       uContrast: t['uContrast']!,
       uClipY: t['uClipY']!,
+      // Own fade uniform (not the terrain's ref): both are rewritten per mesh
+      // each draw, but separate objects keep the two materials independent.
+      uFade: { value: 1.0 },
     },
     vertexShader: /* glsl */ `
       in vec3 acol;
@@ -481,6 +489,7 @@ export function createLowresMaterial(terrain: THREE.ShaderMaterial): THREE.Shade
       uniform float uSaturation;
       uniform float uContrast;
       uniform float uClipY;
+      uniform float uFade;
       in vec3 vCol;
       in float vFog;
       in float vWorldY;
@@ -501,9 +510,12 @@ export function createLowresMaterial(terrain: THREE.ShaderMaterial): THREE.Shade
         c = mix(vec3(l), c, uSaturation);
         c = max((c - 0.5) * uContrast + 0.5, vec3(0.0));
         float f = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity;
-        frag = vec4(toSRGB(mix(c, toLinear(uFogColor), f)), 1.0);
+        frag = vec4(toSRGB(mix(c, toLinear(uFogColor), f)), uFade);
       }
     `,
+    // Turns the stream-in fade's fractional alpha into MSAA coverage (the
+    // material is otherwise fully opaque, so this costs nothing once faded).
+    alphaToCoverage: true,
   });
 }
 

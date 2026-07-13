@@ -957,10 +957,14 @@ export class VantageViewer {
   }
 
   /** devicePixelRatio × renderScale, capped by maxPixelRatio (and a hard 4 so a
-   *  fat-fingered scale can't allocate a giant framebuffer). */
+   *  fat-fingered scale can't allocate a giant framebuffer). Floored at 0.25:
+   *  a hidden/headless window can report devicePixelRatio 0, which would
+   *  otherwise zero the framebuffer and break screenshot() and the first
+   *  visible frame. */
   private targetPixelRatio(): number {
-    const want = window.devicePixelRatio * this.display.renderScale;
-    return Math.min(want, this.options.maxPixelRatio * Math.max(1, this.display.renderScale), 4);
+    const dpr = window.devicePixelRatio || 1;
+    const want = dpr * this.display.renderScale;
+    return Math.max(0.25, Math.min(want, this.options.maxPixelRatio * Math.max(1, this.display.renderScale), 4));
   }
 
   private applyDisplay(): void {
@@ -1211,6 +1215,9 @@ export class VantageViewer {
     if (this.tiles) {
       const focus = this.controls.flyMode ? this.camera.position : this.controls.position;
       this.tiles.update(focus.x, focus.z);
+      // Keep drawing while tiles dissolve in — the stream-in fade is the one
+      // scene animation that lives in the manager, not the viewer.
+      if (this.tiles.fading) this.needsRender = true;
       // Radial fog tracks the same focus streaming plans around, so the clear
       // disc and the resident disc stay concentric.
       if (this.shader) (this.shader.uniforms['uFogCenter']!.value as THREE.Vector2).set(focus.x, focus.z);

@@ -110,6 +110,13 @@ export interface VantageViewerOptions {
    *  or pasted into the address bar — is applied to the camera. Default `false`
    *  (the React `<VantageViewer>` turns it on). */
   urlState?: boolean;
+  /** Render only when something changed (camera, streaming tiles, settings) —
+   *  plus a steady ~10 fps tick while animated textures (water, lava) are
+   *  loaded, matching their baked 2-tick frametime. An idle view costs ~0
+   *  GPU/CPU instead of a full render loop; input still renders the same
+   *  frame it arrives. Default `true`; set `false` to render every frame
+   *  (e.g. when driving external per-frame effects off the viewer's scene). */
+  renderOnDemand?: boolean;
 }
 
 /** A tile source: a URL to fetch, a raw buffer, or already-decoded data. */
@@ -270,6 +277,15 @@ export class VantageViewer {
 
   // Last-frame timestamp, for frame-rate-independent control inertia.
   private lastFrameMs = 0;
+  // Render-on-demand: a frame draws only when this is set (camera moved, tiles
+  // changed, a setting changed, …) or the idle animation tick fires. See
+  // `invalidate()`.
+  private needsRender = true;
+  // Whether the loaded texture array animates (water/lava frames) — drives the
+  // idle tick. Set on load from the decoded anim table.
+  private hasAnims = false;
+  // When the last frame actually rendered, for the idle animation cadence.
+  private lastRenderMs = 0;
   // The framing the current tile loaded into, so the UI can re-home to it.
   private framedState: { position: THREE.Vector3; distance: number; rotation: number; angle: number; floorY: number } | null = null;
 
@@ -289,6 +305,7 @@ export class VantageViewer {
       display: options.display ?? {},
       streaming: options.streaming ?? {},
       urlState: options.urlState ?? false,
+      renderOnDemand: options.renderOnDemand ?? true,
     };
     if (options.light) this.light = { ...this.light, ...options.light };
     if (options.display) this.display = { ...this.display, ...options.display };
@@ -401,6 +418,7 @@ export class VantageViewer {
     this.waterShader = waterShader;
     this.lowresShader = lowresShader ?? null;
     this.manifest = manifest;
+    this.hasAnims = texData.anims.length > 0;
     this.tile = null;
     this.tiles = new TileManager({
       manifest,
@@ -418,6 +436,7 @@ export class VantageViewer {
     // across whatever is resident.
     this.controls.heightAt = this.tiles.heightAt;
     this.tilesUnsub = this.tiles.on('change', (stats) => {
+      this.needsRender = true; // tiles entered/left the scene (or coverage flipped)
       this.emitter.emit('stats', stats);
       // The legend settles as tiles stream; throttle the churn, then always
       // emit the final state once the queue drains.
@@ -542,6 +561,7 @@ export class VantageViewer {
 
     const built = buildTerrain(tile, textures);
     this.tile = tile;
+    this.hasAnims = (textures?.anims.length ?? 0) > 0;
     this.shader = built.shader ?? null;
     this.bounds = built.bounds;
     this.scene.add(built.terrain);
@@ -716,7 +736,11 @@ export class VantageViewer {
 
   private applyBiomeUniforms(): void {
     if (!this.shader) return;
+    // Seed the crossfade level too — a reload builds a fresh shader whose
+    // uniform would otherwise stay 0 while the eased state says "on".
+    this.shader.uniforms['uBiomeMix']!.value = this.mixCurrent;
     this.shader.uniforms['uHi']!.value = this.biomeEnabled && this.highlight !== null ? this.highlight : -1;
+    this.needsRender = true;
   }
 
   // --- lighting appearance ---------------------------------------------------
@@ -738,6 +762,7 @@ export class VantageViewer {
     this.shader.uniforms['uAmbient']!.value = this.light.ambient;
     this.shader.uniforms['uDay']!.value = this.light.daylight;
     this.shader.uniforms['uExposure']!.value = this.light.exposure;
+    this.needsRender = true;
   }
 
   // --- display fidelity ------------------------------------------------------
@@ -774,6 +799,7 @@ export class VantageViewer {
     this.shader.uniforms['uSaturation']!.value = d.saturation;
     this.shader.uniforms['uContrast']!.value = d.contrast;
     this.shader.uniforms['uFogDensity']!.value = d.fog;
+    this.needsRender = true;
   }
 
   // --- streaming -------------------------------------------------------------
@@ -796,6 +822,7 @@ export class VantageViewer {
     if (!this.tiles) return;
     this.tiles.configure(settings);
     this.applyViewLimits();
+    this.needsRender = true;
   }
 
   // --- URL-hash deep links ----------------------------------------------------
@@ -823,6 +850,8 @@ export class VantageViewer {
       angle: angle!,
       floorY: y!,
     });
+    // setView jumps the camera outside update()'s motion detection.
+    this.needsRender = true;
     return true;
   }
 
@@ -902,6 +931,7 @@ export class VantageViewer {
     if (this.controls.flyMode === on) return;
     this.controls.setMode(on ? 'fly' : 'map');
     if (on) this.emitHover(-1);
+    this.needsRender = true;
     this.emitter.emit('mode', { fly: on });
   }
 
@@ -977,15 +1007,26 @@ export class VantageViewer {
     this.emitHover(pickBiome(this.raycaster.ray, surface, this.bounds));
   }
 
+  /** Request a redraw on the next animation frame. The viewer invalidates
+   *  itself for everything it owns (camera motion, tile streaming, settings,
+   *  the biome layer); call this only if you mutate the scene from outside. */
+  invalidate(): void {
+    this.needsRender = true;
+  }
+
+  /** Idle animation cadence (ms). Water/lava bake at a 2-tick frametime
+   *  (100 ms), so a 10 fps tick steps them at exactly their authored rate. */
+  private static readonly ANIM_TICK_MS = 100;
+
   private frame(): void {
     const now = performance.now();
     const dtMs = this.lastFrameMs ? now - this.lastFrameMs : 16.7;
     this.lastFrameMs = now;
-    this.controls.update(dtMs);
-    this.sky.position.copy(this.camera.position); // keep the dome centred on the eye
+    if (this.controls.update(dtMs)) this.needsRender = true;
 
     // Streamed worlds: re-plan tile residency around wherever the user is
-    // looking (the map pivot, or the eye itself in free-flight).
+    // looking (the map pivot, or the eye itself in free-flight). Tile
+    // insertions/unloads invalidate via the manager's change event.
     if (this.tiles) {
       const focus = this.controls.flyMode ? this.camera.position : this.controls.position;
       this.tiles.update(focus.x, focus.z);
@@ -994,17 +1035,31 @@ export class VantageViewer {
       if (this.shader) (this.shader.uniforms['uFogCenter']!.value as THREE.Vector2).set(focus.x, focus.z);
     }
 
-    // Ease the textured<->biome crossfade, and advance the texture-animation
-    // clock (water, lava, magma, … step through their baked frames). Wrapped
-    // hourly so the f32 uniform keeps sub-frame precision on long sessions.
-    if (this.shader) {
+    // Ease the textured<->biome crossfade while it is in motion.
+    if (this.shader && this.mixCurrent !== this.mixTarget) {
       this.mixCurrent += (this.mixTarget - this.mixCurrent) * 0.2;
       if (Math.abs(this.mixCurrent - this.mixTarget) < 0.0015) this.mixCurrent = this.mixTarget;
       this.shader.uniforms['uBiomeMix']!.value = this.mixCurrent;
-      this.shader.uniforms['uTime']!.value = (now / 1000) % 3600;
+      this.needsRender = true;
     }
 
     this.pickHover();
+
+    // Render on demand: skip the draw entirely when nothing changed. Animated
+    // textures (water, lava) keep stepping at their authored 10 fps cadence;
+    // a still view without them costs nothing until the next interaction.
+    if (this.hasAnims && now - this.lastRenderMs >= VantageViewer.ANIM_TICK_MS) this.needsRender = true;
+    if (!this.options.renderOnDemand) this.needsRender = true;
+    if (!this.needsRender) return;
+    this.needsRender = false;
+    this.lastRenderMs = now;
+
+    this.sky.position.copy(this.camera.position); // keep the dome centred on the eye
+    // Advance the texture-animation clock (water, lava, magma, … step through
+    // their baked frames). Wall-clock, wrapped hourly so the f32 uniform keeps
+    // sub-frame precision on long sessions — skipped frames don't slow it.
+    if (this.shader) this.shader.uniforms['uTime']!.value = (now / 1000) % 3600;
+
     // Render the scene into the 8× MSAA target, then resolve+copy it to the
     // canvas. autoClear is off, so clear the target explicitly each frame.
     this.renderer.setRenderTarget(this.msaa);
@@ -1015,6 +1070,7 @@ export class VantageViewer {
   }
 
   private resize(): void {
+    this.needsRender = true;
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
     this.camera.aspect = w / h;

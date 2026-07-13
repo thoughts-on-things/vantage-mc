@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   BiomeLayer,
+  DepthSlider,
   LightPanel,
   MapNav,
   Reticle,
@@ -40,7 +41,7 @@ function Chrome({ label, onExit }: { label: string; onExit: () => void }) {
             </>
           ) : (
             <>
-              <b>drag</b> pan · <b>right-drag</b> orbit · <b>scroll</b> zoom · <b>B</b> biomes
+              <b>drag</b> pan · <b>right-drag</b> orbit · <b>scroll</b> zoom · <b>B</b> biomes · <b>C</b> caves
             </>
           )}
         </div>
@@ -68,6 +69,7 @@ export function ViewerApp({ world, label, onExit }: { world: string; label: stri
         <LightPanel />
         <SettingsPanel />
         <MapNav />
+        <DepthSlider />
       </VantageViewer>
     </div>
   );

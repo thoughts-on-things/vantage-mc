@@ -81,9 +81,8 @@ export function CaveReveal() {
         Slice the world <em>open</em>
       </h2>
       <p className="lede reveal">
-        Every world has a hidden half. Drag one slider and Vantage cuts the map at any depth — cave systems, lava
-        lakes, amethyst geodes, and forgotten mineshafts read like an ant farm, with your torch-lit bases glowing in
-        the dark. No other Minecraft map does this in 3D.
+        Your world doesn&apos;t stop at the surface. Slice the map at any depth: caves, mineshafts, geodes, lava —
+        all in place, all in 3D.
       </p>
 
       <figure className="cave-video reveal">
@@ -91,26 +90,26 @@ export function CaveReveal() {
           <video ref={videoRef} src={caveVideo} poster={cavePoster} preload="metadata" muted loop playsInline />
         </div>
         <figcaption>
-          Recorded from the real viewer — press <b>C</b> in the demo, or drag the depth gauge.
+          captured in the viewer · press <b>C</b> in the live demo to try it
         </figcaption>
       </figure>
 
       <div className="cave-row reveal">
         <figure className="cave-wipe">
           <Wipe />
-          <figcaption>Same camera, one keypress apart — drag the handle.</figcaption>
+          <figcaption>drag to compare · same camera, sliced at y = 14</figcaption>
         </figure>
         <div className="cave-notes">
-          <h3>One flag, whole underworld</h3>
+          <h3>One extra flag</h3>
           <pre>
             <code>
               <span className="p">$</span> vantage render {'<save>'} --caves full
             </code>
           </pre>
           <ul>
-            <li>The slice eases open and closed — no jump cuts, just a clean peel.</li>
-            <li>Unexplored rock reads as a dark grid, so caves pop instead of hiding in noise.</li>
-            <li>The depth rides the URL: any cave find is a link you can paste to a friend.</li>
+            <li>Costs disk, not render time.</li>
+            <li>Solid rock draws as a dark grid, so caves stand out.</li>
+            <li>The slice depth is part of the URL — a cave find is a link.</li>
           </ul>
         </div>
       </div>

@@ -111,11 +111,9 @@ The renderer only ever reads the world — it never writes to it. Useful flags:
 - `--radius <chunks>` — render only a window around spawn (quick previews).
 - `--caves full|<y>` — cave-culling horizon (default 55): faces that only look
   into dark, sky-light-0 cells below this Y are skipped. Ocean and lake floors
-  are always kept. `full` bakes every cave and unlocks the viewer's **cave
-  view**: a depth slider (`C` or the layers button) slices the world open at
-  any Y — caves, lava pockets, geodes, and mineshafts read like a living
-  cutaway, and torch-lit bases glow in the dark. Costs disk (New World:
-  25 → 47 MB gzipped) but nothing at bake time.
+  are always kept. `full` keeps every cave and enables the viewer's **cave
+  view** — press `C` and slice the world at any Y. Costs disk (New World:
+  25 → 47 MB gzipped), not bake time.
 - `--tile-chunks <n>` — tile span in chunks (default 8 = 128×128 blocks).
 - `--threads <n>` — tile-render parallelism (default: all logical cores).
   Peak memory is roughly one tile's working set per thread; lower it on

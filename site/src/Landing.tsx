@@ -61,7 +61,7 @@ const FEATURES = [
   {
     icon: '⛏️',
     title: 'X-ray for your world',
-    body: 'The cave view slices the map at any depth — mineshafts, geodes, and lava lakes laid bare. Press C, drag the gauge.',
+    body: 'Slice the map at any depth and look inside: mineshafts, geodes, lava lakes. Press C in the viewer.',
     wide: false,
   },
   {

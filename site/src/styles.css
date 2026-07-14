@@ -1169,15 +1169,26 @@ h2 em {
   color: var(--blue) !important;
 }
 
+/* Control hints sit top-centre, clear of the library's panels (lighting is
+   bottom-left, quality bottom-right, nav bottom-centre). Keyboard hints are
+   pointless on touch-sized screens, so they just go away there. */
 .viewer-legend {
   position: absolute;
-  bottom: 16px;
-  left: 16px;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 10;
   padding: 8px 13px;
   font: 12px var(--display);
   color: var(--ink-faint);
   pointer-events: none;
+  white-space: nowrap;
+}
+
+@media (max-width: 1080px) {
+  .viewer-legend {
+    display: none;
+  }
 }
 
 .viewer-legend b {

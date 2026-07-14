@@ -37,7 +37,7 @@ const FEATURES = [
   {
     icon: '🌍',
     title: 'The whole world, always',
-    body: 'Zoom from one flower to a satellite view of everything ever explored. A lightweight overview layer (~1% of the map’s bytes) means you never hit a fog wall.',
+    body: 'Zoom from one block out to everything ever explored. The overview layer costs about 1% of the map’s bytes, so there’s no fog wall.',
     wide: true,
   },
   {
@@ -130,9 +130,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
           as a <em>living map</em>.
         </h1>
         <p className="hero-sub reveal">
-          Vantage turns a Java-Edition save into a fast, beautiful 3D map that runs in any browser. Map a whole
-          survival world in seconds — then orbit your builds, skim the oceans, and zoom out to see everything you
-          ever dug.
+          Vantage renders a Java-Edition save as a fast 3D map for the browser. A whole survival world takes a few
+          seconds. Fly around it, zoom out, share any view as a link.
         </p>
 
         <div className="hero-ctas reveal">
@@ -192,7 +191,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
             </span>
           </button>
         </div>
-        <figcaption>Not a video — the real viewer streaming real tiles. Click through and fly around.</figcaption>
+        <figcaption>This is the live viewer, not a video — click to open it.</figcaption>
       </figure>
 
       <section className="numbers" id="numbers">
@@ -323,7 +322,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
       <section className="gallery">
         <figure className="reveal">
           <img src={worldShot} alt="Whole-world satellite view from the LOD pyramid" loading="lazy" />
-          <figcaption>Zoomed all the way out — the entire world stays visible, never a fog wall.</figcaption>
+          <figcaption>Zoomed all the way out — the whole world on one screen.</figcaption>
         </figure>
         <figure className="reveal">
           <img src={biomesShot} alt="The biome layer with its clickable legend" loading="lazy" />
@@ -339,8 +338,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
               Now map <em>your</em> world
             </h2>
             <p>
-              Everything you just explored was made by one command. Point vantage at your own save — a years-old
-              survival world, a creative server, a realm backup — and get the same map for it.
+              The demo above came from one command. Your own save works the same, whether it&apos;s a survival
+              world, a creative server, or a realm backup.
             </p>
             <p className="yours-privacy">
               Local and private by default: your world never leaves your machine unless you choose to host the

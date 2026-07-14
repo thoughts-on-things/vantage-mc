@@ -40,6 +40,9 @@ export interface VantageViewerProps {
   antialias?: boolean;
   /** Device pixel-ratio cap. Default `2`. Changing this remounts the canvas. */
   maxPixelRatio?: number;
+  /** Render only when the view changes, with a low-frequency tick for animated
+   *  textures. Default `true`; idle maps then use effectively no GPU time. */
+  renderOnDemand?: boolean;
   /** Live lighting appearance (ambient floor, daylight, exposure). Applied on
    *  change without re-baking — drive it from a slider for a day/night control. */
   light?: LightSettings;
@@ -92,6 +95,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     view = 'orbit',
     antialias = true,
     maxPixelRatio = 2,
+    renderOnDemand = true,
     light,
     display,
     urlState = true,
@@ -122,7 +126,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     injectStyles();
     const el = canvasRef.current;
     if (!el) return;
-    const v = new Engine(el, { antialias, maxPixelRatio, view, light, display, streaming, urlState });
+    const v = new Engine(el, { antialias, maxPixelRatio, renderOnDemand, view, light, display, streaming, urlState });
     engineRef.current = v;
     setEngine(v);
 
@@ -165,7 +169,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
       setEngine(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- view/light are initial-only seeds; reload + setLight handle changes
-  }, [antialias, maxPixelRatio]);
+  }, [antialias, maxPixelRatio, renderOnDemand]);
 
   // (Re)load whenever the source changes.
   useEffect(() => {

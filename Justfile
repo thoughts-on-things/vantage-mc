@@ -9,7 +9,8 @@
 # A render needs extracted assets + biome data; see `just extract`.
 
 # Extracted client assets+data (resource pack, biome data pack, lang). See README.
-cache  := env_var_or_default('VANTAGE_CACHE', env_var('HOME') / '.cache/vantage/assets/default')
+home   := if os() == 'windows' { env_var('USERPROFILE') } else { env_var('HOME') }
+cache  := env_var_or_default('VANTAGE_CACHE', home / '.cache/vantage/assets/default')
 assets := cache / 'assets/minecraft'
 
 # Test world region file (override with VANTAGE_REGION or `just region=...`).
@@ -71,6 +72,26 @@ mesh: build
 # Install the web package's dependencies (first-time setup for the viewer).
 web-install:
     cd web && npm install
+
+# Desktop studio — just is the public interface; the root npm runner handles
+# prerequisite diagnostics and lockfile-aware workspace bootstrapping.
+setup:
+    npm run setup
+
+dev:
+    npm run dev
+
+dev-ui:
+    npm run dev:ui
+
+doctor:
+    npm run doctor
+
+check:
+    npm test
+
+desktop-build:
+    npm run build
 
 # Render a whole world save into the viewer: `just render "~/…/saves/My World"`.
 # Auto-finds the region dir + cached assets. Extra args pass through (e.g. --radius 8).

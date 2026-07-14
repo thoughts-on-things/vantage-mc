@@ -1,5 +1,6 @@
 .zig-cache/
 zig-out/
+zig-pkg/
 .DS_Store
 
 # Generated tiles (regenerate with `vantage mesh` / `meshtex` → web/public/)
@@ -15,6 +16,20 @@ web/node_modules/
 web/dist/
 web/dist-demo/
 web/dist-viewer/
+
+# Tauri desktop app
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/binaries/*.exe
+desktop/src-tauri/gen/
+desktop/src-tauri/icons/android/
+desktop/src-tauri/icons/ios/
+desktop/src-tauri/icons/Square*Logo.png
+desktop/src-tauri/icons/StoreLogo.png
+
+# Local developer bootstrap markers
+**/node_modules/.vantage-lock
 
 # Tiled render output (regenerate with `vantage render`)
 web/public/manifest.json

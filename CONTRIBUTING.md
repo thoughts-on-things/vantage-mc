@@ -28,6 +28,15 @@ just web-install   # npm install for web/
 There are no system library dependencies — the C decompressors are vendored —
 so `zig build` works out of the box on macOS, Linux, and Windows.
 
+For the Windows desktop studio, the same task runner owns the complete loop:
+
+```sh
+just dev           # native Tauri app + Zig sidecar, with automatic bootstrap
+just dev-ui        # fast browser-only React/CSS loop
+just doctor        # actionable prerequisite diagnostics
+just check         # Zig + renderer + desktop + Rust checks
+```
+
 To render something you need assets extracted from a Minecraft client jar
 (`just extract <client.jar>`, any 1.18+ version) and a world save. See the
 [README](./README.md#quick-start).

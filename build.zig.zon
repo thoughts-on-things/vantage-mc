@@ -6,13 +6,14 @@
     // Globally unique package id; never changes (regenerate only when forking).
     .fingerprint = 0x9c972e94dc8fdd4, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
-    // No Zig dependencies — the C decompressors/decoders are vendored in
-    // `vendor/` (see build.zig).
+    // No Zig dependencies — desktop packaging lives in `desktop/` and bundles
+    // this package's CLI as a Tauri sidecar.
     .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "desktop",
         "vendor",
         "LICENSE",
         "README.md",

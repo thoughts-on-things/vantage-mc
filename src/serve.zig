@@ -13,8 +13,28 @@ const std = @import("std");
 const builtin = @import("builtin");
 const viewer = @import("viewer_assets");
 
+/// A dynamic response a {@link Producer} synthesized for a request path.
+pub const Produced = struct {
+    body: []const u8,
+    content_type: []const u8,
+};
+
+/// An on-demand content source (the `vantage live` server): given a
+/// manifest-relative path, synthesize its bytes — bake a tile, build the live
+/// manifest or texture atlas — or return null to fall through to static file
+/// serving. `arena` is a per-request arena, freed after the response is sent.
+pub const Producer = struct {
+    ctx: *anyopaque,
+    func: *const fn (ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, path: []const u8) anyerror!?Produced,
+
+    fn produce(self: Producer, io: std.Io, arena: std.mem.Allocator, path: []const u8) !?Produced {
+        return self.func(self.ctx, io, arena, path);
+    }
+};
+
 pub const Options = struct {
-    /// The render output directory to serve (holds manifest.json).
+    /// The render output directory to serve (holds manifest.json). With a live
+    /// `producer` it doubles as the on-demand tile cache.
     dir: []const u8,
     /// "VANT" on a phone keypad. High enough to be free, stable enough to bookmark.
     port: u16 = 8268,
@@ -22,6 +42,9 @@ pub const Options = struct {
     host: []const u8 = "127.0.0.1",
     /// Launch the default browser at the served URL once listening.
     open: bool = false,
+    /// On-demand content source. When set, requests it owns (the live manifest,
+    /// atlas, and un-cached tiles) are synthesized instead of read from disk.
+    producer: ?Producer = null,
 };
 
 pub fn run(io: std.Io, arena: std.mem.Allocator, opts: Options) !void {
@@ -46,7 +69,9 @@ pub fn run(io: std.Io, arena: std.mem.Allocator, opts: Options) !void {
     const url_host = if (std.mem.eql(u8, opts.host, "0.0.0.0")) "127.0.0.1" else opts.host;
     const url = try std.fmt.allocPrint(arena, "http://{s}:{d}/", .{ url_host, opts.port });
     std.debug.print("serving {s} at {s}  (Ctrl-C to stop)\n", .{ opts.dir, url });
-    if (!has_manifest) std.debug.print(
+    // The live server synthesizes manifest.json on demand, so a missing on-disk
+    // copy is expected — only nudge for the static case.
+    if (!has_manifest and opts.producer == null) std.debug.print(
         "note: no manifest.json in {s} — render first:  vantage render <world-save> --out {s}\n",
         .{ opts.dir, opts.dir },
     );
@@ -68,12 +93,12 @@ pub fn run(io: std.Io, arena: std.mem.Allocator, opts: Options) !void {
         // One detached thread per connection: browsers hold a handful of
         // keep-alive connections open, so serving them sequentially would
         // stall tile streaming. If spawning fails, serve inline.
-        if (std.Thread.spawn(.{}, connection, .{ io, stream, opts.dir })) |t| t.detach() else |_| connection(io, stream, opts.dir);
+        if (std.Thread.spawn(.{}, connection, .{ io, stream, opts.dir, opts.producer })) |t| t.detach() else |_| connection(io, stream, opts.dir, opts.producer);
     }
 }
 
 /// Serve one keep-alive connection until the peer closes it (or errors).
-fn connection(io: std.Io, stream_in: std.Io.net.Stream, dir: []const u8) void {
+fn connection(io: std.Io, stream_in: std.Io.net.Stream, dir: []const u8, producer: ?Producer) void {
     var stream = stream_in;
     defer stream.close(io);
     var rbuf: [16 * 1024]u8 = undefined;
@@ -83,11 +108,11 @@ fn connection(io: std.Io, stream_in: std.Io.net.Stream, dir: []const u8) void {
     var http = std.http.Server.init(&sr.interface, &sw.interface);
     while (true) {
         var req = http.receiveHead() catch return; // peer closed / bad head
-        serveRequest(io, &req, dir) catch return; // write failed: drop the connection
+        serveRequest(io, &req, dir, producer) catch return; // write failed: drop the connection
     }
 }
 
-fn serveRequest(io: std.Io, req: *std.http.Server.Request, dir: []const u8) !void {
+fn serveRequest(io: std.Io, req: *std.http.Server.Request, dir: []const u8, producer: ?Producer) !void {
     if (req.head.method != .GET and req.head.method != .HEAD)
         return req.respond("method not allowed\n", .{ .status = .method_not_allowed });
 
@@ -104,6 +129,21 @@ fn serveRequest(io: std.Io, req: *std.http.Server.Request, dir: []const u8) !voi
             .{ .name = "content-type", .value = mimeType(f.path) },
             .{ .name = "cache-control", .value = if (immutable) "public, max-age=31536000, immutable" else "no-cache" },
         } });
+    }
+
+    // On-demand content (the live server) comes next: after the embedded viewer
+    // (its hashed asset names can't collide) but before static disk, so the live
+    // manifest/atlas always win over any stale copy a prior render left in `dir`.
+    // Anything the producer doesn't own (returns null) falls through to disk.
+    if (producer) |p| {
+        var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena_inst.deinit();
+        if (try p.produce(io, arena_inst.allocator(), target[1..])) |resp| {
+            return req.respond(resp.body, .{ .extra_headers = &.{
+                .{ .name = "content-type", .value = resp.content_type },
+                .{ .name = "cache-control", .value = "no-cache" },
+            } });
+        }
     }
 
     const rel = target[1..];

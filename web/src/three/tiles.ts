@@ -56,6 +56,13 @@ export interface TileManagerOptions {
   maxTiles?: number;
   /** Concurrent tile fetches. Default `4`. */
   concurrency?: number;
+  /** Live/on-demand renders grow the shared texture atlas in viewport order, so
+   *  a fetched tile can reference layers the atlas doesn't have yet. When set,
+   *  the manager widens the atlas (awaiting this) before building a tile that
+   *  needs newer layers, so nothing is ever drawn against a missing-texture
+   *  atlas. Returns the atlas layer count now loaded. Omitted for a
+   *  static/complete render, whose atlas never grows. */
+  ensureAtlas?: (layers: number) => Promise<number>;
 }
 
 /** Live totals across resident tiles. */
@@ -127,9 +134,15 @@ function releaseAfterUpload(geom: THREE.BufferGeometry): void {
 }
 
 export class TileManager {
-  private readonly opts: Required<Omit<TileManagerOptions, 'lowresMaterial' | 'lmMaterial'>>;
+  private readonly opts: Required<Omit<TileManagerOptions, 'lowresMaterial' | 'lmMaterial' | 'ensureAtlas'>>;
   private readonly lowresMaterial: THREE.ShaderMaterial | null;
   private readonly lmMaterial: THREE.ShaderMaterial | null;
+  /** Widens the shared atlas to cover a tile's layers before it's drawn (live
+   *  renders only); null when the atlas is complete. */
+  private readonly ensureAtlas: ((layers: number) => Promise<number>) | null;
+  /** Best-known covered atlas layer count. `Infinity` disables the gate — a
+   *  static render never grows its atlas. */
+  private atlasLayers: number;
   private readonly index = new Map<string, ManifestTile>();
   private readonly records = new Map<string, Record_>();
   private readonly emitter = new Emitter<TileEvents>();
@@ -164,7 +177,7 @@ export class TileManager {
   private maxY = 320;
 
   constructor(options: TileManagerOptions) {
-    const { lowresMaterial, lmMaterial, ...rest } = options;
+    const { lowresMaterial, lmMaterial, ensureAtlas, ...rest } = options;
     this.opts = {
       viewDistance: 768,
       // Sized to fill the whole view-distance disc for 128-block tiles
@@ -176,6 +189,8 @@ export class TileManager {
     };
     this.lowresMaterial = lowresMaterial ?? null;
     this.lmMaterial = lmMaterial ?? null;
+    this.ensureAtlas = ensureAtlas ?? null;
+    this.atlasLayers = ensureAtlas ? (options.manifest.textureLayers ?? 0) : Infinity;
     this.tileBlocks = options.manifest.tileBlocks;
     // Pre-size the shared quad index to the biggest section in the world, so
     // streaming never grows (= re-uploads) it mid-pan.
@@ -551,6 +566,14 @@ export class TileManager {
     try {
       const buffer = await maybeInflate(await this.opts.fetch(ref.path, abort.signal));
       if (this.disposed || rec.state !== 'loading') return; // unloaded mid-fetch
+      // A live server lists every populated tile up front, but some mesh to
+      // nothing (all air / cave-culled / ungenerated) and come back empty. Mark
+      // them empty — no geometry, never retry — instead of choking on a 0-byte
+      // parse. (A batch render just omits such tiles from the manifest.)
+      if (buffer.byteLength === 0) {
+        rec.state = 'empty';
+        return;
+      }
 
       // VTL6 fast path: keep the on-disk quantized encoding as zero-copy views
       // and let the shared QUANTIZED shader dequantize — no per-vertex CPU work
@@ -559,6 +582,19 @@ export class TileManager {
       let meshes: TileMeshes;
       const q = parseTileQuantized(buffer);
       if (q) {
+        // Live render: this tile can reference atlas layers baked after our last
+        // atlas fetch. Widen the atlas before building it, so its textures are
+        // never sampled out of range. (No-op once the atlas covers them.)
+        if (this.ensureAtlas) {
+          let need = 0;
+          for (const arr of [q.solid.layer, q.fluid.layer]) {
+            for (let i = 0; i < arr.length; i++) if (arr[i]! >= need) need = arr[i]! + 1;
+          }
+          if (need > this.atlasLayers) {
+            this.atlasLayers = await this.ensureAtlas(need);
+            if (this.disposed || rec.state !== 'loading') return; // unloaded during the atlas fetch
+          }
+        }
         rec.biomes = summarizeSurfaceBiomes(q.surface, q.biomeNames, this.opts.palette);
         rec.surface = { ...q.surface, biome: q.surface.biome.slice(), height: q.surface.height.slice() };
         meshes = buildQuantizedTileMeshes(q, this.opts.material, this.opts.waterMaterial, this.lmMaterial ?? undefined);

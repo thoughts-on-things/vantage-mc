@@ -53,6 +53,10 @@ export interface WorldManifest {
    *  the viewer polls it, streaming new tiles in as they land. Absent/false in
    *  a finished render. */
   rendering?: boolean;
+  /** True for an on-demand live server (`vantage live`): every populated tile
+   *  is listed up front but baked lazily on first fetch. Implies `rendering`;
+   *  the viewer gates each tile's insertion on the atlas covering its layers. */
+  dynamic?: boolean;
   /** Tiles finished / total, for a live progress readout (progressive only). */
   progress?: { done: number; total: number };
   /** Atlas layer count backing `textures`. When it grows between progressive
@@ -168,6 +172,7 @@ export function parseManifest(data: unknown): WorldManifest {
     ...(typeof maxSectionVerts === 'number' && maxSectionVerts > 0 ? { maxSectionVerts } : {}),
     ...(typeof textureLayers === 'number' && textureLayers > 0 ? { textureLayers } : {}),
     ...(m['rendering'] === true ? { rendering: true } : {}),
+    ...(m['dynamic'] === true ? { dynamic: true } : {}),
     ...(progress ? { progress } : {}),
     ...(spawn ? { spawn } : {}),
     ...(m['caves'] === true ? { caves: true } : {}),

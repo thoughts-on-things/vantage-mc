@@ -121,6 +121,28 @@ The renderer only ever reads the world — it never writes to it. Useful flags:
 - `--light flat|smooth` — bake-time light quality (default `smooth`).
 - `--biome-blend on|off` — vanilla-style biome tint gradients (default `on`).
 
+### Or explore instantly, no full render — `vantage live`
+
+Don't want to wait for a big world to bake? `vantage live` opens it in the
+browser **now** and renders each tile on demand, the moment it scrolls into
+view:
+
+```sh
+vantage live "~/.minecraft/saves/My World" --open   # → http://127.0.0.1:8268/
+```
+
+The whole populated map is listed up front, but a tile is only baked when you
+look at it — so a 24 000-tile world is explorable in seconds instead of an
+hour, with a flat memory footprint (the world stays on disk; only the assets
+and texture atlas are resident). Tiles cache into `--out` (default
+`web/public`) as they bake, so panning back is instant, and the cache doubles
+as a partial `render` you can `serve` later. It takes the same world flags as
+`render` (`--tile-chunks`, `--radius`, `--caves`, `--light`, `--biome-blend`,
+`--gz`) plus `serve`'s `--port` / `--host` / `--open`.
+
+`vantage render` is still the way to produce a self-contained static map to
+deploy; `live` is for exploring one on your own machine without the wait.
+
 ### 3. Deploy anywhere
 
 The output is a static file tree (`manifest.json` + `tiles/` + one texture
@@ -147,6 +169,8 @@ stream tiles into your own three.js scene.
 
 ```sh
 vantage render  <save> [flags]                       # world → tiles + manifest + LOD pyramid
+vantage live    <save> [flags]                       # explore now: tiles baked on demand as you look
+vantage serve   [render-dir] [--port n] [--host addr] [--open]   # host a render + the embedded viewer
 vantage extract [client.jar]                         # populate the asset cache (auto-discovers the jar)
 vantage meshtex <region.mca> <out.vtile> <assets> [cx0 cz0 cx1 cz1]
                                                      # textured mesh of one region window

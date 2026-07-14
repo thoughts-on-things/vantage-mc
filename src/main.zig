@@ -45,6 +45,8 @@ pub fn main(init: std.process.Init) !void {
         return runRender(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "serve")) {
         return runServe(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "live")) {
+        return runLive(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "extract")) {
         return runExtract(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "mesh")) {
@@ -82,6 +84,12 @@ fn printUsage() void {
         \\      View a render in your browser — a local web server with the viewer
         \\      built in (default dir: web/public, port: 8268). --open launches the
         \\      browser; --host 0.0.0.0 shares the map on your local network.
+        \\  vantage live    <world-save-dir> [--out <dir>] [--tile-chunks <n>] [--radius <chunks>]
+        \\                  [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
+        \\                  [--gz <1..12>] [--port <n>] [--host <addr>] [--open]
+        \\      Open a world in the browser NOW — no full pre-render. Every tile is
+        \\      listed up front and baked on demand as it scrolls into view, caching
+        \\      into --out (default web/public) so panning back is instant.
         \\  vantage extract [client.jar]
         \\      Extract the assets a render needs into ~/.cache/vantage/assets/<version>.
         \\      With no argument, uses the newest jar in your .minecraft/versions.
@@ -414,6 +422,126 @@ fn dataRootFromAssets(a: std.mem.Allocator, assets: []const u8) []const u8 {
     return std.fmt.allocPrint(a, "{s}data/minecraft", .{p[0 .. p.len - suffix.len]}) catch "";
 }
 
+/// A world located and indexed: its region directory + extracted assets, the
+/// region location tables (payloads stream per tile), the populated-chunk set,
+/// spawn, and the centre chunk the `--radius` cap and spawn-outward order pivot
+/// on. Shared by `render` (batch) and `live` (on-demand).
+const WorldLoad = struct {
+    region_dir: []const u8,
+    assets: []const u8,
+    loaded: []const world.LoadedRegion,
+    bounds: world.ChunkBounds,
+    populated: std.AutoHashMap(u64, void),
+    spawn: ?[3]i32,
+    centre_cx: i32,
+    centre_cz: i32,
+};
+
+/// Locate a world's region dir + assets (auto-discovering/auto-extracting
+/// assets when not passed) and index it — the setup `render` and `live` share.
+/// Returns a `WorldLoad` with `bounds.count == 0` for an empty world; callers
+/// decide how to report that.
+fn resolveWorld(init: std.process.Init, a: std.mem.Allocator, save: []const u8, assets_opt: ?[]const u8) !WorldLoad {
+    const region_dir = (try world.findRegionDir(a, init.io, save)) orelse {
+        std.debug.print(
+            \\no Minecraft region files found under:
+            \\  {s}
+            \\Point me at a world save folder (the one with level.dat), e.g.
+            \\  ~/Library/Application Support/minecraft/saves/<World>
+            \\
+        , .{save});
+        return error.NoRegions;
+    };
+
+    const home = init.environ_map.get("HOME") orelse
+        init.environ_map.get("USERPROFILE") orelse ""; // Windows has no HOME
+    const assets = assets_opt orelse (try findAssets(a, init.io, home)) orelse
+        (try autoExtract(init, a, home)) orelse {
+        std.debug.print(
+            \\no extracted assets found, and no Minecraft installation to extract from.
+            \\Point `vantage extract` at any client jar first:
+            \\  vantage extract <path/to/client.jar>    (or pass --assets <assets/minecraft dir>)
+            \\
+        , .{});
+        return error.NoAssets;
+    };
+
+    std.debug.print("world:   {s}\nassets:  {s}\n", .{ region_dir, assets });
+
+    const loaded = try world.loadRegions(a, init.io, region_dir);
+    const bounds = world.populatedBounds(loaded);
+    const populated = if (bounds.count == 0)
+        std.AutoHashMap(u64, void).init(a)
+    else
+        try world.populatedChunks(a, loaded);
+    const spawn = world.readSpawn(a, init.io, save);
+
+    // The optional --radius cap and spawn-outward order centre on the spawn
+    // point when known (that's where the interesting builds are), else the
+    // populated centre.
+    const centre_cx: i32 = if (spawn) |s| @divFloor(s[0], 16) else @divFloor(bounds.min_cx + bounds.max_cx, 2);
+    const centre_cz: i32 = if (spawn) |s| @divFloor(s[2], 16) else @divFloor(bounds.min_cz + bounds.max_cz, 2);
+
+    return .{
+        .region_dir = region_dir,
+        .assets = assets,
+        .loaded = loaded,
+        .bounds = bounds,
+        .populated = populated,
+        .spawn = spawn,
+        .centre_cx = centre_cx,
+        .centre_cz = centre_cz,
+    };
+}
+
+/// The tiles containing at least one populated chunk (within `--radius` of the
+/// centre, if set), sorted spawn-outward: nearest-to-centre first so a
+/// progressive/on-demand view blooms from where the builds are. Ties break on
+/// (z, x) for a deterministic order.
+fn enumerateTilesSpawnOutward(
+    a: std.mem.Allocator,
+    populated: std.AutoHashMap(u64, void),
+    radius: i32,
+    centre_cx: i32,
+    centre_cz: i32,
+    tile_chunks: i32,
+) ![]u64 {
+    var tile_set = std.AutoHashMap(u64, void).init(a);
+    var pit = populated.keyIterator();
+    while (pit.next()) |key| {
+        const cx: i32 = @bitCast(@as(u32, @truncate(key.* >> 32)));
+        const cz: i32 = @bitCast(@as(u32, @truncate(key.*)));
+        if (radius > 0 and (@abs(cx - centre_cx) > radius or @abs(cz - centre_cz) > radius)) continue;
+        try tile_set.put(world.packChunk(@divFloor(cx, tile_chunks), @divFloor(cz, tile_chunks)), {});
+    }
+    var list: std.ArrayList(u64) = .empty;
+    var tit = tile_set.keyIterator();
+    while (tit.next()) |k| try list.append(a, k.*);
+    const keys = list.items;
+
+    const centre_tx = @divFloor(centre_cx, tile_chunks);
+    const centre_tz = @divFloor(centre_cz, tile_chunks);
+    const SortCtx = struct { tx: i32, tz: i32 };
+    std.mem.sort(u64, keys, SortCtx{ .tx = centre_tx, .tz = centre_tz }, struct {
+        fn lt(c: SortCtx, x: u64, y: u64) bool {
+            const xx: i32 = @bitCast(@as(u32, @truncate(x >> 32)));
+            const xz: i32 = @bitCast(@as(u32, @truncate(x)));
+            const yx: i32 = @bitCast(@as(u32, @truncate(y >> 32)));
+            const yz: i32 = @bitCast(@as(u32, @truncate(y)));
+            const dx1: i64 = xx - c.tx;
+            const dz1: i64 = xz - c.tz;
+            const dx2: i64 = yx - c.tx;
+            const dz2: i64 = yz - c.tz;
+            const d1 = dx1 * dx1 + dz1 * dz1;
+            const d2 = dx2 * dx2 + dz2 * dz2;
+            if (d1 != d2) return d1 < d2;
+            if (xz != yz) return xz < yz;
+            return xx < yx;
+        }
+    }.lt);
+    return keys;
+}
+
 /// `vantage render <save-dir>` — the friendly entry point: auto-discover the
 /// world's region directory and the extracted assets, then render the WHOLE
 /// populated world as a grid of streamable tiles + a manifest. Each tile
@@ -460,121 +588,53 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         }
     }
 
-    const region_dir = (try world.findRegionDir(a, init.io, save)) orelse {
-        std.debug.print(
-            \\no Minecraft region files found under:
-            \\  {s}
-            \\Point me at a world save folder (the one with level.dat), e.g.
-            \\  ~/Library/Application Support/minecraft/saves/<World>
-            \\
-        , .{save});
-        return error.NoRegions;
-    };
-
-    const home = init.environ_map.get("HOME") orelse
-        init.environ_map.get("USERPROFILE") orelse ""; // Windows has no HOME
-    const assets = assets_opt orelse (try findAssets(a, init.io, home)) orelse
-        (try autoExtract(init, a, home)) orelse {
-        std.debug.print(
-            \\no extracted assets found, and no Minecraft installation to extract from.
-            \\Point `vantage extract` at any client jar first:
-            \\  vantage extract <path/to/client.jar>    (or pass --assets <assets/minecraft dir>)
-            \\
-        , .{});
-        return error.NoAssets;
-    };
-
-    std.debug.print("world:   {s}\nassets:  {s}\n", .{ region_dir, assets });
-
-    const loaded = try world.loadRegions(a, init.io, region_dir);
-    const bounds = world.populatedBounds(loaded);
-    if (bounds.count == 0) {
+    const wl = try resolveWorld(init, a, save, assets_opt);
+    if (wl.bounds.count == 0) {
         std.debug.print("no populated chunks found.\n", .{});
         return;
     }
-    const populated = try world.populatedChunks(a, loaded);
-    const spawn = world.readSpawn(a, init.io, save);
+    const loaded = wl.loaded;
+    const bounds = wl.bounds;
+    const spawn = wl.spawn;
+    const assets = wl.assets;
 
-    // The optional --radius cap centres on the spawn point when known (that's
-    // where the interesting builds are), else the populated centre.
-    const centre_cx: i32 = if (spawn) |s| @divFloor(s[0], 16) else @divFloor(bounds.min_cx + bounds.max_cx, 2);
-    const centre_cz: i32 = if (spawn) |s| @divFloor(s[2], 16) else @divFloor(bounds.min_cz + bounds.max_cz, 2);
-
-    // Enumerate the tiles that contain at least one populated chunk. Sparse
-    // worlds (exploration trails across hundreds of regions) stay proportional
-    // to what exists, not to the bounding box.
-    var tile_set = std.AutoHashMap(u64, void).init(a);
-    var pit = populated.keyIterator();
-    while (pit.next()) |key| {
-        const cx: i32 = @bitCast(@as(u32, @truncate(key.* >> 32)));
-        const cz: i32 = @bitCast(@as(u32, @truncate(key.*)));
-        if (radius > 0 and (@abs(cx - centre_cx) > radius or @abs(cz - centre_cz) > radius)) continue;
-        try tile_set.put(world.packChunk(@divFloor(cx, tile_chunks), @divFloor(cz, tile_chunks)), {});
-    }
-    var tile_keys_list: std.ArrayList(u64) = .empty;
-    var tit = tile_set.keyIterator();
-    while (tit.next()) |k| try tile_keys_list.append(a, k.*);
-    const tile_keys = tile_keys_list.items;
-    // Render spawn-outward: nearest-to-spawn tiles first, so a progressive
-    // render blooms from where the interesting builds are instead of sweeping in
-    // from a corner. Ties break on (z, x) so the order is still deterministic.
-    const centre_tx = @divFloor(centre_cx, tile_chunks);
-    const centre_tz = @divFloor(centre_cz, tile_chunks);
-    const SortCtx = struct { tx: i32, tz: i32 };
-    std.mem.sort(u64, tile_keys, SortCtx{ .tx = centre_tx, .tz = centre_tz }, struct {
-        fn lt(c: SortCtx, x: u64, y: u64) bool {
-            const xx: i32 = @bitCast(@as(u32, @truncate(x >> 32)));
-            const xz: i32 = @bitCast(@as(u32, @truncate(x)));
-            const yx: i32 = @bitCast(@as(u32, @truncate(y >> 32)));
-            const yz: i32 = @bitCast(@as(u32, @truncate(y)));
-            const dx1: i64 = xx - c.tx;
-            const dz1: i64 = xz - c.tz;
-            const dx2: i64 = yx - c.tx;
-            const dz2: i64 = yz - c.tz;
-            const d1 = dx1 * dx1 + dz1 * dz1;
-            const d2 = dx2 * dx2 + dz2 * dz2;
-            if (d1 != d2) return d1 < d2;
-            if (xz != yz) return xz < yz;
-            return xx < yx;
-        }
-    }.lt);
+    // The tiles that contain at least one populated chunk, sorted spawn-outward.
+    // Sparse worlds (exploration trails across hundreds of regions) stay
+    // proportional to what exists, not to the bounding box.
+    const tile_keys = try enumerateTilesSpawnOutward(a, wl.populated, radius, wl.centre_cx, wl.centre_cz, tile_chunks);
 
     std.debug.print("regions: {d} files · {d} populated chunks · extent {d}×{d} chunks · {d} tiles of {d}×{d} chunks\n", .{
         loaded.len,    bounds.count, bounds.spanX(), bounds.spanZ(),
         tile_keys.len, tile_chunks,  tile_chunks,
     });
 
-    // Long-lived shared state: the model resolver (+ cross-tile memo), texture
-    // builder (one texture array for every tile), biome registry/colormaps/lang,
-    // and the world-level biome table that keeps per-vertex biome ids globally
-    // consistent across tiles. Tiles render on worker threads, so everything
-    // long-lived allocates through `sa` — a mutex-guarded view of the run arena
-    // — and each shared cache takes its own lock around structural mutation.
-    var locked: LockedAllocator = .{ .child = a, .io = init.io };
-    const sa = locked.allocator();
+    // ---- parallel tile rendering --------------------------------------------
+    // Workers pull tile indices from an atomic counter; each renders into its
+    // own slot of `results`, so the manifest keeps its deterministic (z,x)
+    // order no matter how tiles interleave. Peak memory is one tile's working
+    // set per thread (each worker keeps a reusable arena).
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const thread_count = @max(1, @min((try parseThreads(args)) orelse cpu_count, tile_keys.len));
 
-    var resolver_lock: std.Io.Mutex = .init;
-    var memo = std.StringHashMap([]model.ResolvedModel).init(sa);
-    const resolver: model.Resolver = .{ .arena = sa, .io = init.io, .root = assets, .memo = &memo, .lock = &resolver_lock };
-    var builder = try texture.Builder.init(sa, init.io, assets);
-    const maps = biome.Colormaps.load(a, init.io, assets);
-    const data_root = dataRootFromAssets(a, assets);
-    var reg = biome.Registry.init(sa, init.io, data_root);
-    const names = lang.Lang.load(a, init.io, assets);
-
-    var world_mutex: std.Io.Mutex = .init;
-    var world_raw: std.ArrayList([]const u8) = .empty; // biome resource names, id-indexed
-    var world_display: std.ArrayList([]const u8) = .empty; // legend labels, id-indexed
-    var world_biome_ids = std.StringHashMap(u16).init(sa);
-    try world_raw.append(sa, "");
-    try world_display.append(sa, "");
+    // Long-lived shared bake state (resolver + memo, atlas, biome
+    // registry/colormaps/lang, world biome table). When tiles already run in
+    // parallel each tile meshes single-threaded; a one-worker render lets each
+    // tile use every core.
+    const sh = try setupShared(init.io, a, assets, loaded, .{
+        .tile_chunks = tile_chunks,
+        .out_dir = out_dir,
+        .quality = quality,
+        .blend_biomes = blend_biomes,
+        .cave_y = cave_y,
+        .gz_level = gz_level,
+        .mesh_threads = if (thread_count > 1) 1 else 0,
+    });
 
     var manifest_tiles: std.ArrayList(TileEntry) = .empty;
 
     // Lowres LOD source data: every tile also yields a per-column color map
     // (kept for the whole run — ~80 KB per tile), downsampled into the quadtree
     // pyramid after the main loop.
-    var surf_colors = lowres.SurfaceColors.init(sa, resolver, &builder, maps, &reg);
     var color_maps = std.AutoHashMap(u64, *lowres.ColorMap).init(a);
     const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
 
@@ -586,14 +646,6 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     const tiles_node = root.start("rendering tiles", tile_keys.len);
 
     const t0 = std.Io.Timestamp.now(init.io, .awake);
-
-    // ---- parallel tile rendering --------------------------------------------
-    // Workers pull tile indices from an atomic counter; each renders into its
-    // own slot of `results`, so the manifest keeps its deterministic (z,x)
-    // order no matter how tiles interleave. Peak memory is one tile's working
-    // set per thread (each worker keeps a reusable arena).
-    const cpu_count = std.Thread.getCpuCount() catch 4;
-    const thread_count = @max(1, @min((try parseThreads(args)) orelse cpu_count, tile_keys.len));
 
     const results = try a.alloc(TileResult, tile_keys.len);
     for (results) |*r| r.* = .{};
@@ -609,27 +661,8 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var live: Live = .{};
 
     var ctx: RenderCtx = .{
-        .io = init.io,
-        .sa = sa,
-        .loaded = loaded,
+        .shared = sh,
         .tile_keys = tile_keys,
-        .tile_chunks = tile_chunks,
-        .out_dir = out_dir,
-        .quality = quality,
-        .blend_biomes = blend_biomes,
-        .cave_y = cave_y,
-        .gz_level = gz_level,
-        .mesh_threads = if (thread_count > 1) 1 else 0,
-        .resolver = resolver,
-        .builder = &builder,
-        .maps = maps,
-        .reg = &reg,
-        .names = &names,
-        .surf_colors = &surf_colors,
-        .world_mutex = &world_mutex,
-        .world_raw = &world_raw,
-        .world_display = &world_display,
-        .world_biome_ids = &world_biome_ids,
         .results = results,
         .next = &next_tile,
         .done = &done_tiles,
@@ -645,9 +678,9 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         .io = init.io,
         .out_dir = out_dir,
         .live = &live,
-        .builder = &builder,
-        .world_mutex = &world_mutex,
-        .world_display = &world_display,
+        .builder = &sh.builder,
+        .world_mutex = &sh.world_mutex,
+        .world_display = &sh.world_display,
         .done = &done_tiles,
         .total = tile_keys.len,
         .spawn = spawn,
@@ -839,7 +872,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     lod_node.end();
 
     const tex_node = root.start("writing textures + manifest", 0);
-    const arr = try builder.finish();
+    const arr = try sh.builder.finish();
     // Atomic (temp + rename) like the progressive flusher: a browser still
     // polling as the render finishes never reads a half-rewritten atlas/manifest.
     try writeAtlas(init.io, a, out_dir, arr);
@@ -847,7 +880,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     const manifest = try buildManifest(a, .{
         .tile_chunks = tile_chunks,
         .spawn = spawn,
-        .biomes = world_display.items,
+        .biomes = sh.world_display.items,
         .tiles = manifest_tiles.items,
         .lowres = lowres_levels.items,
         .max_section_verts = max_section_verts,
@@ -877,8 +910,8 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     , .{
         bounds.count,
         stats.chunks_loaded,
-        memo.count(),
-        world_raw.items.len - 1,
+        sh.memo.count(),
+        sh.world_raw.items.len - 1,
         manifest_tiles.items.len,
         @as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0),
         @as(f64, @floatFromInt(total_raw_bytes)) / (1024.0 * 1024.0),
@@ -1065,36 +1098,98 @@ fn writeAtlas(io: std.Io, a: std.mem.Allocator, dir: []const u8, arr: texture.Ar
     try atomicWrite(io, a, dir, "terrain.vtexarr", blob);
 }
 
-/// Everything the tile workers share. Fields are either immutable for the
-/// duration of the parallel section or guarded by the lock noted on their type
-/// (resolver memo, texture builder, biome registry, surface-color memo) or by
-/// `world_mutex` (the world-level biome table).
-const RenderCtx = struct {
+/// Long-lived, thread-safe state shared by every tile bake — built once by
+/// `setupShared`, then used by BOTH the batch `render` command and the
+/// on-demand `live` server. It owns the caches whose addresses the bake path
+/// captures (resolver memo, texture atlas, biome registry, world biome table),
+/// so it lives on the heap and travels as a single `*Shared`: pointers into it
+/// stay valid for the process lifetime. Concurrent bakes are safe — every
+/// mutating cache takes its own lock (the atlas/registry/resolver) or the
+/// `world_mutex` (the world-level biome table), and `sa` is a locked view of
+/// the run arena.
+const Shared = struct {
     io: std.Io,
-    /// Locked view of the run arena — safe for cross-thread allocations.
-    sa: std.mem.Allocator,
+    /// The run arena (single-threaded); `sa` is its locked, thread-safe view.
+    base: std.mem.Allocator,
+    sa: std.mem.Allocator = undefined,
     loaded: []const world.LoadedRegion,
-    tile_keys: []const u64,
     tile_chunks: i32,
     out_dir: []const u8,
     quality: mesh.LightQuality,
     blend_biomes: bool,
     cave_y: ?i32,
-    /// libdeflate gzip level for tile payloads (1 fastest .. 12 smallest).
     gz_level: i32,
     /// Thread budget for each tile's internal mesh pass: 1 when tiles already
-    /// run in parallel, 0 (= all cores) for a single-worker render.
+    /// run in parallel, 0 (= all cores) for a single-worker bake.
     mesh_threads: usize,
-    resolver: model.Resolver,
-    builder: *texture.Builder,
-    maps: biome.Colormaps,
-    reg: *biome.Registry,
-    names: *const lang.Lang,
-    surf_colors: *lowres.SurfaceColors,
-    world_mutex: *std.Io.Mutex,
-    world_raw: *std.ArrayList([]const u8),
-    world_display: *std.ArrayList([]const u8),
-    world_biome_ids: *std.StringHashMap(u16),
+
+    locked: LockedAllocator = undefined,
+    resolver_lock: std.Io.Mutex = .init,
+    memo: std.StringHashMap([]model.ResolvedModel) = undefined,
+    resolver: model.Resolver = undefined,
+    builder: texture.Builder = undefined,
+    maps: biome.Colormaps = undefined,
+    reg: biome.Registry = undefined,
+    names: lang.Lang = undefined,
+    surf_colors: lowres.SurfaceColors = undefined,
+
+    /// The world-level biome table (guarded by `world_mutex`): resource names
+    /// and legend labels, id-indexed, kept globally consistent across tiles.
+    world_mutex: std.Io.Mutex = .init,
+    world_raw: std.ArrayList([]const u8) = .empty,
+    world_display: std.ArrayList([]const u8) = .empty,
+    world_biome_ids: std.StringHashMap(u16) = undefined,
+};
+
+/// Per-render knobs for `setupShared` (everything not derived from the world).
+const SharedConfig = struct {
+    tile_chunks: i32,
+    out_dir: []const u8,
+    quality: mesh.LightQuality,
+    blend_biomes: bool,
+    cave_y: ?i32,
+    gz_level: i32,
+    mesh_threads: usize,
+};
+
+/// Build the long-lived bake context once: model resolver (+ memo), texture
+/// atlas, biome registry/colormaps/lang, and the world-level biome table. The
+/// struct is heap-allocated on `a` so every self-reference (`&sh.memo`,
+/// `&sh.builder`, …) stays valid after this returns.
+fn setupShared(io: std.Io, a: std.mem.Allocator, assets: []const u8, loaded: []const world.LoadedRegion, cfg: SharedConfig) !*Shared {
+    const sh = try a.create(Shared);
+    sh.* = .{
+        .io = io,
+        .base = a,
+        .loaded = loaded,
+        .tile_chunks = cfg.tile_chunks,
+        .out_dir = cfg.out_dir,
+        .quality = cfg.quality,
+        .blend_biomes = cfg.blend_biomes,
+        .cave_y = cfg.cave_y,
+        .gz_level = cfg.gz_level,
+        .mesh_threads = cfg.mesh_threads,
+    };
+    sh.locked = .{ .child = a, .io = io };
+    sh.sa = sh.locked.allocator();
+    sh.memo = std.StringHashMap([]model.ResolvedModel).init(sh.sa);
+    sh.resolver = .{ .arena = sh.sa, .io = io, .root = assets, .memo = &sh.memo, .lock = &sh.resolver_lock };
+    sh.builder = try texture.Builder.init(sh.sa, io, assets);
+    sh.maps = biome.Colormaps.load(a, io, assets);
+    sh.reg = biome.Registry.init(sh.sa, io, dataRootFromAssets(a, assets));
+    sh.names = lang.Lang.load(a, io, assets);
+    sh.world_biome_ids = std.StringHashMap(u16).init(sh.sa);
+    try sh.world_raw.append(sh.sa, ""); // id 0 = the "no-data" sentinel
+    try sh.world_display.append(sh.sa, "");
+    sh.surf_colors = lowres.SurfaceColors.init(sh.sa, sh.resolver, &sh.builder, sh.maps, &sh.reg);
+    return sh;
+}
+
+/// Everything the tile workers share for a batch render: the long-lived bake
+/// context plus this run's work queue, result slots, and progress plumbing.
+const RenderCtx = struct {
+    shared: *Shared,
+    tile_keys: []const u64,
     results: []TileResult,
     next: *std.atomic.Value(usize),
     /// Count of finished tiles (any outcome) — drives the plain-text
@@ -1149,12 +1244,12 @@ fn tileWorker(ctx: *RenderCtx) void {
         // section — one append, once per tile) so the flusher can stream it out.
         const r = &ctx.results[idx];
         if (r.written) {
-            ctx.live.mutex.lockUncancelable(ctx.io);
-            ctx.live.completed.append(ctx.sa, r.entry) catch {};
+            ctx.live.mutex.lockUncancelable(ctx.shared.io);
+            ctx.live.completed.append(ctx.shared.sa, r.entry) catch {};
             ctx.live.max_section_verts = @max(ctx.live.max_section_verts, @max(r.solid_verts, r.fluid_verts));
             ctx.live.y_min = @min(ctx.live.y_min, r.y_min);
             ctx.live.y_max = @max(ctx.live.y_max, r.y_max);
-            ctx.live.mutex.unlock(ctx.io);
+            ctx.live.mutex.unlock(ctx.shared.io);
         }
         ctx.progress.completeOne();
         const done = ctx.done.fetchAdd(1, .monotonic) + 1;
@@ -1169,14 +1264,27 @@ fn tileWorker(ctx: *RenderCtx) void {
     }
 }
 
-/// Render tile `idx`: assemble its chunk window (+1 apron), remap biome ids
-/// onto the world table, mesh, serialize, gzip, and write the `.vtile`.
+/// Render tile `idx` of a batch run into its result slot.
 fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
-    const res = &ctx.results[idx];
     const key = ctx.tile_keys[idx];
-    const tile_chunks = ctx.tile_chunks;
     const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
     const tz: i32 = @bitCast(@as(u32, @truncate(key)));
+    // The pyramid consumes every tile's colour map, so retain it (`cmap = true`).
+    try bakeTile(ctx.shared, ta, tx, tz, true, &ctx.results[idx]);
+}
+
+/// Bake tile `(tx,tz)`: assemble its chunk window (+1 apron), remap biome ids
+/// onto the world table, compute light, mesh, serialize, gzip, and write the
+/// `.vtile`. Fills `res` with the outcome (bytes, verts, y-extent, timings);
+/// `res.written` stays false for a tile that meshes to nothing (all air /
+/// cave-culled), which never lands a file. Shared caches are thread-safe, so
+/// this runs concurrently from the batch workers OR from live-server request
+/// threads. `keep_cmap` retains the lowres colour map (the batch pyramid needs
+/// it; the live server, which builds no pyramid, passes false so nothing
+/// accumulates across a long session).
+fn bakeTile(sh: *Shared, ta: std.mem.Allocator, tx: i32, tz: i32, keep_cmap: bool, res: *TileResult) !void {
+    const io = sh.io;
+    const tile_chunks = sh.tile_chunks;
 
     // Window = the tile's chunks plus a 1-chunk apron on every side.
     const cx0 = tx * tile_chunks - 1;
@@ -1184,9 +1292,9 @@ fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
     const cx1 = (tx + 1) * tile_chunks;
     const cz1 = (tz + 1) * tile_chunks;
 
-    const t_r0 = std.Io.Timestamp.now(ctx.io, .awake);
-    const g = try world.assembleWindow(ta, ctx.io, ctx.loaded, cx0, cz0, cx1, cz1, &res.stats, null);
-    res.read_ms = t_r0.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).toMilliseconds();
+    const t_r0 = std.Io.Timestamp.now(io, .awake);
+    const g = try world.assembleWindow(ta, io, sh.loaded, cx0, cz0, cx1, cz1, &res.stats, null);
+    res.read_ms = t_r0.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
     if (g.ids.len == 0) return;
 
     // Remap this grid's interned biome ids onto the world-level table so every
@@ -1198,23 +1306,23 @@ fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
     var raw_names: [][]const u8 = &.{};
     var display_names: [][]const u8 = &.{};
     {
-        ctx.world_mutex.lockUncancelable(ctx.io);
-        defer ctx.world_mutex.unlock(ctx.io);
+        sh.world_mutex.lockUncancelable(io);
+        defer sh.world_mutex.unlock(io);
         if (remap.len > 0) remap[0] = 0;
         for (g.biome_names[1..], 1..) |bn, gi| {
-            const gop = try ctx.world_biome_ids.getOrPut(bn);
+            const gop = try sh.world_biome_ids.getOrPut(bn);
             if (!gop.found_existing) {
-                const dup = try ctx.sa.dupe(u8, bn); // bn lives in the tile arena
+                const dup = try sh.sa.dupe(u8, bn); // bn lives in the tile arena
                 gop.key_ptr.* = dup;
-                const id: u16 = @intCast(ctx.world_raw.items.len);
-                try ctx.world_raw.append(ctx.sa, dup);
-                try ctx.world_display.append(ctx.sa, ctx.names.biomeName(ctx.sa, dup));
+                const id: u16 = @intCast(sh.world_raw.items.len);
+                try sh.world_raw.append(sh.sa, dup);
+                try sh.world_display.append(sh.sa, sh.names.biomeName(sh.sa, dup));
                 gop.value_ptr.* = id;
             }
             remap[gi] = gop.value_ptr.*;
         }
-        raw_names = try ta.dupe([]const u8, ctx.world_raw.items);
-        display_names = try ta.dupe([]const u8, ctx.world_display.items);
+        raw_names = try ta.dupe([]const u8, sh.world_raw.items);
+        display_names = try ta.dupe([]const u8, sh.world_display.items);
     }
     for (g.biome_ids) |*b| b.* = remap[b.*];
     var g2 = g;
@@ -1233,28 +1341,30 @@ fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
     };
     if (interior.x0 >= interior.x1 or interior.z0 >= interior.z1) return;
 
-    const t_m0 = std.Io.Timestamp.now(ctx.io, .awake);
-    const built = try mesh.buildTextured(ta, g2, ctx.resolver, ctx.builder, ctx.maps, ctx.reg, ctx.quality, ctx.blend_biomes, interior, ctx.cave_y, ctx.mesh_threads, null);
+    const t_m0 = std.Io.Timestamp.now(io, .awake);
+    const built = try mesh.buildTextured(ta, g2, sh.resolver, &sh.builder, sh.maps, &sh.reg, sh.quality, sh.blend_biomes, interior, sh.cave_y, sh.mesh_threads, null);
     res.light_ms = built.light_ms;
-    res.mesh_ms = t_m0.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).toMilliseconds() - built.light_ms;
+    res.mesh_ms = t_m0.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() - built.light_ms;
     if (built.solid.vertex_count == 0 and built.fluid.vertex_count == 0) return;
 
     const surface = try grid.buildSurface(ta, g2, interior);
     const geo = try tile.serializeWithLightmap(ta, built, surface, display_names);
 
     // The tile's lowres source map (long-lived: feeds the pyramid later).
-    const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
-    const cmap = try ctx.sa.create(lowres.ColorMap);
-    cmap.* = try lowres.buildColorMap(ctx.sa, g2, interior, ctx.surf_colors, @intCast(bx0), @intCast(bz0), @intCast(tile_blocks));
-    res.cmap = cmap;
+    if (keep_cmap) {
+        const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
+        const cmap = try sh.sa.create(lowres.ColorMap);
+        cmap.* = try lowres.buildColorMap(sh.sa, g2, interior, &sh.surf_colors, @intCast(bx0), @intCast(bz0), @intCast(tile_blocks));
+        res.cmap = cmap;
+    }
 
     // Tiles ship gzip-wrapped (~8× smaller): any static host can serve
     // them and the viewer inflates via native DecompressionStream.
-    const t_w0 = std.Io.Timestamp.now(ctx.io, .awake);
-    const zipped = try compress.gzipCompress(ta, geo, ctx.gz_level);
-    const tile_path = try std.fmt.allocPrint(ta, "{s}/tiles/t.{d}.{d}.vtile", .{ ctx.out_dir, tx, tz });
-    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = tile_path, .data = zipped });
-    res.write_ms = t_w0.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).toMilliseconds();
+    const t_w0 = std.Io.Timestamp.now(io, .awake);
+    const zipped = try compress.gzipCompress(ta, geo, sh.gz_level);
+    const tile_path = try std.fmt.allocPrint(ta, "{s}/tiles/t.{d}.{d}.vtile", .{ sh.out_dir, tx, tz });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tile_path, .data = zipped });
+    res.write_ms = t_w0.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
 
     res.entry = .{ .tx = tx, .tz = tz, .bytes = zipped.len };
     res.y_min = g2.min_y;
@@ -1303,6 +1413,11 @@ const ManifestInput = struct {
     /// texture array when this grows between progressive polls (layers are
     /// append-only, so a superset is always safe for already-loaded tiles).
     texture_layers: u32 = 0,
+    /// On-demand live server (`vantage live`): every populated tile is listed
+    /// up front but baked lazily on first fetch, so the viewer gates a tile's
+    /// insertion on the atlas covering its layers (the atlas grows in
+    /// viewport order, not tile-list order). Implies `rendering`.
+    dynamic: bool = false,
 };
 
 /// Whether `name` is a render-owned tile file: `t.<x>.<z>.vtile` (hires) or
@@ -1377,6 +1492,17 @@ fn sweepStaleTiles(
     return removed;
 }
 
+test "parseTilePath extracts tile coords, rejects everything else" {
+    try std.testing.expectEqual([2]i32{ 0, 0 }, parseTilePath("tiles/t.0.0.vtile").?);
+    try std.testing.expectEqual([2]i32{ -3, 12 }, parseTilePath("tiles/t.-3.12.vtile").?);
+    try std.testing.expect(parseTilePath("manifest.json") == null);
+    try std.testing.expect(parseTilePath("terrain.vtexarr") == null);
+    try std.testing.expect(parseTilePath("tiles/l3.0.0.vlr") == null); // lowres, not hires
+    try std.testing.expect(parseTilePath("tiles/t.0.vtile") == null); // one coord
+    try std.testing.expect(parseTilePath("tiles/t.a.b.vtile") == null); // non-numeric
+    try std.testing.expect(parseTilePath("t.0.0.vtile") == null); // missing tiles/ prefix
+}
+
 test "isTileFileName accepts render-owned tiles and nothing else" {
     try std.testing.expect(isTileFileName("t.0.0.vtile"));
     try std.testing.expect(isTileFileName("t.-12.4.vtile"));
@@ -1402,6 +1528,7 @@ fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
         m.tile_chunks, m.tile_chunks * 16, m.max_section_verts, m.texture_layers,
     });
     if (m.rendering) try out.appendSlice(a, "  \"rendering\": true,\n");
+    if (m.dynamic) try out.appendSlice(a, "  \"dynamic\": true,\n");
     if (m.progress) |p| try out.print(a, "  \"progress\": {{ \"done\": {d}, \"total\": {d} }},\n", .{ p[0], p[1] });
     if (m.caves) try out.appendSlice(a, "  \"caves\": true,\n");
     if (m.y_range) |yr| try out.print(a, "  \"yRange\": {{ \"min\": {d}, \"max\": {d} }},\n", .{ yr[0], yr[1] });
@@ -1513,6 +1640,274 @@ fn runServe(init: std.process.Init, a: std.mem.Allocator, args: []const []const 
         }
     }
     return serve.run(init.io, a, opts);
+}
+
+/// On-demand ("live") server state: keeps the world loaded and bakes tiles
+/// lazily as the viewer fetches them, so a huge world is explorable in seconds
+/// with a flat memory footprint — only the region tables + assets stay resident;
+/// each tile bakes into `out_dir` (a session cache) and its working set
+/// evaporates. The bake path and its shared caches (atlas, biome table) are the
+/// same thread-safe ones the batch render uses, so concurrent request-thread
+/// bakes are safe.
+const LiveServer = struct {
+    sh: *Shared,
+    /// Every populated tile, spawn-outward — the manifest lists them all; each
+    /// bakes on first fetch.
+    tile_keys: []const u64,
+    spawn: ?[3]i32,
+
+    /// Guards the session cache ledger + the live manifest aggregates below.
+    mutex: std.Io.Mutex = .init,
+    /// Tiles baked THIS session → gzipped bytes on disk (0 = an empty tile, or
+    /// one that failed to bake: a gap). A tile is served from the on-disk cache
+    /// only when it's here, so the cache always agrees with THIS session's
+    /// atlas — a prior session's tiles, baked against a different atlas layer
+    /// order, are simply re-baked on first fetch.
+    baked: std.AutoHashMap(u64, usize) = undefined,
+    max_section_verts: u64 = 0,
+    y_min: i32 = std.math.maxInt(i32),
+    y_max: i32 = std.math.minInt(i32),
+
+    fn producer(self: *LiveServer) serve.Producer {
+        return .{ .ctx = self, .func = produce };
+    }
+
+    /// Record a finished bake in the session ledger (bytes, and the running
+    /// max-section-verts / y-extent the live manifest reports). `res` is null
+    /// for an empty or failed tile (recorded as 0 bytes so it isn't re-baked).
+    fn record(self: *LiveServer, key: u64, res: ?*const TileResult) void {
+        self.mutex.lockUncancelable(self.sh.io);
+        defer self.mutex.unlock(self.sh.io);
+        self.baked.put(key, if (res) |r| r.entry.bytes else 0) catch {};
+        if (res) |r| {
+            self.max_section_verts = @max(self.max_section_verts, @max(r.solid_verts, r.fluid_verts));
+            self.y_min = @min(self.y_min, r.y_min);
+            self.y_max = @max(self.y_max, r.y_max);
+        }
+    }
+};
+
+/// The `serve.Producer` hook: synthesize the paths the live server owns — the
+/// manifest, the texture atlas, and un-cached tiles — and fall through
+/// (null) to static disk serving for everything else.
+fn produce(ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, path: []const u8) !?serve.Produced {
+    _ = io;
+    const self: *LiveServer = @ptrCast(@alignCast(ctx));
+    if (std.mem.eql(u8, path, "manifest.json"))
+        return .{ .body = try liveManifest(self, arena), .content_type = "application/json" };
+    if (std.mem.eql(u8, path, "terrain.vtexarr"))
+        return .{ .body = try liveAtlas(self, arena), .content_type = "application/octet-stream" };
+    if (parseTilePath(path)) |xz|
+        return .{ .body = try liveTile(self, arena, xz[0], xz[1]), .content_type = "application/octet-stream" };
+    return null; // not ours — static disk serves it (lowres, favicon, …)
+}
+
+/// Parse `tiles/t.<x>.<z>.vtile` → `{x, z}`; null for any other path.
+fn parseTilePath(path: []const u8) ?[2]i32 {
+    const prefix = "tiles/t.";
+    const suffix = ".vtile";
+    if (!std.mem.startsWith(u8, path, prefix) or !std.mem.endsWith(u8, path, suffix)) return null;
+    const mid = path[prefix.len .. path.len - suffix.len];
+    const dot = std.mem.indexOfScalar(u8, mid, '.') orelse return null;
+    const x = std.fmt.parseInt(i32, mid[0..dot], 10) catch return null;
+    const z = std.fmt.parseInt(i32, mid[dot + 1 ..], 10) catch return null;
+    return .{ x, z };
+}
+
+/// Serve one tile: from the session cache if already baked (0 bytes = a valid
+/// empty body), else bake it now. Shared caches self-synchronize, so a rare
+/// concurrent double-fetch of the same fresh tile just bakes it twice
+/// (idempotent). A bake failure becomes a gap (an empty body the viewer marks
+/// empty), never a retry storm.
+fn liveTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32) ![]const u8 {
+    const key = world.packChunk(tx, tz);
+    self.mutex.lockUncancelable(self.sh.io);
+    const hit = self.baked.get(key);
+    self.mutex.unlock(self.sh.io);
+    if (hit) |bytes| return if (bytes == 0) "" else readCachedTile(self, arena, tx, tz);
+
+    var res: TileResult = .{};
+    bakeTile(self.sh, arena, tx, tz, false, &res) catch |e| {
+        std.debug.print("live: tile ({d},{d}) failed: {s} — leaving a gap\n", .{ tx, tz, @errorName(e) });
+        self.record(key, null);
+        return ""; // empty body → the viewer marks it empty, no retry
+    };
+    self.record(key, if (res.written) &res else null);
+    if (!res.written) return ""; // meshed to nothing (all air / cave-culled)
+    return readCachedTile(self, arena, tx, tz);
+}
+
+/// Read a session-cached tile off disk into the request arena (it was written
+/// by THIS session's bake, so it agrees with the current atlas).
+fn readCachedTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32) ![]const u8 {
+    const path = try std.fmt.allocPrint(arena, "{s}/tiles/t.{d}.{d}.vtile", .{ self.sh.out_dir, tx, tz });
+    return std.Io.Dir.cwd().readFileAlloc(self.sh.io, path, arena, .unlimited);
+}
+
+/// Build the live manifest: every populated tile listed (with its baked size,
+/// 0 until fetched), the running atlas/biome/extent state, and progress. Stays
+/// `rendering: true` until every tile has been baked at least once.
+fn liveManifest(self: *LiveServer, arena: std.mem.Allocator) ![]const u8 {
+    const io = self.sh.io;
+    self.mutex.lockUncancelable(io);
+    const tiles = try arena.alloc(TileEntry, self.tile_keys.len);
+    for (self.tile_keys, tiles) |key, *t| {
+        t.* = .{
+            .tx = @bitCast(@as(u32, @truncate(key >> 32))),
+            .tz = @bitCast(@as(u32, @truncate(key))),
+            .bytes = self.baked.get(key) orelse 0,
+        };
+    }
+    const done = self.baked.count();
+    const msv = self.max_section_verts;
+    const ymin = self.y_min;
+    const ymax = self.y_max;
+    self.mutex.unlock(io);
+
+    self.sh.world_mutex.lockUncancelable(io);
+    const biomes = try arena.dupe([]const u8, self.sh.world_display.items);
+    self.sh.world_mutex.unlock(io);
+
+    return buildManifest(arena, .{
+        .tile_chunks = self.sh.tile_chunks,
+        .spawn = self.spawn,
+        .biomes = biomes,
+        .tiles = tiles,
+        .max_section_verts = msv,
+        .caves = self.sh.cave_y == null,
+        .y_range = if (ymin < ymax) .{ ymin, ymax } else null,
+        .rendering = done < self.tile_keys.len,
+        .dynamic = true,
+        .progress = .{ done, self.tile_keys.len },
+        .texture_layers = self.sh.builder.layerCount(),
+    });
+}
+
+/// Serialize + gzip the current atlas into the request arena — a fresh snapshot
+/// per fetch (the viewer re-fetches when a tile needs a layer it lacks).
+fn liveAtlas(self: *LiveServer, arena: std.mem.Allocator) ![]const u8 {
+    const io = self.sh.io;
+    self.sh.builder.mutex.lockUncancelable(io);
+    const arr = self.sh.builder.finishAlloc(arena) catch |e| {
+        self.sh.builder.mutex.unlock(io);
+        return e;
+    };
+    self.sh.builder.mutex.unlock(io);
+    return compress.gzipCompress(arena, try texture.serialize(arena, arr), 6);
+}
+
+/// `vantage live <save-dir> [render flags] [--port n] [--host addr] [--open]` —
+/// open a world in the browser NOW: the whole populated map is listed up front
+/// but each tile is baked on demand as it scrolls into view, so there's no
+/// hour-long pre-render. Tiles cache into `--out` (default web/public), so
+/// panning back is instant.
+fn runLive(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 1) return usage();
+    const save = args[0];
+    var assets_opt: ?[]const u8 = null;
+    var out_dir: []const u8 = "web/public"; // doubles as the on-demand tile cache
+    var tile_chunks: i32 = 8;
+    var radius: i32 = 0;
+    var gz_level: i32 = 6; // live favours bake-and-serve latency over the last few % of size
+    var port: u16 = 8268;
+    var host: []const u8 = "127.0.0.1";
+    var open = false;
+    const quality = try parseLightQuality(args);
+    const blend_biomes = try parseBiomeBlend(args);
+    const cave_y = try parseCaveY(args);
+    var argi: usize = 1;
+    while (argi < args.len) : (argi += 1) {
+        const arg = args[argi];
+        if (std.mem.eql(u8, arg, "--assets")) {
+            assets_opt = try flagValue(args, &argi);
+        } else if (std.mem.eql(u8, arg, "--out")) {
+            out_dir = try flagValue(args, &argi);
+        } else if (std.mem.eql(u8, arg, "--tile-chunks")) {
+            const v = try flagValue(args, &argi);
+            const n = std.fmt.parseInt(i32, v, 10) catch return badValue("--tile-chunks", v, "1..32");
+            tile_chunks = std.math.clamp(n, 1, 32);
+        } else if (std.mem.eql(u8, arg, "--radius")) {
+            const v = try flagValue(args, &argi);
+            radius = std.fmt.parseInt(i32, v, 10) catch return badValue("--radius", v, "<chunks>");
+        } else if (std.mem.eql(u8, arg, "--gz")) {
+            const v = try flagValue(args, &argi);
+            const n = std.fmt.parseInt(i32, v, 10) catch return badValue("--gz", v, "1..12");
+            gz_level = std.math.clamp(n, 1, 12);
+        } else if (std.mem.eql(u8, arg, "--port")) {
+            const v = try flagValue(args, &argi);
+            port = std.fmt.parseInt(u16, v, 10) catch return badValue("--port", v, "1..65535");
+        } else if (std.mem.eql(u8, arg, "--host")) {
+            host = try flagValue(args, &argi);
+        } else if (std.mem.eql(u8, arg, "--open")) {
+            open = true;
+        } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
+            std.mem.eql(u8, arg, "--caves"))
+        {
+            argi += 1; // value parsed by the dedicated scanners above
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            std.debug.print("unknown flag for live: {s} (see `vantage --help`)\n", .{arg});
+            return error.InvalidArgument;
+        }
+    }
+
+    const wl = try resolveWorld(init, a, save, assets_opt);
+    if (wl.bounds.count == 0) {
+        std.debug.print("no populated chunks found.\n", .{});
+        return;
+    }
+    const tile_keys = try enumerateTilesSpawnOutward(a, wl.populated, radius, wl.centre_cx, wl.centre_cz, tile_chunks);
+
+    std.debug.print("regions: {d} files · {d} populated chunks · {d} tiles of {d}×{d} chunks — baked on demand\n", .{
+        wl.loaded.len, wl.bounds.count, tile_keys.len, tile_chunks, tile_chunks,
+    });
+
+    const sh = try setupShared(init.io, a, wl.assets, wl.loaded, .{
+        .tile_chunks = tile_chunks,
+        .out_dir = out_dir,
+        .quality = quality,
+        .blend_biomes = blend_biomes,
+        .cave_y = cave_y,
+        .gz_level = gz_level,
+        // Each tile meshes single-threaded; parallelism comes from serving
+        // several tile fetches (browser connections) at once.
+        .mesh_threads = 1,
+    });
+
+    const tiles_dir = try std.fmt.allocPrint(a, "{s}/tiles", .{out_dir});
+    try std.Io.Dir.cwd().createDirPath(init.io, tiles_dir);
+
+    const server = try a.create(LiveServer);
+    server.* = .{
+        .sh = sh,
+        .tile_keys = tile_keys,
+        .spawn = wl.spawn,
+        .baked = std.AutoHashMap(u64, usize).init(sh.sa),
+    };
+
+    // Seed the nearest tile synchronously: fail fast if assets/pipeline are
+    // broken (rather than per-request in the browser), and start the atlas +
+    // maxSectionVerts non-empty so the very first manifest is well-sized.
+    if (tile_keys.len > 0) {
+        var seed = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer seed.deinit();
+        const tx: i32 = @bitCast(@as(u32, @truncate(tile_keys[0] >> 32)));
+        const tz: i32 = @bitCast(@as(u32, @truncate(tile_keys[0])));
+        var res: TileResult = .{};
+        bakeTile(sh, seed.allocator(), tx, tz, false, &res) catch |e| {
+            std.debug.print("live: initial bake failed ({s}) — check the world/assets\n", .{@errorName(e)});
+            return e;
+        };
+        server.record(world.packChunk(tx, tz), if (res.written) &res else null);
+    }
+
+    std.debug.print("live: rendering on demand — tiles bake as you explore (cache: {s}/tiles)\n", .{out_dir});
+    return serve.run(init.io, a, .{
+        .dir = out_dir,
+        .port = port,
+        .host = host,
+        .open = open,
+        .producer = server.producer(),
+    });
 }
 
 fn runExtract(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {

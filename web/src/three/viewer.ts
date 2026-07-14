@@ -267,6 +267,9 @@ export class VantageViewer {
   // world reloads (the poll checks its manager is still current).
   private progressiveManager: TileManager | null = null;
   private lastTextureLayers = 0;
+  /** An in-flight atlas re-fetch, so the tile-insert gate and the progressive
+   *  poll coalesce onto one request instead of racing separate fetches. */
+  private atlasRefresh: Promise<void> | null = null;
 
   // Biome layer state machine.
   private biomeEnabled = false;
@@ -457,6 +460,10 @@ export class VantageViewer {
       ...(lmShader ? { lmMaterial: lmShader } : {}),
       ...(lowresShader ? { lowresMaterial: lowresShader } : {}),
       palette,
+      // A live/progressive render grows its atlas as tiles bake; gate each
+      // tile's insertion on the atlas covering its layers (a no-op once the
+      // atlas is complete). Returns the layer count now loaded.
+      ...(manifest.rendering ? { ensureAtlas: (n: number) => this.ensureAtlasLayers(source, n).then(() => this.lastTextureLayers) } : {}),
       ...this.options.streaming,
     });
 
@@ -537,18 +544,11 @@ export class VantageViewer {
       }
 
       // Atlas grew (new block textures discovered): re-fetch and widen the
-      // array. Layers are append-only, so resident tiles stay valid.
-      if ((m.textureLayers ?? 0) > this.lastTextureLayers && this.shader) {
-        try {
-          const td = parseTextureArray(await maybeInflate(await source.fetch(m.textures)));
-          if (this.tiles !== manager) return;
-          updateTerrainTextures(this.shader, td);
-          this.hasAnims = td.anims.length > 0;
-          this.lastTextureLayers = m.textureLayers ?? td.layers;
-          this.needsRender = true;
-        } catch {
-          /* keep the old atlas; retry next poll */
-        }
+      // array. Layers are append-only, so resident tiles stay valid. Shares the
+      // coalesced refetch with the on-demand tile-insert gate.
+      if ((m.textureLayers ?? 0) > this.lastTextureLayers) {
+        await this.ensureAtlasLayers(source, m.textureLayers ?? 0);
+        if (this.tiles !== manager) return;
       }
 
       // Stream in whatever tiles are new since the last poll.
@@ -566,6 +566,38 @@ export class VantageViewer {
         this.needsRender = true;
         return;
       }
+    }
+  }
+
+  /** Ensure the terrain atlas covers at least `layers` texture-array layers,
+   *  re-fetching `terrain.vtexarr` if it's behind. Coalesces concurrent callers
+   *  — the on-demand tile-insert gate and the progressive poll — onto one
+   *  request. Resolves once the atlas is current (or the fetch failed and the
+   *  old atlas stands, to be retried by a later gate/poll). */
+  private async ensureAtlasLayers(source: WorldSource, layers: number): Promise<void> {
+    if (this.lastTextureLayers >= layers) return;
+    await (this.atlasRefresh ??= this.refetchAtlas(source));
+    // The atlas can grow again while a refetch is in flight; one more (bounded)
+    // fetch covers a tile that needs layers newer than what we just loaded.
+    if (this.lastTextureLayers < layers && !this.atlasRefresh) {
+      await (this.atlasRefresh ??= this.refetchAtlas(source));
+    }
+  }
+
+  /** Re-fetch `terrain.vtexarr` and widen every shared material's atlas (they
+   *  share the sampler uniform objects, so one update reaches all). */
+  private async refetchAtlas(source: WorldSource): Promise<void> {
+    try {
+      const td = parseTextureArray(await maybeInflate(await source.fetch(this.manifest!.textures)));
+      if (!this.shader) return;
+      updateTerrainTextures(this.shader, td);
+      this.hasAnims = td.anims.length > 0;
+      this.lastTextureLayers = Math.max(this.lastTextureLayers, td.layers);
+      this.needsRender = true;
+    } catch {
+      /* keep the old atlas; a later gate or poll retries */
+    } finally {
+      this.atlasRefresh = null;
     }
   }
 

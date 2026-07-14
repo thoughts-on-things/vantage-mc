@@ -68,6 +68,25 @@ describe('parseManifest', () => {
     expect(parseManifest({ ...good, yRange: { min: 5, max: 5 } }).yRange).toBeUndefined();
   });
 
+  it('carries the rendering/dynamic/progress/textureLayers live-server flags', () => {
+    const m = parseManifest({
+      ...good,
+      format: 4,
+      rendering: true,
+      dynamic: true,
+      progress: { done: 3, total: 132 },
+      textureLayers: 565,
+    });
+    expect(m.rendering).toBe(true);
+    expect(m.dynamic).toBe(true);
+    expect(m.progress).toEqual({ done: 3, total: 132 });
+    expect(m.textureLayers).toBe(565);
+    // All optional: a finished static render carries none of them.
+    expect(parseManifest(good).rendering).toBeUndefined();
+    expect(parseManifest(good).dynamic).toBeUndefined();
+    expect(parseManifest({ ...good, dynamic: 'yes' }).dynamic).toBeUndefined();
+  });
+
   it('rejects wrong format versions and malformed shapes', () => {
     expect(() => parseManifest(null)).toThrow(/not an object/);
     expect(() => parseManifest({ ...good, format: 5 })).toThrow(/format/);

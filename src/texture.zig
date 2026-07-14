@@ -165,8 +165,17 @@ pub const Builder = struct {
     }
 
     pub fn finish(self: *Builder) !Array {
+        return self.finishAlloc(self.arena);
+    }
+
+    /// Snapshot the current atlas into `alloc` (a copy — the builder keeps
+    /// appending). The progressive-render flusher passes a scratch allocator so
+    /// its periodic atlas re-serialization doesn't pile up in the run arena; it
+    /// must hold `self.mutex` across the call, since a concurrent append can
+    /// realloc `layers`/`anims`.
+    pub fn finishAlloc(self: *Builder, alloc: std.mem.Allocator) !Array {
         const n = self.layers.items.len;
-        const pixels = try self.arena.alloc(u8, n * BYTES_PER_LAYER);
+        const pixels = try alloc.alloc(u8, n * BYTES_PER_LAYER);
         for (self.layers.items, 0..) |layer, i| {
             @memcpy(pixels[i * BYTES_PER_LAYER ..][0..BYTES_PER_LAYER], layer);
         }
@@ -175,8 +184,16 @@ pub const Builder = struct {
             .height = TILE,
             .layer_count = @intCast(n),
             .pixels = pixels,
-            .anims = try self.arena.dupe(AnimEntry, self.anims.items),
+            .anims = try alloc.dupe(AnimEntry, self.anims.items),
         };
+    }
+
+    /// Current layer count (thread-safe view for the progressive flusher, which
+    /// re-writes the atlas only when this grew since the last flush).
+    pub fn layerCount(self: *Builder) u32 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return @intCast(self.layers.items.len);
     }
 };
 

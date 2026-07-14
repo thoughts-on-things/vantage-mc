@@ -411,6 +411,42 @@ export class TileManager {
     }
   }
 
+  /** Ingest tiles a progressive render has newly published. Unknown tiles join
+   *  the streaming index and force a re-plan so they stream in on the next
+   *  update(); already-known tiles are ignored. Returns whether anything was
+   *  added. */
+  addTiles(tiles: ManifestTile[]): boolean {
+    let added = false;
+    for (const t of tiles) {
+      const k = tileKey(t.x, t.z);
+      if (!this.index.has(k)) {
+        this.index.set(k, t);
+        added = true;
+      }
+    }
+    if (added) {
+      this.lastFocusX = Infinity; // re-plan around the (unchanged) focus next update
+      this.lastFocusZ = Infinity;
+      this.invalidate();
+      this.emitter.emit('change', this.stats); // total grew — refresh the readout
+    }
+    return added;
+  }
+
+  /** Install the lowres pyramid once a progressive render finishes (its earlier
+   *  manifests carried no lowres). No-op without a lowres material, or if a
+   *  pyramid is already present. Forces a re-plan so the coarse rings stream in. */
+  ingestLowres(lowres: { grid: number; levels: LowresLevel[] }): void {
+    if (!this.lowresMaterial || this.lowLevels.length > 0) return;
+    const levels = [...lowres.levels].sort((a, b) => a.level - b.level);
+    this.lowLevels.push(...levels);
+    for (const lvl of levels) this.lowIndex.set(lvl.level, new Set(lvl.tiles.map((t) => tileKey(t.x, t.z))));
+    this.lastFocusX = Infinity;
+    this.lastFocusZ = Infinity;
+    this.coverageDirty = true;
+    this.invalidate();
+  }
+
   /** Live-tune streaming (view distance, tile budget, fetch concurrency).
    *  Takes effect on the next update(): the plan is recomputed from scratch. */
   configure(settings: { viewDistance?: number; maxTiles?: number; concurrency?: number }): void {

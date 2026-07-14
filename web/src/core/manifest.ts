@@ -49,6 +49,15 @@ export interface WorldManifest {
   /** Biome display names indexed by the per-vertex biome id (0 = no data).
    *  Globally consistent across every tile of the render. */
   biomes: string[];
+  /** True while a progressive render is still baking: the manifest grows and
+   *  the viewer polls it, streaming new tiles in as they land. Absent/false in
+   *  a finished render. */
+  rendering?: boolean;
+  /** Tiles finished / total, for a live progress readout (progressive only). */
+  progress?: { done: number; total: number };
+  /** Atlas layer count backing `textures`. When it grows between progressive
+   *  polls, the viewer re-fetches the texture array (layers are append-only). */
+  textureLayers?: number;
   /** Every rendered tile. */
   tiles: ManifestTile[];
   /** The lowres LOD pyramid (format 2+): coarse whole-world tiles the viewer
@@ -145,12 +154,21 @@ export function parseManifest(data: unknown): WorldManifest {
   }
 
   const maxSectionVerts = m['maxSectionVerts'];
+  const textureLayers = m['textureLayers'];
+  const pr = m['progress'] as Record<string, unknown> | undefined;
+  const progress =
+    typeof pr === 'object' && pr !== null && typeof pr['done'] === 'number' && typeof pr['total'] === 'number'
+      ? { done: pr['done'], total: pr['total'] }
+      : undefined;
   return {
     format,
     tileChunks,
     tileBlocks,
     textures,
     ...(typeof maxSectionVerts === 'number' && maxSectionVerts > 0 ? { maxSectionVerts } : {}),
+    ...(typeof textureLayers === 'number' && textureLayers > 0 ? { textureLayers } : {}),
+    ...(m['rendering'] === true ? { rendering: true } : {}),
+    ...(progress ? { progress } : {}),
     ...(spawn ? { spawn } : {}),
     ...(m['caves'] === true ? { caves: true } : {}),
     ...(yRange ? { yRange } : {}),

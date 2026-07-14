@@ -21,7 +21,7 @@ import {
   worldFromUrl,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
-import { createLightmappedMaterial, createLowresMaterial, createSky, createTerrainMaterial, createWaterMaterial, SKY_HORIZON } from './materials.js';
+import { createLightmappedMaterial, createLowresMaterial, createSky, createTerrainMaterial, createWaterMaterial, updateTerrainTextures, SKY_HORIZON } from './materials.js';
 import { pickBiome } from './pick.js';
 import { buildTerrain } from './terrain.js';
 import { TileManager, type TileStats } from './tiles.js';
@@ -160,6 +160,9 @@ interface ViewerEvents extends Record<string, unknown> {
   mode: { fly: boolean };
   /** The depth slice (cave view) moved or toggled. `null` = off. */
   slice: { y: number | null };
+  /** Progressive render progress, while a live bake streams in. `done` reaches
+   *  `total` and `rendering` flips false on the final manifest. */
+  progress: { done: number; total: number; rendering: boolean };
 }
 
 async function fetchBuffer(url: string): Promise<ArrayBuffer> {
@@ -257,6 +260,13 @@ export class VantageViewer {
   private worldSpan = 0;
   private tilesUnsub: (() => void) | null = null;
   private lastBiomesEmit = 0;
+
+  // Progressive render (manifest.rendering): the manager whose live bake we're
+  // polling for, and the atlas layer count last uploaded — a growing count
+  // triggers a texture-array re-fetch. Cleared when the render finishes or the
+  // world reloads (the poll checks its manager is still current).
+  private progressiveManager: TileManager | null = null;
+  private lastTextureLayers = 0;
 
   // Biome layer state machine.
   private biomeEnabled = false;
@@ -428,12 +438,15 @@ export class VantageViewer {
     // Format 4+ (VTL8): the atlas-lit sibling material for lightmapped tails.
     const lmShader = manifest.format >= 4 ? createLightmappedMaterial(shader) : undefined;
     // Lowres pyramid (format 2): coarse whole-world rings under the hires disc.
-    const lowresShader = manifest.lowres ? createLowresMaterial(shader) : undefined;
+    // A progressive render has none yet but will grow one — build the material
+    // upfront so the pyramid can stream in when the bake finishes.
+    const lowresShader = manifest.lowres || manifest.rendering ? createLowresMaterial(shader) : undefined;
     this.shader = shader;
     this.waterShader = waterShader;
     this.lowresShader = lowresShader ?? null;
     this.manifest = manifest;
     this.hasAnims = texData.anims.length > 0;
+    this.lastTextureLayers = manifest.textureLayers ?? texData.layers;
     this.tile = null;
     this.tiles = new TileManager({
       manifest,
@@ -486,13 +499,80 @@ export class VantageViewer {
       size,
       biomes: this._biomes,
     });
+
+    // Progressive render: poll the manifest and stream tiles in as they bake.
+    if (manifest.rendering) {
+      this.progressiveManager = this.tiles;
+      this.emitProgress(manifest);
+      void this.pollProgressive(source, this.tiles);
+    }
   }
 
-  /** Frame a streamed world: pivot on the spawn point when the manifest has
-   *  one (that's where the builds are), else the centre of the tile extents.
-   *  Distances are tied to the streaming view distance, not the world size —
-   *  a 100k×100k world frames the same as a village. */
-  private frameWorld(manifest: WorldManifest, view: ViewMode): void {
+  /** Emit a `progress` event from a manifest (falling back to the tile count
+   *  when the generator didn't include a `progress` block). */
+  private emitProgress(m: WorldManifest): void {
+    this.emitter.emit('progress', {
+      done: m.progress?.done ?? m.tiles.length,
+      total: m.progress?.total ?? m.tiles.length,
+      rendering: m.rendering ?? false,
+    });
+  }
+
+  /** Follow a live (`rendering: true`) render: re-fetch the manifest on an
+   *  interval, stream newly-baked tiles in, widen the texture array when the
+   *  atlas grows, and install the lowres pyramid once the bake completes. Runs
+   *  until the render finishes or the world is replaced. */
+  private async pollProgressive(source: WorldSource, manager: TileManager): Promise<void> {
+    const dec = new TextDecoder();
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1200));
+      // Bail if the world was replaced/disposed while we waited.
+      if (this.tiles !== manager || this.progressiveManager !== manager) return;
+
+      let m: WorldManifest;
+      try {
+        m = parseManifest(JSON.parse(dec.decode(await source.fetch('manifest.json'))));
+      } catch {
+        continue; // a torn read mid-rewrite (or a transient fetch error) — retry
+      }
+
+      // Atlas grew (new block textures discovered): re-fetch and widen the
+      // array. Layers are append-only, so resident tiles stay valid.
+      if ((m.textureLayers ?? 0) > this.lastTextureLayers && this.shader) {
+        try {
+          const td = parseTextureArray(await maybeInflate(await source.fetch(m.textures)));
+          if (this.tiles !== manager) return;
+          updateTerrainTextures(this.shader, td);
+          this.hasAnims = td.anims.length > 0;
+          this.lastTextureLayers = m.textureLayers ?? td.layers;
+          this.needsRender = true;
+        } catch {
+          /* keep the old atlas; retry next poll */
+        }
+      }
+
+      // Stream in whatever tiles are new since the last poll.
+      manager.addTiles(m.tiles);
+      this.emitProgress(m);
+
+      if (!m.rendering) {
+        // Final manifest: install the lowres pyramid and open the zoom range to
+        // the full world extent now that every tile is known.
+        this.manifest = m;
+        if (m.lowres) manager.ingestLowres(m.lowres);
+        this.updateWorldBounds(m);
+        this.applyViewLimits();
+        this.progressiveManager = null;
+        this.needsRender = true;
+        return;
+      }
+    }
+  }
+
+  /** Set the world bounds + span from a manifest's tile extents, without moving
+   *  the camera. Used to frame a world on load and to widen the extent when a
+   *  progressive render finishes and the full size is finally known. */
+  private updateWorldBounds(manifest: WorldManifest): void {
     const tb = manifest.tileBlocks;
     let minX = Infinity;
     let minZ = Infinity;
@@ -510,6 +590,18 @@ export class VantageViewer {
     }
     this.bounds.set(new THREE.Vector3(minX, -64, minZ), new THREE.Vector3(maxX, 320, maxZ));
     this.worldSpan = Math.max(maxX - minX, maxZ - minZ);
+  }
+
+  /** Frame a streamed world: pivot on the spawn point when the manifest has
+   *  one (that's where the builds are), else the centre of the tile extents.
+   *  Distances are tied to the streaming view distance, not the world size —
+   *  a 100k×100k world frames the same as a village. */
+  private frameWorld(manifest: WorldManifest, view: ViewMode): void {
+    this.updateWorldBounds(manifest);
+    const minX = this.bounds.min.x;
+    const minZ = this.bounds.min.z;
+    const maxX = this.bounds.max.x;
+    const maxZ = this.bounds.max.z;
 
     const viewDistance = this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768;
     const spawn = manifest.spawn;
@@ -1336,6 +1428,7 @@ export class VantageViewer {
       this.tiles.dispose();
       this.tiles = null;
       this.manifest = null;
+      this.progressiveManager = null; // stops any in-flight progressive poll
     }
     if (this.shader) {
       (this.shader.uniforms['map']?.value as THREE.Texture | null)?.dispose();

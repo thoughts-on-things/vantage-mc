@@ -80,10 +80,7 @@ export function CaveReveal() {
       <h2 className="reveal">
         Slice the world <em>open</em>
       </h2>
-      <p className="lede reveal">
-        Your world doesn&apos;t stop at the surface. Slice the map at any depth: caves, mineshafts, geodes, lava —
-        all in place, all in 3D.
-      </p>
+      <p className="lede reveal">Slice the map at any depth and look inside your world.</p>
 
       <figure className="cave-video reveal">
         <div className="viewport-frame">

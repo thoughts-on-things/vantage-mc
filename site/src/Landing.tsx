@@ -31,43 +31,43 @@ const FEATURES = [
   {
     icon: '⚡',
     title: 'Minutes become seconds',
-    body: 'A native renderer with no JVM and no warm-up maps a whole survival world in the time other tools take to boot. Re-render after every session without thinking about it.',
+    body: 'Maps a whole world in the time other tools take to boot. Re-render whenever.',
     wide: true,
   },
   {
     icon: '🌍',
     title: 'The whole world, always',
-    body: 'Zoom from one block out to everything ever explored. The overview layer costs about 1% of the map’s bytes, so there’s no fog wall.',
+    body: 'Zoom from one block to everything ever explored. No fog wall.',
     wide: true,
   },
   {
     icon: '🎯',
     title: '120+ FPS panning',
-    body: 'Tiles decode on the GPU, so the page never stutters — even with 16 million triangles on screen.',
+    body: 'Tiles decode on the GPU. No stutter at 16 million triangles.',
     wide: false,
   },
   {
     icon: '📦',
     title: 'Just static files',
-    body: 'A map is a folder of tiles. Host it on any web server, S3 bucket, or Pages site — no backend, no database.',
+    body: 'A map is a folder. Any web server, S3 bucket, or Pages site can host it.',
     wide: false,
   },
   {
     icon: '🔗',
     title: 'Every view is a link',
-    body: 'The camera lives in the URL. Any angle on any build is a deep link you can paste to a friend.',
+    body: 'The camera lives in the URL. Copy, paste, done.',
     wide: false,
   },
   {
     icon: '⛏️',
     title: 'X-ray for your world',
-    body: 'Slice the map at any depth and look inside: mineshafts, geodes, lava lakes. Press C in the viewer.',
+    body: 'Slice the map at any depth. Press C in the viewer.',
     wide: false,
   },
   {
     icon: '🧭',
     title: 'Layers & flight',
-    body: 'A clickable biome legend, day/night lighting, quality presets, and a free-flight camera. Press B, fly around.',
+    body: 'Biome legend, day/night lighting, quality presets, free flight. Press B.',
     wide: false,
   },
 ];
@@ -130,8 +130,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
           as a <em>living map</em>.
         </h1>
         <p className="hero-sub reveal">
-          Vantage renders a Java-Edition save as a fast 3D map for the browser. A whole survival world takes a few
-          seconds. Fly around it, zoom out, share any view as a link.
+          Point it at a Java save, get a 3D map in your browser a few seconds later. No server, nothing to
+          install.
         </p>
 
         <div className="hero-ctas reveal">
@@ -191,16 +191,13 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
             </span>
           </button>
         </div>
-        <figcaption>This is the live viewer, not a video — click to open it.</figcaption>
+        <figcaption>Live viewer, not a video — click it.</figcaption>
       </figure>
 
       <section className="numbers" id="numbers">
         <p className="kicker reveal">the numbers</p>
         <h2 className="reveal">Measured, not promised</h2>
-        <p className="lede reveal">
-          The same 7,225-chunk survival world, rendered start-to-finish by each tool on the same 16-thread desktop.
-          Watch the actual runs:
-        </p>
+        <p className="lede reveal">Same world, same machine, both tools start to finish:</p>
         <RaceReplay />
         <div className="compare reveal">
           <table>
@@ -241,9 +238,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
             </tbody>
           </table>
           <p className="compare-note">
-            Both tools rendering the overworld with default settings on 16 threads, assets cached, output wiped
-            between runs (BlueMap v5.22). BlueMap is excellent software and the benchmark to beat — the difference
-            is what native code buys you. Commands to reproduce are in the{' '}
+            Default settings, 16 threads, assets cached, output wiped between runs (BlueMap v5.22). BlueMap is
+            excellent software — the difference here is native code. Commands to reproduce are in the{' '}
             <a href={GITHUB} rel="noreferrer">
               repo
             </a>
@@ -299,10 +295,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
                 <span className="p">$</span> vantage render ~/.minecraft/saves/MyWorld --out map/
               </code>
             </pre>
-            <p>
-              That&apos;s the whole setup: textures and models are pulled from your Minecraft install automatically
-              the first time. Every populated chunk renders in parallel, in seconds.
-            </p>
+            <p>Textures come from your Minecraft install automatically. That&apos;s the whole setup.</p>
           </li>
           <li className="reveal">
             <h3>Share it</h3>
@@ -312,8 +305,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
               </code>
             </pre>
             <p>
-              A map is just files — put it behind nginx, on S3, or on GitHub Pages, or embed the{' '}
-              <code>&lt;VantageViewer&gt;</code> React component in your own site.
+              Put the folder behind any web server, or embed the <code>&lt;VantageViewer&gt;</code> React component
+              in your own site.
             </p>
           </li>
         </ol>
@@ -337,13 +330,10 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
             <h2>
               Now map <em>your</em> world
             </h2>
-            <p>
-              The demo above came from one command. Your own save works the same, whether it&apos;s a survival
-              world, a creative server, or a realm backup.
-            </p>
+            <p>The demo came from one command. Your save works the same.</p>
             <p className="yours-privacy">
-              Local and private by default: your world never leaves your machine unless you choose to host the
-              output. MIT licensed, <a href={GITHUB} rel="noreferrer">source on GitHub</a>.
+              Everything runs on your machine; nothing is uploaded. MIT licensed,{' '}
+              <a href={GITHUB} rel="noreferrer">source on GitHub</a>.
             </p>
             <a className="cta cta-primary" href={`${GITHUB}#quick-start`} rel="noreferrer">
               Read the quick start

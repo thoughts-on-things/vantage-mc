@@ -515,14 +515,26 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     var tit = tile_set.keyIterator();
     while (tit.next()) |k| try tile_keys_list.append(a, k.*);
     const tile_keys = tile_keys_list.items;
-    std.mem.sort(u64, tile_keys, {}, struct {
-        fn lt(_: void, x: u64, y: u64) bool {
-            // Sort by (z, x) for deterministic output and region-major locality.
-            const xz: i32 = @bitCast(@as(u32, @truncate(x)));
-            const yz: i32 = @bitCast(@as(u32, @truncate(y)));
-            if (xz != yz) return xz < yz;
+    // Render spawn-outward: nearest-to-spawn tiles first, so a progressive
+    // render blooms from where the interesting builds are instead of sweeping in
+    // from a corner. Ties break on (z, x) so the order is still deterministic.
+    const centre_tx = @divFloor(centre_cx, tile_chunks);
+    const centre_tz = @divFloor(centre_cz, tile_chunks);
+    const SortCtx = struct { tx: i32, tz: i32 };
+    std.mem.sort(u64, tile_keys, SortCtx{ .tx = centre_tx, .tz = centre_tz }, struct {
+        fn lt(c: SortCtx, x: u64, y: u64) bool {
             const xx: i32 = @bitCast(@as(u32, @truncate(x >> 32)));
+            const xz: i32 = @bitCast(@as(u32, @truncate(x)));
             const yx: i32 = @bitCast(@as(u32, @truncate(y >> 32)));
+            const yz: i32 = @bitCast(@as(u32, @truncate(y)));
+            const dx1: i64 = xx - c.tx;
+            const dz1: i64 = xz - c.tz;
+            const dx2: i64 = yx - c.tx;
+            const dz2: i64 = yz - c.tz;
+            const d1 = dx1 * dx1 + dz1 * dz1;
+            const d2 = dx2 * dx2 + dz2 * dz2;
+            if (d1 != d2) return d1 < d2;
+            if (xz != yz) return xz < yz;
             return xx < yx;
         }
     }.lt);
@@ -594,6 +606,8 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     // so the wrapper can surface real progress.
     const plain_progress = !(std.Io.File.stderr().isTty(init.io) catch false);
 
+    var live: Live = .{};
+
     var ctx: RenderCtx = .{
         .io = init.io,
         .sa = sa,
@@ -619,9 +633,28 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         .results = results,
         .next = &next_tile,
         .done = &done_tiles,
+        .live = &live,
         .plain_progress = plain_progress,
         .progress = tiles_node,
     };
+
+    // Progressive render: a background thread republishes manifest.json (and the
+    // atlas, when it grows) as tiles land, so `vantage serve` shows the world
+    // streaming in live instead of only after the whole bake finishes.
+    var flush_ctx: FlushCtx = .{
+        .io = init.io,
+        .out_dir = out_dir,
+        .live = &live,
+        .builder = &builder,
+        .world_mutex = &world_mutex,
+        .world_display = &world_display,
+        .done = &done_tiles,
+        .total = tile_keys.len,
+        .spawn = spawn,
+        .tile_chunks = tile_chunks,
+        .cave_y = cave_y,
+    };
+    const flush_thread: ?std.Thread = std.Thread.spawn(.{}, flushWorker, .{&flush_ctx}) catch null;
 
     {
         var group: std.Io.Group = .init;
@@ -633,6 +666,11 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         group.await(init.io) catch |err| switch (err) {
             error.Canceled => unreachable, // nothing cancels the render
         };
+    }
+    // Stop the progressive flusher before the final manifest write below takes over.
+    if (flush_thread) |t| {
+        flush_ctx.stop.store(true, .release);
+        t.join();
     }
     tiles_node.end();
 
@@ -802,9 +840,9 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
 
     const tex_node = root.start("writing textures + manifest", 0);
     const arr = try builder.finish();
-    const tex_blob = try compress.gzipCompress(a, try texture.serialize(a, arr), 6);
-    const tex_path = try std.fmt.allocPrint(a, "{s}/terrain.vtexarr", .{out_dir});
-    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = tex_path, .data = tex_blob });
+    // Atomic (temp + rename) like the progressive flusher: a browser still
+    // polling as the render finishes never reads a half-rewritten atlas/manifest.
+    try writeAtlas(init.io, a, out_dir, arr);
 
     const manifest = try buildManifest(a, .{
         .tile_chunks = tile_chunks,
@@ -815,9 +853,9 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         .max_section_verts = max_section_verts,
         .caves = cave_y == null,
         .y_range = if (world_y_min < world_y_max) .{ world_y_min, world_y_max } else null,
+        .texture_layers = arr.layer_count,
     });
-    const manifest_path = try std.fmt.allocPrint(a, "{s}/manifest.json", .{out_dir});
-    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = manifest_path, .data = manifest });
+    try atomicWrite(init.io, a, out_dir, "manifest.json", manifest);
     // Re-rendering onto an existing output dir can leave tiles from a previous
     // bake behind; now that the manifest is written, sweep anything tile-shaped
     // it doesn't reference.
@@ -905,6 +943,128 @@ const LockedAllocator = struct {
     }
 };
 
+/// Shared, mutex-guarded record of finished tiles — appended by each worker as
+/// it writes a `.vtile`, drained by the progressive flusher into a live manifest
+/// while the rest are still meshing. Tiles, biome ids and atlas layers are all
+/// append-only, so a snapshot taken mid-render is always internally consistent:
+/// every listed tile only references legend/atlas entries that already exist.
+const Live = struct {
+    mutex: std.Io.Mutex = .init,
+    completed: std.ArrayList(TileEntry) = .empty,
+    max_section_verts: u64 = 0,
+    y_min: i32 = std.math.maxInt(i32),
+    y_max: i32 = std.math.minInt(i32),
+};
+
+/// Inputs to the background flusher thread that publishes progressive manifests.
+const FlushCtx = struct {
+    io: std.Io,
+    out_dir: []const u8,
+    live: *Live,
+    builder: *texture.Builder,
+    world_mutex: *std.Io.Mutex,
+    world_display: *std.ArrayList([]const u8),
+    done: *std.atomic.Value(usize),
+    total: usize,
+    spawn: ?[3]i32,
+    tile_chunks: i32,
+    cave_y: ?i32,
+    /// Atlas layers last written to disk — the atlas is re-serialized only when
+    /// it grows past this (layers are append-only, so it's always a superset).
+    last_layers: u32 = 0,
+    /// Tiles in the last published manifest — a flush with no new tiles and no
+    /// atlas growth is skipped, so the final stretch of a big render doesn't
+    /// re-serialize an unchanged multi-MB manifest every tick.
+    last_tiles: usize = 0,
+    stop: std.atomic.Value(bool) = .init(false),
+};
+
+/// Poll the shared `Live` state every ~400 ms and publish a manifest of the
+/// tiles finished so far, re-writing the texture atlas whenever it has grown, so
+/// a browser pointed at `vantage serve` watches the world stream in tile by tile.
+fn flushWorker(fc: *FlushCtx) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    while (!fc.stop.load(.acquire)) {
+        std.Io.sleep(fc.io, std.Io.Duration.fromMilliseconds(400), .awake) catch {};
+        _ = arena.reset(.retain_capacity);
+        flushOnce(fc, arena.allocator()) catch {}; // a dropped flush retries next tick
+    }
+}
+
+/// Publish one progressive manifest (+ atlas, if it grew) — the mid-render
+/// snapshot the browser polls. Any allocation failure just drops this tick; the
+/// next one retries. The final, authoritative manifest is written by the caller
+/// once the workers join.
+fn flushOnce(fc: *FlushCtx, a: std.mem.Allocator) !void {
+    fc.live.mutex.lockUncancelable(fc.io);
+    const tiles = a.dupe(TileEntry, fc.live.completed.items) catch |e| {
+        fc.live.mutex.unlock(fc.io); // never propagate an error while holding the lock
+        return e;
+    };
+    const msv = fc.live.max_section_verts;
+    const ymin = fc.live.y_min;
+    const ymax = fc.live.y_max;
+    fc.live.mutex.unlock(fc.io);
+
+    // Skip when there's nothing new to show: no tiles yet, or neither the tile
+    // list nor the atlas has grown since the last publish.
+    const atlas_grew = fc.builder.layerCount() > fc.last_layers;
+    if (tiles.len == 0 or (tiles.len == fc.last_tiles and !atlas_grew)) return;
+
+    // Atlas: re-serialize only when it grew. Written before the manifest that
+    // references the new tiles, so the atlas is never behind the tile list.
+    if (atlas_grew) {
+        fc.builder.mutex.lockUncancelable(fc.io);
+        const arr = fc.builder.finishAlloc(a) catch |e| {
+            fc.builder.mutex.unlock(fc.io);
+            return e;
+        };
+        fc.builder.mutex.unlock(fc.io);
+        try writeAtlas(fc.io, a, fc.out_dir, arr);
+        fc.last_layers = arr.layer_count;
+    }
+
+    fc.world_mutex.lockUncancelable(fc.io);
+    const biomes = a.dupe([]const u8, fc.world_display.items) catch |e| {
+        fc.world_mutex.unlock(fc.io);
+        return e;
+    };
+    fc.world_mutex.unlock(fc.io);
+
+    const manifest = try buildManifest(a, .{
+        .tile_chunks = fc.tile_chunks,
+        .spawn = fc.spawn,
+        .biomes = biomes,
+        .tiles = tiles,
+        .max_section_verts = msv,
+        .caves = fc.cave_y == null,
+        .y_range = if (ymin < ymax) .{ ymin, ymax } else null,
+        .rendering = true,
+        .progress = .{ fc.done.load(.monotonic), fc.total },
+        .texture_layers = fc.last_layers,
+    });
+    try atomicWrite(fc.io, a, fc.out_dir, "manifest.json", manifest);
+    fc.last_tiles = tiles.len;
+}
+
+/// Write `dir/name` by writing a temp file and renaming over it, so a browser
+/// polling the file never reads a half-written manifest or atlas.
+fn atomicWrite(io: std.Io, a: std.mem.Allocator, dir: []const u8, name: []const u8, data: []const u8) !void {
+    const tmp = try std.fmt.allocPrint(a, "{s}/.{s}.tmp", .{ dir, name });
+    const final = try std.fmt.allocPrint(a, "{s}/{s}", .{ dir, name });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data });
+    try std.Io.Dir.cwd().rename(tmp, std.Io.Dir.cwd(), final, io);
+}
+
+/// Serialize + gzip the texture array and write it atomically to
+/// `dir/terrain.vtexarr` (the progressive flusher's superset flush and the final
+/// write share this).
+fn writeAtlas(io: std.Io, a: std.mem.Allocator, dir: []const u8, arr: texture.Array) !void {
+    const blob = try compress.gzipCompress(a, try texture.serialize(a, arr), 6);
+    try atomicWrite(io, a, dir, "terrain.vtexarr", blob);
+}
+
 /// Everything the tile workers share. Fields are either immutable for the
 /// duration of the parallel section or guarded by the lock noted on their type
 /// (resolver memo, texture builder, biome registry, surface-color memo) or by
@@ -941,6 +1101,9 @@ const RenderCtx = struct {
     /// progress lines. Distinct from `next`, which hands out work and runs
     /// ahead of completion.
     done: *std.atomic.Value(usize),
+    /// Finished-tile ledger for the progressive flusher; each worker appends its
+    /// entry here as it writes a `.vtile`.
+    live: *Live,
     /// Emit `rendering tiles [done/total]` lines (stderr is not a TTY, so
     /// std.Progress' live bar is invisible to whoever is reading us).
     plain_progress: bool,
@@ -982,6 +1145,17 @@ fn tileWorker(ctx: *RenderCtx) void {
         renderOneTile(ctx, tile_arena.allocator(), idx) catch |e| {
             ctx.results[idx].err = e;
         };
+        // Publish a written tile to the progressive ledger (a small critical
+        // section — one append, once per tile) so the flusher can stream it out.
+        const r = &ctx.results[idx];
+        if (r.written) {
+            ctx.live.mutex.lockUncancelable(ctx.io);
+            ctx.live.completed.append(ctx.sa, r.entry) catch {};
+            ctx.live.max_section_verts = @max(ctx.live.max_section_verts, @max(r.solid_verts, r.fluid_verts));
+            ctx.live.y_min = @min(ctx.live.y_min, r.y_min);
+            ctx.live.y_max = @max(ctx.live.y_max, r.y_max);
+            ctx.live.mutex.unlock(ctx.io);
+        }
         ctx.progress.completeOne();
         const done = ctx.done.fetchAdd(1, .monotonic) + 1;
         if (ctx.plain_progress) {
@@ -1119,6 +1293,16 @@ const ManifestInput = struct {
     caves: bool = false,
     /// World-Y extent across all tiles [min, max) — bounds for the depth slider.
     y_range: ?[2]i32 = null,
+    /// Progressive render: true while tiles are still being baked (the viewer
+    /// polls and streams new tiles in), false in the final manifest.
+    rendering: bool = false,
+    /// [done, total] tiles, surfaced to the viewer's progress readout while
+    /// `rendering` is true.
+    progress: ?[2]usize = null,
+    /// Atlas layer count backing `terrain.vtexarr`. The viewer re-fetches the
+    /// texture array when this grows between progressive polls (layers are
+    /// append-only, so a superset is always safe for already-loaded tiles).
+    texture_layers: u32 = 0,
 };
 
 /// Whether `name` is a render-owned tile file: `t.<x>.<z>.vtile` (hires) or
@@ -1214,9 +1398,11 @@ test "isTileFileName accepts render-owned tiles and nothing else" {
 fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     // Format 4 = VTL8 tiles (compact quads + lightmap atlas) + maxSectionVerts.
-    try out.print(a, "{{\n  \"format\": 4,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"maxSectionVerts\": {d},\n  \"textures\": \"terrain.vtexarr\",\n", .{
-        m.tile_chunks, m.tile_chunks * 16, m.max_section_verts,
+    try out.print(a, "{{\n  \"format\": 4,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"maxSectionVerts\": {d},\n  \"textures\": \"terrain.vtexarr\",\n  \"textureLayers\": {d},\n", .{
+        m.tile_chunks, m.tile_chunks * 16, m.max_section_verts, m.texture_layers,
     });
+    if (m.rendering) try out.appendSlice(a, "  \"rendering\": true,\n");
+    if (m.progress) |p| try out.print(a, "  \"progress\": {{ \"done\": {d}, \"total\": {d} }},\n", .{ p[0], p[1] });
     if (m.caves) try out.appendSlice(a, "  \"caves\": true,\n");
     if (m.y_range) |yr| try out.print(a, "  \"yRange\": {{ \"min\": {d}, \"max\": {d} }},\n", .{ yr[0], yr[1] });
     if (m.spawn) |s| try out.print(a, "  \"spawn\": {{ \"x\": {d}, \"y\": {d}, \"z\": {d} }},\n", .{ s[0], s[1], s[2] });

@@ -282,13 +282,24 @@ pub fn buildTextured(
     // each of the 6 directions. Built once from the populated cache so the greedy
     // pass can find a cell's mergeable face by a flat lookup.
     const greedy_faces = try arena.alloc([6]i16, g.names.len);
-    for (greedy_faces, 0..) |*gf, id| {
+    // A "pure greedy occluder": every face merges in the greedy pass and it holds
+    // no fluid, so the per-block pass emits nothing for it. Terrain (stone, dirt,
+    // deepslate, …) is nearly all of these — skipping them lets meshRange avoid
+    // re-walking the dense solid interior the greedy pass already owns.
+    const id_pure_greedy = try arena.alloc(bool, g.names.len);
+    for (greedy_faces, id_pure_greedy, 0..) |*gf, *pg, id| {
         gf.* = .{ -1, -1, -1, -1, -1, -1 };
+        pg.* = false;
         const c = cache[id] orelse continue;
+        var all_greedy = c.faces.len > 0;
         for (c.faces, 0..) |f, fi| {
-            if (!f.greedy) continue;
+            if (!f.greedy) {
+                all_greedy = false;
+                continue;
+            }
             if (f.cull) |cd| gf[dirIndex(cd)] = @intCast(fi);
         }
+        pg.* = all_greedy and !is_water[id] and !is_lava[id] and !waterish[id];
     }
 
     // Compute sky + block light and flood-fill it into the grid, so each face can
@@ -312,7 +323,7 @@ pub fn buildTextured(
     // the partials in Y order — byte-identical to a single-threaded pass.
     const mesh_node: ?std.Progress.Node = if (progress) |p| p.start("meshing geometry", 0) else null;
     defer if (mesh_node) |n| n.end();
-    const ctx: MeshCtx = .{
+    var ctx: MeshCtx = .{
         .g = g,
         .cache = cache,
         .id_occluder = id_occluder,
@@ -327,6 +338,7 @@ pub fn buildTextured(
         .blend_biomes = blend_biomes,
         .fluid_level = fluid_level,
         .greedy_faces = greedy_faces,
+        .id_pure_greedy = id_pure_greedy,
         .interior = interior orelse grid.Interior.full(g),
         .cave_y = cave_y,
         .atlas = quality == .smooth,
@@ -367,7 +379,9 @@ pub fn buildTextured(
     // Greedy pass: merge the full-cube occluder faces (which the per-block pass
     // skipped) into big tiled quads. The 6 directions are independent, so they
     // run as 6 workers into disjoint meshes, concatenated in direction order
-    // (inline when the thread budget is 1).
+    // (inline when the thread budget is 1). Precompute each cell's per-direction
+    // face visibility once so the six sweeps skip the neighbour probing.
+    ctx.face_vis = try buildFaceVis(&ctx, arena);
     const gp = try arena.alloc(GreedyPartial, 6);
     for (gp, 0..) |*p, di| p.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator), .di = di };
     if (n_threads <= 1) {
@@ -542,6 +556,20 @@ const MeshCtx = struct {
     /// directions (see `dirIndex`), or -1. The greedy pass uses this to find a
     /// cell's mergeable face; the per-block pass skips faces marked `greedy`.
     greedy_faces: [][6]i16,
+    /// Per block id, whether the block is a pure greedy occluder (every face
+    /// merges in the greedy pass, no fluid) — the per-block pass emits nothing
+    /// for it and skips the cell outright. Dense terrain is almost entirely this.
+    /// Empty (never indexed) for the greedy-only unit tests, which don't run the
+    /// per-block pass; production always sets it.
+    id_pure_greedy: []const bool = &.{},
+    /// Per grid cell (over the interior XZ × full Y), a 6-bit mask: bit `di` is
+    /// set iff the cell has a visible greedy face in direction `di` (occluder
+    /// with a greedy face there, neighbour not solid and not cave-culled). Built
+    /// once by `buildFaceVis` before the greedy pass so the six per-direction
+    /// sweeps read one contiguous byte instead of re-probing neighbours 6× —
+    /// the dense solid interior (every neighbour occluding) collapses to a
+    /// single masked skip. Empty until set; the per-block pass never reads it.
+    face_vis: []const u8 = &.{},
     /// The XZ sub-box to emit geometry for (the whole grid unless this is a
     /// tiled render with an apron). Cells outside are read but never emitted.
     interior: grid.Interior,
@@ -622,6 +650,10 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
             while (x < ctx.interior.x1) : (x += 1) {
                 const id = g.ids[g.index(x, y, z)];
                 if (id == grid.AIR) continue;
+                // Pure terrain blocks are emitted whole by the greedy pass — skip
+                // the per-cell work (biome, coords, face scan) the greedy pass
+                // will redo anyway.
+                if (ctx.id_pure_greedy[id]) continue;
                 const bid: usize = g.biomeAt(x, y, z);
                 const wx: f32 = @floatFromInt(@as(i64, g.min_x) + @as(i64, @intCast(x)));
                 const wy: f32 = @floatFromInt(@as(i64, g.min_y) + @as(i64, @intCast(y)));
@@ -785,6 +817,51 @@ fn greedyMerge(
     }
 }
 
+/// Precompute the per-direction greedy-face visibility mask (see
+/// `MeshCtx.face_vis`) in one linear pass over the interior XZ columns × full Y.
+/// For each occluder cell, set bit `di` when its greedy face in that direction
+/// looks into a non-solid, non-cave-culled neighbour — exactly the condition the
+/// per-direction sweep used to re-derive with two grid probes per cell. Reusing
+/// the neighbour id for both the occluder and the water test makes this cheaper
+/// than one sweep's probing, and the six sweeps then read one byte per cell.
+fn buildFaceVis(ctx: *const MeshCtx, alloc: std.mem.Allocator) ![]u8 {
+    const g = ctx.g;
+    const vis = try alloc.alloc(u8, g.sx * g.sy * g.sz);
+    @memset(vis, 0);
+    const x0 = ctx.interior.x0;
+    const x1 = ctx.interior.x1;
+    var y: usize = 0;
+    while (y < g.sy) : (y += 1) {
+        var z = ctx.interior.z0;
+        while (z < ctx.interior.z1) : (z += 1) {
+            var gi = g.index(x0, y, z);
+            var x = x0;
+            while (x < x1) : ({
+                x += 1;
+                gi += 1;
+            }) {
+                const id = g.ids[gi];
+                if (id == grid.AIR) continue;
+                const gf = ctx.greedy_faces[id];
+                var mask: u8 = 0;
+                inline for (0..6) |di| {
+                    if (gf[di] >= 0) {
+                        const n = gdirs[di].n;
+                        const nx = @as(isize, @intCast(x)) + n[0];
+                        const ny = @as(isize, @intCast(y)) + n[1];
+                        const nz = @as(isize, @intCast(z)) + n[2];
+                        const nid = g.at(nx, ny, nz);
+                        if (!ctx.id_occluder[nid] and !(ctx.caveDark(nx, ny, nz) and !ctx.waterish[nid]))
+                            mask |= @as(u8, 1) << di;
+                    }
+                }
+                vis[gi] = mask;
+            }
+        }
+    }
+    return vis;
+}
+
 /// Mesh one of the 6 greedy directions: for each slice perpendicular to the
 /// direction, fill the (present, key) mask from the grid, greedy-merge it, and
 /// emit the merged quads — vertex-lit ones into `mesh`, atlas-lit ones into
@@ -811,13 +888,35 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, lm
     var rects: std.ArrayList(Rect) = .empty;
     const noff = gd.n;
 
+    // Grid strides per axis (see grid.index: x contiguous, z by sx, y by sz·sx),
+    // so a cell's flat index advances by one add along the swept row. `bit` is
+    // this direction's slot in the precomputed visibility mask.
+    const stride = [3]usize{ 1, g.sz * g.sx, g.sx };
+    const su = stride[gd.uax];
+    const sv = stride[gd.vax];
+    const sn = stride[gd.nax];
+    const bit: u8 = @as(u8, 1) << @intCast(di);
+    // Production shares one mask across all six directions (built in
+    // `buildTextured`); a direct caller (unit tests) gets it built on demand.
+    const vis = if (ctx.face_vis.len != 0) ctx.face_vis else try buildFaceVis(ctx, alloc);
+
     var s: usize = lo3[gd.nax];
     while (s < hi3[gd.nax]) : (s += 1) {
         @memset(present, false);
         var v: usize = lo3[gd.vax];
         while (v < hi3[gd.vax]) : (v += 1) {
             var u: usize = lo3[gd.uax];
-            while (u < hi3[gd.uax]) : (u += 1) {
+            var gi = s * sn + v * sv + u * su;
+            while (u < hi3[gd.uax]) : ({
+                u += 1;
+                gi += su;
+            }) {
+                // The dense solid interior (no visible face this direction)
+                // collapses to this single masked skip — no id or neighbour read.
+                if (vis[gi] & bit == 0) continue;
+                const id = g.ids[gi];
+                const idx = v * U + u;
+                present[idx] = true;
                 var cell = [3]usize{ 0, 0, 0 };
                 cell[gd.nax] = s;
                 cell[gd.uax] = u;
@@ -825,17 +924,6 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, lm
                 const x = cell[0];
                 const y = cell[1];
                 const z = cell[2];
-                const id = g.ids[g.index(x, y, z)];
-                if (id == grid.AIR) continue;
-                const fi = ctx.greedy_faces[id][di];
-                if (fi < 0) continue;
-                const xi: isize = @intCast(x);
-                const yi: isize = @intCast(y);
-                const zi: isize = @intCast(z);
-                if (ctx.id_occluder[g.at(xi + noff[0], yi + noff[1], zi + noff[2])]) continue;
-                if (ctx.caveCulled(xi + noff[0], yi + noff[1], zi + noff[2])) continue;
-                const idx = v * U + u;
-                present[idx] = true;
                 if (ctx.atlas) {
                     // Atlas mode: light/AO live in the per-tile lightmap, not
                     // the merge key — gradients no longer fragment merges, and
@@ -844,6 +932,10 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, lm
                     keys[idx] = .{ .id = id, .biome = g.biomeAt(x, y, z), .ao = @splat(255), .light = @splat(255) };
                     continue;
                 }
+                const xi: isize = @intCast(x);
+                const yi: isize = @intCast(y);
+                const zi: isize = @intCast(z);
+                const fi = ctx.greedy_faces[id][di];
                 const face = ctx.cache[id].?.faces[@intCast(fi)];
                 var ao = [4]u8{ 255, 255, 255, 255 };
                 for (0..4) |ci| ao[ci] = cornerAo(g, ctx.id_occluder, x, y, z, face.ao_off[ci]);
@@ -2573,6 +2665,7 @@ test "meshFluidTops: a flat 4x4 water sheet merges into one top quad" {
         .blend_biomes = false,
         .fluid_level = &.{ -1, 0 },
         .greedy_faces = &.{},
+        .id_pure_greedy = &.{ false, false },
         .interior = grid.Interior.full(g),
         .cave_y = null,
         .has_water = true,

@@ -335,8 +335,10 @@ function paletteTexture(palette: readonly Rgb[]): THREE.DataTexture {
   return tex;
 }
 
-/** Build the textured terrain material from a decoded texture array. */
-export function createTerrainMaterial(texData: DecodedTextureArray, opts: TerrainMaterialOptions = {}): THREE.ShaderMaterial {
+/** Build the layered GPU texture array from a decoded `.vtexarr`. Shared by
+ *  {@link createTerrainMaterial} and {@link updateTerrainTextures} so the sampler
+ *  config (NEAREST mag, mipmapped/anisotropic min, repeat wrap) lives in one place. */
+function buildArrayTexture(texData: DecodedTextureArray): THREE.DataArrayTexture {
   const tex = new THREE.DataArrayTexture(texData.pixels, texData.width, texData.height, texData.layers);
   tex.format = THREE.RGBAFormat;
   tex.type = THREE.UnsignedByteType;
@@ -351,6 +353,29 @@ export function createTerrainMaterial(texData: DecodedTextureArray, opts: Terrai
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.needsUpdate = true;
+  return tex;
+}
+
+/** Swap in a grown texture array (a progressive render appended atlas layers).
+ *  The atlas is append-only, so already-loaded tiles keep referencing the same
+ *  layers; this just widens the array and rebuilds the anim LUT. The water and
+ *  lightmapped materials share these uniform OBJECTS, so one update covers them. */
+export function updateTerrainTextures(material: THREE.ShaderMaterial, texData: DecodedTextureArray): void {
+  const mapU = material.uniforms['map'];
+  if (mapU) {
+    (mapU.value as THREE.Texture | null)?.dispose();
+    mapU.value = buildArrayTexture(texData);
+  }
+  const animU = material.uniforms['uAnim'];
+  if (animU) {
+    (animU.value as THREE.Texture | null)?.dispose();
+    animU.value = animLutTexture(texData.layers, texData.anims ?? []);
+  }
+}
+
+/** Build the textured terrain material from a decoded texture array. */
+export function createTerrainMaterial(texData: DecodedTextureArray, opts: TerrainMaterialOptions = {}): THREE.ShaderMaterial {
+  const tex = buildArrayTexture(texData);
   return new THREE.ShaderMaterial({
     glslVersion: THREE.GLSL3,
     defines: opts.quantized ? { QUANTIZED: '' } : {},

@@ -94,6 +94,7 @@ function ViewerTelemetry({ profile }: { profile: RenderProfile }) {
 }
 
 function selectRenderProfile(): RenderProfile {
+  const MiB = 1024 * 1024;
   const cores = navigator.hardwareConcurrency || 4;
   const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8;
   const dpr = window.devicePixelRatio || 1;
@@ -103,7 +104,7 @@ function selectRenderProfile(): RenderProfile {
     return {
       name: 'efficient',
       maxPixelRatio: Math.min(1.35, dpr),
-      streaming: { viewDistance: 640, maxTiles: 84, concurrency: Math.max(2, Math.min(4, cores - 1)) },
+      streaming: { viewDistance: 640, maxTiles: 84, concurrency: Math.max(2, Math.min(4, cores - 1)), maxBytes: 320 * MiB },
       display,
     };
   }
@@ -111,14 +112,14 @@ function selectRenderProfile(): RenderProfile {
     return {
       name: 'high',
       maxPixelRatio: Math.min(2, dpr),
-      streaming: { viewDistance: 1152, maxTiles: 264, concurrency: Math.min(8, Math.max(5, Math.floor(cores / 2))) },
+      streaming: { viewDistance: 1152, maxTiles: 264, concurrency: Math.min(8, Math.max(5, Math.floor(cores / 2))), maxBytes: 768 * MiB },
       display,
     };
   }
   return {
     name: 'balanced',
     maxPixelRatio: Math.min(1.75, dpr),
-    streaming: { viewDistance: 768, maxTiles: 120, concurrency: Math.min(6, Math.max(3, Math.floor(cores / 2))) },
+    streaming: { viewDistance: 768, maxTiles: 120, concurrency: Math.min(6, Math.max(3, Math.floor(cores / 2))), maxBytes: 512 * MiB },
     display,
   };
 }

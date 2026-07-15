@@ -31,7 +31,7 @@ export interface VantageViewerProps {
   tile?: TileSource;
   /** The `.vtexarr` texture array (required for textured tiles). */
   textures?: TextureSource;
-  /** Streaming behaviour for `world` sources (view distance, tile budget).
+  /** Streaming behaviour for `world` sources (view distance, tile/byte budgets).
    *  Live: changes re-plan in place, like the other setting props. */
   streaming?: StreamingSettings;
   /** Initial camera framing. Default `'orbit'`. */
@@ -202,7 +202,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
   // Apply live streaming changes (no remount, no re-load).
   useEffect(() => {
     if (engine && streaming) engine.setStreaming(streaming);
-  }, [engine, streaming?.viewDistance, streaming?.maxTiles, streaming?.concurrency]);
+  }, [engine, streaming?.viewDistance, streaming?.maxTiles, streaming?.concurrency, streaming?.maxBytes]);
 
   const ctx = useMemo<VantageContextValue>(
     () => ({

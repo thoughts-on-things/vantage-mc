@@ -45,13 +45,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          branch=$(gh pr list --state open --base main \
+          branch=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --base main \
             --json author,headRefName \
             --jq '.[] | select(.author.login == "app/github-actions") | .headRefName | select(startswith("release-please--"))' \
             | head -n 1)
           if [ -n "$branch" ]; then
             echo "Dispatching CI for $branch"
-            gh workflow run ci.yml --ref "$branch"
+            gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
           else
             echo "No open Release Please PR found"
           fi

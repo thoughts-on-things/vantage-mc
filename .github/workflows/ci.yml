@@ -55,12 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
-      - name: build.zig.zon and web/package.json agree
-        run: |
-          zon=$(grep -oP '\.version = "\K[^"]+' build.zig.zon)
-          npm=$(node -p "require('./web/package.json').version")
-          echo "build.zig.zon=$zon web/package.json=$npm"
-          test "$zon" = "$npm"
+      - name: Check release versions
+        run: node scripts/check-versions.mjs
 
   web:
     name: web (node ${{ matrix.node }})
@@ -115,3 +111,58 @@ jobs:
         run: |
           npm ci
           npm run ci
+
+  desktop:
+    name: desktop (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      # The desktop Vite aliases point at ../web/src, whose React and Three.js
+      # imports resolve through web/node_modules.
+      - name: Install shared web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: desktop
+        run: npm run build
+
+      - name: Check Rust formatting
+        working-directory: desktop/src-tauri
+        run: cargo fmt --check
+
+      - name: Lint and compile native host
+        working-directory: desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Exercise Tauri's production path and the bundled Zig sidecar without
+      # spending CI time creating installers; releases build both installers.
+      - name: Build desktop app
+        working-directory: desktop
+        run: npm run desktop:build -- --no-bundle

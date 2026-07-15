@@ -11,6 +11,9 @@
     "typecheck": "tsc --noEmit",
     "ci": "npm run typecheck && npm run build"
   },
+  "allowScripts": {
+    "esbuild": true
+  },
   "dependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.1.0",
     "@fontsource-variable/jetbrains-mono": "^5.1.0",

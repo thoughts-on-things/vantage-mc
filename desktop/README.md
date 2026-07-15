@@ -53,3 +53,10 @@ Production packaging is `just desktop-build`. Generated renders live under
 the operating system's local data directory at `Vantage/renders/<world-id>`.
 The embedded file endpoint binds to `127.0.0.1` on an ephemeral port, rejects
 path traversal, and only serves the currently selected render tree.
+
+Pull requests compile the production app and sidecar on Windows without
+creating installers. Release Please builds both the NSIS `.exe` and MSI on a
+version tag, signs them with the shared ThoughtsOnThings Microsoft Artifact
+Signing profile, verifies their Authenticode signatures, and attaches them to
+the GitHub release. Actions → Release → Run workflow can exercise the signed
+build before a release by enabling `build_desktop`.

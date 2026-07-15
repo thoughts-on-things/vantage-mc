@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      build_desktop:
+        description: Build and verify signed Windows installers
+        type: boolean
+        default: false
 
 # A release is not safe to interrupt midway through publishing.
 concurrency:
@@ -18,6 +23,7 @@ jobs:
     name: Release PR / tag
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       issues: write
       pull-requests: write
@@ -30,6 +36,25 @@ jobs:
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pull requests created with GITHUB_TOKEN do not trigger another normal
+      # workflow. Dispatch CI explicitly so the release PR is tested too.
+      - name: Run CI for the release PR
+        if: steps.release.outputs.release_created != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch=$(gh pr list --state open --base main \
+            --json author,headRefName \
+            --jq '.[] | select(.author.login == "app/github-actions") | .headRefName | select(startswith("release-please--"))' \
+            | head -n 1)
+          if [ -n "$branch" ]; then
+            echo "Dispatching CI for $branch"
+            gh workflow run ci.yml --ref "$branch"
+          else
+            echo "No open Release Please PR found"
+          fi
 
   binaries:
     name: Binary (${{ matrix.name }})
@@ -155,3 +180,110 @@ jobs:
             [ "$attempt" = 3 ] && exit 1
             sleep $((attempt * 15))
           done
+
+  desktop:
+    name: Windows desktop installers
+    needs: release-please
+    if: >-
+      needs.release-please.outputs.release_created == 'true' ||
+      (github.event_name == 'workflow_dispatch' && inputs.build_desktop)
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      # The desktop Vite aliases point at ../web/src, whose React and Three.js
+      # imports resolve through web/node_modules.
+      - name: Install shared web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+
+      # Keep signing opt-in for forks/local builds. The profile holds the
+      # verified ThoughtsOnThings publisher identity; the description is the
+      # product name shown for Vantage artifacts.
+      - name: Enable Windows code signing
+        if: vars.AZURE_SIGNING_ACCOUNT != ''
+        shell: bash
+        env:
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        run: |
+          cargo install artifact-signing-cli --version 0.11.0 --locked
+          node -e "
+            const fs = require('node:fs');
+            const p = 'desktop/src-tauri/tauri.conf.json';
+            const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+            j.bundle.windows = {
+              ...(j.bundle.windows ?? {}),
+              signCommand: {
+                cmd: 'artifact-signing-cli',
+                args: [
+                  '-e', process.env.AZURE_SIGNING_ENDPOINT,
+                  '-a', process.env.AZURE_SIGNING_ACCOUNT,
+                  '-c', process.env.AZURE_SIGNING_PROFILE,
+                  '-d', 'Vantage',
+                  '%1',
+                ],
+              },
+            };
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+          "
+
+      # The release already exists (release-please created it); tauri-action
+      # builds the configured MSI + NSIS bundles and attaches both to that tag.
+      - uses: tauri-apps/tauri-action@v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        with:
+          projectPath: desktop
+          tagName: ${{ needs.release-please.outputs.tag_name }}
+          retryAttempts: 2
+          uploadWorkflowArtifacts: ${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Verify Windows signatures
+        if: vars.AZURE_SIGNING_ACCOUNT != ''
+        shell: pwsh
+        run: |
+          $files = @(
+            Get-Item desktop/src-tauri/target/release/vantage-desktop.exe
+            Get-ChildItem desktop/src-tauri/target/release/bundle -Recurse -File |
+              Where-Object { $_.Extension -in '.exe', '.msi' }
+          )
+          if ($files.Count -lt 3) {
+            throw "Expected the app executable plus NSIS and MSI bundles"
+          }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            Write-Host "$($file.Name): $($signature.Status) — $($signature.SignerCertificate.Subject)"
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature: $($file.FullName)"
+            }
+          }

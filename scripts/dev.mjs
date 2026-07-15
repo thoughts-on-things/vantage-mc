@@ -166,11 +166,16 @@ if (mode === 'setup') {
   info('Building the Windows installer and bundled Zig sidecar…');
   run(npm, npmArgs(['run', 'desktop:build']), join(root, 'desktop'));
 } else if (mode === 'check') {
+  if (!ensureDependencies('site')) process.exit(1);
+  runChecked(process.execPath, ['scripts/check-versions.mjs'], root, 'Checking release versions…');
+  runChecked('zig', ['fmt', '--check', '.'], root, 'Checking Zig formatting…');
   runChecked('zig', ['build', 'test'], root, 'Running Zig tests…');
   runChecked(npm, npmArgs(['run', 'ci']), join(root, 'web'), 'Checking the renderer package…');
-  runChecked(npm, npmArgs(['run', 'build']), join(root, 'desktop'), 'Checking the desktop frontend…');
+  runChecked(npm, npmArgs(['run', 'build:demo']), join(root, 'web'), 'Building the renderer demo…');
+  runChecked(npm, npmArgs(['run', 'ci']), join(root, 'site'), 'Checking the site…');
+  runChecked(npm, npmArgs(['run', 'ci']), join(root, 'desktop'), 'Checking the desktop frontend…');
   runChecked('cargo', ['fmt', '--check'], join(root, 'desktop', 'src-tauri'), 'Checking Rust formatting…');
-  runChecked('cargo', ['check'], join(root, 'desktop', 'src-tauri'), 'Checking the native host and Zig sidecar…');
+  runChecked('cargo', ['clippy', '--all-targets', '--', '-D', 'warnings'], join(root, 'desktop', 'src-tauri'), 'Linting the native host and Zig sidecar…');
   console.log(`\n${ansi('92', 'All checks passed.')}\n`);
 } else {
   fail(`Unknown development mode: ${mode}`);

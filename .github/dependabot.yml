@@ -1,5 +1,33 @@
 version: 2
 updates:
+  # Each npm workspace has its own lockfile.
+  - package-ecosystem: npm
+    directories:
+      - /web
+      - /site
+      - /desktop
+    schedule:
+      interval: weekly
+    groups:
+      npm-non-major:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore(deps)
+
+  - package-ecosystem: cargo
+    directory: /desktop/src-tauri
+    schedule:
+      interval: weekly
+    groups:
+      rust-non-major:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore(deps)
+
   # Keep the GitHub Actions used in CI up to date.
   - package-ecosystem: github-actions
     directory: /

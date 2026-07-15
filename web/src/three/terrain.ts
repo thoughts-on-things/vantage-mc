@@ -81,7 +81,7 @@ const WATER_FALLBACK: Rgb = [0.3, 0.5, 0.85];
 /** The meshes built from one tile with caller-provided (shared) materials. */
 export interface TileMeshes {
   terrain: THREE.Mesh;
-  /** The atlas-lit tail of the solid geometry (VTL8), drawn with the
+  /** The atlas-lit tail of the solid geometry (VTL8+), drawn with the
    *  lightmapped sibling material. */
   terrainLm?: THREE.Mesh;
   /** The tail's lightmap texture — dispose it with the tile. */
@@ -94,12 +94,23 @@ export interface TileMeshes {
  *  clamped — texel centres are block corners, so LinearFilter interpolation
  *  reproduces per-vertex smooth lighting exactly per block. */
 function lightmapTexture(lm: Lightmap): THREE.DataTexture {
-  const tex = new THREE.DataTexture(lm.pixels, lm.width, lm.height, THREE.RGBAFormat, THREE.UnsignedByteType);
-  tex.magFilter = THREE.LinearFilter;
-  tex.minFilter = THREE.LinearFilter;
+  const format = lm.packed ? THREE.RGFormat : THREE.RGBAFormat;
+  const tex = new THREE.DataTexture(lm.pixels, lm.width, lm.height, format, THREE.UnsignedByteType);
+  // VTL9 does exact manual bilinear filtering after unpacking each texel; VTL8
+  // retains hardware filtering over its independent RGBA channels.
+  tex.magFilter = lm.packed ? THREE.NearestFilter : THREE.LinearFilter;
+  tex.minFilter = lm.packed ? THREE.NearestFilter : THREE.LinearFilter;
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.generateMipmaps = false;
+  // Attribute arrays are released after upload for the same reason: keeping a
+  // CPU lightmap after its RG8/RGBA8 upload doubles its steady-state residency.
+  // Store the durable GPU size before dropping the source. (Context-loss
+  // rebuild was already unavailable once geometry arrays were released.)
+  tex.userData['vantageGpuBytes'] = lm.pixels.byteLength;
+  tex.onUpdate = () => {
+    (tex.image as { data: unknown }).data = null;
+  };
   tex.needsUpdate = true;
   return tex;
 }
@@ -203,7 +214,7 @@ export function isSharedQuadIndex(attr: THREE.BufferAttribute | null): boolean {
 function quantizedMesh(
   sec: QuantizedSection,
   material: THREE.ShaderMaterial,
-  lm?: { tex: THREE.DataTexture; size: THREE.Vector2 },
+  lm?: { tex: THREE.DataTexture; size: THREE.Vector2; packed: boolean },
 ): THREE.Mesh {
   const geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.BufferAttribute(sec.positions, 3, false));
@@ -239,6 +250,7 @@ function quantizedMesh(
     if (lm) {
       m.uniforms['uLightmap']!.value = lm.tex;
       (m.uniforms['uLmSize']!.value as THREE.Vector2).copy(lm.size);
+      m.uniforms['uLmPacked']!.value = lm.packed ? 1.0 : 0.0;
     }
     // The material is shared by every tile; three only refreshes ShaderMaterial
     // uniforms once per frame per material unless told otherwise. This flag
@@ -250,11 +262,11 @@ function quantizedMesh(
 }
 
 /**
- * Build a VTL6/7/8 tile's meshes in the quantized fast path: shared QUANTIZED
+ * Build a VTL6+ tile's meshes in the quantized fast path: shared QUANTIZED
  * materials (from `createTerrainMaterial(tex, { quantized: true, palette })`),
  * zero per-vertex CPU work. This is what the streaming TileManager uses.
  *
- * A VTL8 tile's atlas-lit vertex tail becomes its own mesh (`terrainLm`) drawn
+ * A VTL8+ tile's atlas-lit vertex tail becomes its own mesh (`terrainLm`) drawn
  * with `lmMaterial` (from {@link createLightmappedMaterial}) — pass it whenever
  * the world is format 4+, or the tail would render full-bright.
  */
@@ -279,7 +291,11 @@ export function buildQuantizedTileMeshes(
     const lm = tile.lightmap!;
     lightmapTex = lightmapTexture(lm);
     const tail = sliceSection(solid, lmStart, solid.vertexCount);
-    terrainLm = quantizedMesh(tail, lmMaterial!, { tex: lightmapTex, size: new THREE.Vector2(lm.width, lm.height) });
+    terrainLm = quantizedMesh(tail, lmMaterial!, {
+      tex: lightmapTex,
+      size: new THREE.Vector2(lm.width, lm.height),
+      packed: lm.packed,
+    });
     terrainLm.geometry.setAttribute('almuv', new THREE.BufferAttribute(solid.lmuv!, 2, false));
   }
 

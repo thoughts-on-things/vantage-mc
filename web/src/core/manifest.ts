@@ -27,7 +27,7 @@ export interface LowresLevel {
 /** A parsed `manifest.json` for a tiled world render. */
 export interface WorldManifest {
   /** Manifest schema version (1 = hires tiles only, 2 adds `lowres`,
-   *  3 = VTL7 compact tiles + `maxSectionVerts`). */
+   *  3 = VTL7 compact tiles, 4 = lightmaps, 5 = packed RG8 lightmaps). */
   format: number;
   /** Largest per-section vertex count across every tile (format 3+) — sizes
    *  the renderer's one shared quad index buffer before the first tile lands. */
@@ -87,8 +87,8 @@ export function parseManifest(data: unknown): WorldManifest {
   if (typeof data !== 'object' || data === null) throw new Error('vantage: manifest is not an object');
   const m = data as Record<string, unknown>;
   const format = m['format'];
-  if (format !== 1 && format !== 2 && format !== 3 && format !== 4) {
-    throw new Error(`vantage: unsupported manifest format ${String(format)} (expected 1..4)`);
+  if (format !== 1 && format !== 2 && format !== 3 && format !== 4 && format !== 5) {
+    throw new Error(`vantage: unsupported manifest format ${String(format)} (expected 1..5)`);
   }
   const tileChunks = m['tileChunks'];
   const tileBlocks = m['tileBlocks'];

@@ -60,18 +60,19 @@ jobs:
 
   web:
     name: web (node ${{ matrix.node }})
-    # 18 is the documented floor, 22 the everyday version — test both.
+    # 20 is the documented floor (Vite/Vitest require ^20.19 || >=22.12),
+    # 22 the everyday version — test both.
     strategy:
       fail-fast: false
       matrix:
-        node: [18, 22]
+        node: [20, 22]
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: web
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -92,7 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: 22
           cache: npm
@@ -123,7 +124,7 @@ jobs:
         with:
           version: 0.16.0
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: 22
           cache: npm

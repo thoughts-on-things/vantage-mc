@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.4.0...v0.5.0) (2026-07-15)
+
+
+### Features
+
+* **desktop:** add native world studio foundation ([#24](https://github.com/thoughts-on-things/vantage-mc/issues/24)) ([baeec1a](https://github.com/thoughts-on-things/vantage-mc/commit/baeec1ac160ba5dff82963ccc2132be4c6d8ea29))
+* **site:** showcase the desktop app with a live launcher + downloads ([#43](https://github.com/thoughts-on-things/vantage-mc/issues/43)) ([8bfebf7](https://github.com/thoughts-on-things/vantage-mc/commit/8bfebf76b197190b756e8a0635f62e3aeaaa533b))
+* vantage live — explore any world instantly, tiles baked on demand ([#25](https://github.com/thoughts-on-things/vantage-mc/issues/25)) ([b937a8e](https://github.com/thoughts-on-things/vantage-mc/commit/b937a8e35d621eec4749e65b8a06591ed00eda26))
+
+
+### Bug Fixes
+
+* **ci:** pass --repo to gh calls in release CI dispatch step ([#41](https://github.com/thoughts-on-things/vantage-mc/issues/41)) ([cf361db](https://github.com/thoughts-on-things/vantage-mc/commit/cf361dbaabf54972b8f9a17aa280ab2101508e2d))
+* **site:** unblock the lighting panel; tighten cave-view copy ([#21](https://github.com/thoughts-on-things/vantage-mc/issues/21)) ([3fdf5a1](https://github.com/thoughts-on-things/vantage-mc/commit/3fdf5a11c55b4e54fc6aa294400fe47ad4ece3dc))
+
 ## [0.4.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.3.0...v0.4.0) (2026-07-13)
 
 

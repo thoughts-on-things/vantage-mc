@@ -14,7 +14,8 @@
     "declaration": true,
     "noEmit": true,
     "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "ignoreDeprecations": "6.0"
   },
   "include": ["src", "demo", "test", "tsup.config.ts", "vite.config.ts"]
 }

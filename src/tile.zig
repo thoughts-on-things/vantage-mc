@@ -455,23 +455,27 @@ fn appendMeshSectionCompact(arena: std.mem.Allocator, out: *std.ArrayList(u8), m
 
 pub const MAGIC8 = "VTL8";
 pub const VERSION8: u32 = 8;
+pub const MAGIC9 = "VTL9";
+pub const VERSION9: u32 = 9;
 
-/// VTL8 = VTL7 + the per-tile lightmap atlas that unlocks light-independent
-/// greedy merging (~23% fewer vertices, and big merged quads gain true
-/// per-block light gradients instead of 4-corner flattening):
+/// VTL9 = VTL8's light-independent greedy geometry with a losslessly packed
+/// lightmap atlas:
+///   - greedy merging still yields ~23% fewer vertices, and big merged quads
+///     retain true per-block light gradients instead of 4-corner flattening.
 ///   - each section header gains `lm_start`: vertices from that index up (the
 ///     greedy tail) are lit by the atlas; earlier vertices keep per-vertex
 ///     light (packed in normal.w) and AO (colour alpha) as before.
 ///   - the tail's lightmap UVs ship as u16 half-texel pairs (uv_texels =
 ///     stored / 2; the +0.5 texel-centre offset is baked into the values),
 ///     delta-coded per component like positions.
-///   - after both sections: u32 atlas W, u32 H, then three PLANAR channels of
-///     W·H bytes each — sky·17, block·17, AO — which the client interleaves
-///     to RGBA (A=255) for upload. Planar measures ~2× smaller under gzip.
+///   - after both sections: u32 atlas W, u32 H, then two byte planes: packed
+///     `(sky << 4) | block`, then AO. Sky/block are natively 4-bit, so this is
+///     exact. Planes preserve gzip locality; the browser interleaves to RG8
+///     and manually filters decoded texels, preserving VTL8's gradients.
 /// Layout:
-///   "VTL8", u32 ver=8,
+///   "VTL9", u32 ver=9,
 ///   <solid l-section>, <fluid l-section>,
-///   u32 lm_w, u32 lm_h, u8[3·lm_w·lm_h] planar texels,
+///   u32 lm_w, u32 lm_h, u8[lm_w·lm_h] packed light, u8[...] AO,
 ///   u32 sx, u32 sz, i32 min_x, i32 min_z,
 ///   u16[sx*sz] biome, i16[sx*sz] height,
 ///   u32 biome_count, legend.
@@ -485,15 +489,30 @@ pub fn serializeWithLightmap(
 ) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(arena); // NonQuadMesh can bail mid-write
-    try out.appendSlice(arena, MAGIC8);
-    try appendU32(arena, &out, VERSION8);
+
+    // A tile arena cannot reclaim each ArrayList growth allocation. Reserve the
+    // exact final size once so serialization never retains superseded buffers.
+    const surface_cells = surface.sx * surface.sz;
+    var exact_size: usize = 8 + litSectionSize(built.solid.vertex_count, built.lm_start) +
+        litSectionSize(built.fluid.vertex_count, built.fluid.vertex_count) + 8 + built.lightmap.texels.len +
+        16 + 4 * surface_cells + 4;
+    for (biome_names) |name| exact_size += 2 + @min(name.len, std.math.maxInt(u16));
+    try out.ensureTotalCapacityPrecise(arena, exact_size);
+
+    try out.appendSlice(arena, MAGIC9);
+    try appendU32(arena, &out, VERSION9);
     try appendMeshSectionLit(arena, &out, built.solid, built.lm_start);
     try appendMeshSectionLit(arena, &out, built.fluid, built.fluid.vertex_count);
 
     // The shelf-packed lightmap atlas (may be empty: flat light, empty tile).
     try appendU32(arena, &out, built.lightmap.w);
     try appendU32(arena, &out, built.lightmap.h);
-    try out.appendSlice(arena, built.lightmap.texels);
+    const lightmap_texels: usize = @as(usize, built.lightmap.w) * built.lightmap.h;
+    std.debug.assert(built.lightmap.texels.len == lightmap_texels * 2);
+    // Transpose the mesher's convenient interleaved RG into two homogeneous
+    // planes. This is still allocation-free and compresses materially better.
+    for (0..lightmap_texels) |i| try out.append(arena, built.lightmap.texels[i * 2]);
+    for (0..lightmap_texels) |i| try out.append(arena, built.lightmap.texels[i * 2 + 1]);
 
     // Surface map: dims + world origin, then the two parallel column arrays.
     try appendU32(arena, &out, @intCast(surface.sx));
@@ -515,6 +534,13 @@ pub fn serializeWithLightmap(
     return out.toOwnedSlice(arena);
 }
 
+/// Exact encoded size of one aligned VTL9 lit section. Both counts are quad
+/// multiples, so the expression is already 4-byte aligned.
+fn litSectionSize(vertex_count: u32, lm_start: u32) usize {
+    const v: usize = vertex_count;
+    return 32 + 26 * v - 4 * @as(usize, lm_start);
+}
+
 fn appendMeshSectionLit(arena: std.mem.Allocator, out: *std.ArrayList(u8), m: mesh.Mesh2, lm_start: u32) !void {
     const v = m.vertex_count;
     if (v % 4 != 0) return error.NonQuadMesh;
@@ -522,11 +548,10 @@ fn appendMeshSectionLit(arena: std.mem.Allocator, out: *std.ArrayList(u8), m: me
     try appendU32(arena, out, v);
     try appendU32(arena, out, lm_start);
 
-    // UV as i16 fixed point.
-    const uvq = try arena.alloc(i16, v * 2);
-    defer arena.free(uvq);
-    for (m.uv.items, 0..) |u, i| uvq[i] = quantUv(u);
-    try out.appendSlice(arena, std.mem.sliceAsBytes(uvq));
+    // Encode directly into the exactly reserved output. The old temporary
+    // uv/position/id arrays accumulated in the tile arena and materially
+    // inflated peak memory even though their logical lifetimes were short.
+    for (m.uv.items) |u| try appendI16(arena, out, quantUv(u));
 
     try out.appendSlice(arena, std.mem.sliceAsBytes(m.color.items));
     try out.appendSlice(arena, std.mem.sliceAsBytes(m.normals.items));
@@ -554,41 +579,27 @@ fn appendMeshSectionLit(arena: std.mem.Allocator, out: *std.ArrayList(u8), m: me
     inline for (sc) |x| try appendF32(arena, out, x);
 
     // Delta-coded quantized positions (see VTL7).
-    const pq = try arena.alloc(u16, v * 3);
-    defer arena.free(pq);
     var prev = [3]u16{ 0, 0, 0 };
     for (0..v) |i| {
         inline for (0..3) |k| {
             const q = quantPos(m.positions.items[i * 3 + k], mn[k], sc[k]);
-            pq[i * 3 + k] = zigzagDelta(q, prev[k]);
+            try appendU16(arena, out, zigzagDelta(q, prev[k]));
             prev[k] = q;
         }
     }
-    try out.appendSlice(arena, std.mem.sliceAsBytes(pq));
 
     // Lossless integer ids, unchanged from VTL6.
-    const lq = try arena.alloc(u16, v);
-    defer arena.free(lq);
-    const bq = try arena.alloc(u16, v);
-    defer arena.free(bq);
-    for (0..v) |i| {
-        lq[i] = idToU16(m.layer.items[i]);
-        bq[i] = idToU16(m.biome.items[i]);
-    }
-    try out.appendSlice(arena, std.mem.sliceAsBytes(lq));
-    try out.appendSlice(arena, std.mem.sliceAsBytes(bq));
+    for (m.layer.items) |x| try appendU16(arena, out, idToU16(x));
+    for (m.biome.items) |x| try appendU16(arena, out, idToU16(x));
 
     // The atlas-lit tail's lightmap UVs (half-texel u16 pairs), delta-coded
     // per component like positions — atlas placement follows emission order,
     // so consecutive quads sit side by side and the deltas stay small.
-    const lz = try arena.alloc(u16, m.lmuv.items.len);
-    defer arena.free(lz);
     var lprev = [2]u16{ 0, 0 };
     for (m.lmuv.items, 0..) |val, i| {
-        lz[i] = zigzagDelta(val, lprev[i % 2]);
+        try appendU16(arena, out, zigzagDelta(val, lprev[i % 2]));
         lprev[i % 2] = val;
     }
-    try out.appendSlice(arena, std.mem.sliceAsBytes(lz));
 
     // Pad to a 4-byte boundary so the next section / surface stays aligned.
     while (out.items.len % 4 != 0) try out.append(arena, 0);
@@ -621,6 +632,18 @@ fn idToU16(x: f32) u16 {
 fn appendF32(arena: std.mem.Allocator, out: *std.ArrayList(u8), v: f32) !void {
     var buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &buf, @bitCast(v), .little);
+    try out.appendSlice(arena, &buf);
+}
+
+fn appendU16(arena: std.mem.Allocator, out: *std.ArrayList(u8), v: u16) !void {
+    var buf: [2]u8 = undefined;
+    std.mem.writeInt(u16, &buf, v, .little);
+    try out.appendSlice(arena, &buf);
+}
+
+fn appendI16(arena: std.mem.Allocator, out: *std.ArrayList(u8), v: i16) !void {
+    var buf: [2]u8 = undefined;
+    std.mem.writeInt(i16, &buf, v, .little);
     try out.appendSlice(arena, &buf);
 }
 
@@ -896,7 +919,7 @@ test "VTL7 refuses non-quad meshes" {
     try std.testing.expectError(error.NonQuadMesh, serializeWithSurfaceCompact(a, solid, fluid, surface, &.{}));
 }
 
-test "VTL8 carries lm_start, the lmuv tail, and the atlas" {
+test "VTL9 carries lm_start, the lmuv tail, and the packed atlas" {
     const a = std.testing.allocator;
     var built: mesh.Built = .{};
     defer {
@@ -920,8 +943,8 @@ test "VTL8 carries lm_start, the lmuv tail, and the atlas" {
     built.lm_start = 4;
     // The greedy quad's half-texel lmuv: a 3x2-block rect at atlas (0,0).
     try m.lmuv.appendSlice(a, &.{ 1, 1, 1, 5, 7, 5, 7, 1 });
-    // Planar atlas: sky plane of 200s, block plane of 100s, AO plane of 255s.
-    var texels = [_]u8{200} ** 12 ++ [_]u8{100} ** 12 ++ [_]u8{255} ** 12;
+    // Packed RG atlas: sky=10/block=5, followed by exact AO=255.
+    var texels = [_]u8{ 0xa5, 255 } ** 12;
     built.lightmap = .{ .w = 4, .h = 3, .texels = &texels };
 
     const surface: grid.Surface = .{ .sx = 0, .sz = 0, .min_x = 0, .min_z = 0, .biome = &.{}, .height = &.{} };
@@ -929,8 +952,8 @@ test "VTL8 carries lm_start, the lmuv tail, and the atlas" {
     const bytes = try serializeWithLightmap(a, built, surface, &names);
     defer a.free(bytes);
 
-    try std.testing.expectEqualSlices(u8, MAGIC8, bytes[0..4]);
-    try std.testing.expectEqual(VERSION8, std.mem.readInt(u32, bytes[4..8], .little));
+    try std.testing.expectEqualSlices(u8, MAGIC9, bytes[0..4]);
+    try std.testing.expectEqual(VERSION9, std.mem.readInt(u32, bytes[4..8], .little));
     const V = 8;
     try std.testing.expectEqual(@as(u32, V), std.mem.readInt(u32, bytes[8..12], .little));
     try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, bytes[12..16], .little)); // lm_start
@@ -950,7 +973,7 @@ test "VTL8 carries lm_start, the lmuv tail, and the atlas" {
     const lm_off = fluid_off + 8 + 24;
     try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, bytes[lm_off..][0..4], .little));
     try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, bytes[lm_off + 4 ..][0..4], .little));
-    try std.testing.expectEqual(@as(u8, 200), bytes[lm_off + 8]); // sky plane
-    try std.testing.expectEqual(@as(u8, 100), bytes[lm_off + 8 + 12]); // block plane
-    try std.testing.expectEqual(@as(u8, 255), bytes[lm_off + 8 + 3 * 12 - 1]); // AO plane
+    try std.testing.expectEqual(@as(u8, 0xa5), bytes[lm_off + 8]); // packed sky/block
+    try std.testing.expectEqual(@as(u8, 255), bytes[lm_off + 8 + 12]); // AO plane
+    try std.testing.expectEqual(@as(u8, 255), bytes[lm_off + 8 + 2 * 12 - 1]);
 }

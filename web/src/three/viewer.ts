@@ -440,7 +440,7 @@ export class VantageViewer {
     const shader = createTerrainMaterial(texData, { quantized: true, palette });
     const waterShader = createWaterMaterial(shader);
     shader.uniforms['uFogRadial']!.value = 1.0; // fog radially from the focus, not by view depth
-    // Format 4+ (VTL8): the atlas-lit sibling material for lightmapped tails.
+    // Format 4+ (VTL8/9): the atlas-lit sibling material for lightmapped tails.
     const lmShader = manifest.format >= 4 ? createLightmappedMaterial(shader) : undefined;
     // Lowres pyramid (format 2): coarse whole-world rings under the hires disc.
     // A progressive render has none yet but will grow one — build the material
@@ -502,7 +502,7 @@ export class VantageViewer {
     this._biomes = [];
     this.emitter.emit('load', {
       // Streamed worlds: the tile format follows the manifest schema version.
-      magic: manifest.format >= 4 ? 'VTL8' : manifest.format >= 3 ? 'VTL7' : 'VTL6',
+      magic: manifest.format >= 5 ? 'VTL9' : manifest.format >= 4 ? 'VTL8' : manifest.format >= 3 ? 'VTL7' : 'VTL6',
       vertexCount: 0,
       triangleCount: 0,
       size,

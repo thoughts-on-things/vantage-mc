@@ -507,19 +507,21 @@ fn appendAtlasTail(arena: std.mem.Allocator, gp: []GreedyPartial, mesh: *Mesh2) 
         mesh.vertex_count += 4;
     }
 
-    // Ship the atlas as three planar channels (all sky, then all block, then
-    // all AO — the constant alpha isn't stored): measured ~2× better under
-    // gzip than interleaved RGBA (each plane is self-similar; row/column
-    // predictors were also measured and LOSE — tiny packed patches make
-    // neighbour prediction noise). The client re-interleaves in one pass.
-    const planar = try arena.alloc(u8, w * h * 3);
+    // VTL9 stores two interleaved bytes per texel: sky/block (4 bits each),
+    // then the full 8-bit AO value. Sky and block are natively 0..15 (the
+    // working atlas holds them multiplied by 17), so this is lossless. Compact
+    // in-place after every patch has been copied: dst=2i is always behind
+    // src=4i, avoiding another tile-sized allocation and leaving the result
+    // compact in memory. The tile writer transposes these two channels into
+    // planes for substantially better gzip locality.
     const n = w * h;
     for (0..n) |i| {
-        planar[i] = texels[i * 4];
-        planar[n + i] = texels[i * 4 + 1];
-        planar[2 * n + i] = texels[i * 4 + 2];
+        const sky = texels[i * 4] / 17;
+        const block = texels[i * 4 + 1] / 17;
+        texels[i * 2] = (sky << 4) | block;
+        texels[i * 2 + 1] = texels[i * 4 + 2];
     }
-    return .{ .w = @intCast(w), .h = @intCast(h), .texels = planar };
+    return .{ .w = @intCast(w), .h = @intCast(h), .texels = texels[0 .. n * 2] };
 }
 
 /// A fluid's texture-array layers: the still texture (flat tops, bottoms) and

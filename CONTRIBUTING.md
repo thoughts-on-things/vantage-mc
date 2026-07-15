@@ -15,7 +15,7 @@ reports, and PRs are all welcome.
 ## Dev setup
 
 You need [Zig](https://ziglang.org) **0.16.0** (the version is pinned —
-pre-1.0 Zig breaks between releases) and **Node 18+**. The
+pre-1.0 Zig breaks between releases) and **Node 20+**. The
 [`Justfile`](./Justfile) ([`just`](https://just.systems)) wraps the loop:
 
 ```sh

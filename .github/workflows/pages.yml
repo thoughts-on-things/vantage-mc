@@ -48,7 +48,7 @@ jobs:
 
       - name: Cache Minecraft assets
         id: mc-assets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/vantage/assets
           key: mc-assets-${{ env.MC_VERSION }}
@@ -63,7 +63,7 @@ jobs:
           curl -sfL "$JAR_URL" -o "/tmp/$MC_VERSION.jar"
           ./zig-out/bin/vantage extract "/tmp/$MC_VERSION.jar"
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: 22
           cache: npm
@@ -86,7 +86,7 @@ jobs:
       - name: Render the demo world
         run: ./zig-out/bin/vantage render site/demo-world --caves full --out site/dist/demo
 
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site/dist
 
@@ -98,4 +98,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

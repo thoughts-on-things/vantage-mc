@@ -8,30 +8,90 @@ updates:
       - /desktop
     schedule:
       interval: weekly
+      day: monday
+    # Keep version-update noise low; security updates have their own GitHub limit.
+    open-pull-requests-limit: 3
+    cooldown:
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    labels:
+      - dependencies
+      - npm
+    commit-message:
+      prefix: chore(deps)
+      prefix-development: chore(deps-dev)
     groups:
+      # Normal maintenance — one PR per directory for all non-major bumps.
       npm-non-major:
+        applies-to: version-updates
         update-types:
           - minor
           - patch
-    commit-message:
-      prefix: chore(deps)
+        patterns:
+          - "*"
+      # Breaking changes — batched together, but delayed long enough for fixes/docs.
+      npm-major:
+        applies-to: version-updates
+        update-types:
+          - major
+        patterns:
+          - "*"
+      # Security fixes — bundled so they land together, fast.
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: cargo
     directory: /desktop/src-tauri
     schedule:
       interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    cooldown:
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: chore(deps)
     groups:
       rust-non-major:
+        applies-to: version-updates
         update-types:
           - minor
           - patch
-    commit-message:
-      prefix: chore(deps)
+        patterns:
+          - "*"
+      rust-major:
+        applies-to: version-updates
+        update-types:
+          - major
+        patterns:
+          - "*"
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # Keep the GitHub Actions used in CI up to date.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+      day: monday
+    open-pull-requests-limit: 1
+    cooldown:
+      default-days: 7
+    labels:
+      - dependencies
+      - github-actions
     commit-message:
       prefix: ci
+    groups:
+      github-actions:
+        patterns:
+          - "*"

@@ -62,6 +62,9 @@
       "esbuild": "^0.28.1"
     }
   },
+  "allowScripts": {
+    "esbuild": true
+  },
   "peerDependencies": {
     "react": ">=18",
     "react-dom": ">=18",

@@ -17,6 +17,34 @@ browser, built around four ordered goals:
 3. **Usability** — never break across Minecraft updates; trivial to deploy and scale.
 4. **Fidelity** — modern, configurable, high-quality rendering.
 
+## Desktop app (Windows MVP)
+
+The `desktop/` workspace is a Tauri 2 world studio for Windows. It discovers
+Java Edition saves from the vanilla launcher, Prism, MultiMC, CurseForge,
+Modrinth, and GDLauncher; renders through the same bundled Zig core as the CLI;
+and opens the result in Vantage's GPU-accelerated streaming viewer. Save files
+are read-only and generated renders stay in the user's local application cache.
+
+From the repository root—no per-folder install dance:
+
+```powershell
+just dev                  # bootstrap dependencies, then launch the native app
+just dev-ui               # instant browser-only UI loop with mock worlds
+just doctor               # diagnose Node / Zig / Rust / Windows setup
+just check                # the complete local check suite
+just desktop-build        # Windows installer + bundled Zig sidecar
+```
+
+The bootstrap only runs `npm ci` on the first launch or when a lockfile changes.
+Native requirements are Zig 0.16, Rust stable with the Windows MSVC toolchain,
+Node 18+, and WebView2. The first native compile takes a little longer;
+subsequent launches use Cargo and Zig's incremental caches.
+
+The desktop boundary is deliberately small: Zig emits line-delimited discovery
+and progress records, Rust manages the child process and a loopback-only asset
+endpoint, and React owns the application UI. See [`desktop/README.md`](./desktop/README.md)
+for the architecture and development workflow.
+
 ![Vantage — textured 3D terrain streaming in the browser](./docs/render-hero.jpg)
 
 ## How it works

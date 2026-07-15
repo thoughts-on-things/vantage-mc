@@ -27,6 +27,8 @@ const world = @import("world.zig");
 const lowres = @import("lowres.zig");
 const extract = @import("extract.zig");
 const serve = @import("serve.zig");
+pub const discovery = @import("discovery.zig");
+pub const version = @import("build_options").version;
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -43,6 +45,10 @@ pub fn main(init: std.process.Init) !void {
         return;
     } else if (std.mem.eql(u8, args[1], "render")) {
         return runRender(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "desktop-discover")) {
+        return runDesktopDiscover(init, a);
+    } else if (std.mem.eql(u8, args[1], "desktop-render")) {
+        return runDesktopRender(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "serve")) {
         return runServe(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "live")) {
@@ -101,6 +107,49 @@ fn printUsage() void {
         \\  vantage texinfo <assets/minecraft dir> <block-name...>
         \\
     , .{});
+}
+
+/// Line-delimited desktop protocol. Human CLI output remains unchanged; the
+/// Tauri host filters only records carrying a `VANTAGE_` prefix.
+fn runDesktopDiscover(init: std.process.Init, a: std.mem.Allocator) !void {
+    const worlds = try discovery.discover(
+        a,
+        init.io,
+        discovery.environmentFromProcess(init.environ_map),
+        &.{},
+    );
+    for (worlds) |info| {
+        var json: std.ArrayList(u8) = .empty;
+        try json.appendSlice(a, "{\"path\":");
+        try appendJsonString(a, &json, info.path);
+        try json.appendSlice(a, ",\"name\":");
+        try appendJsonString(a, &json, info.name);
+        try json.print(a, ",\"lastPlayedMs\":{d},\"dataVersion\":{d},\"source\":", .{ info.last_played_ms, info.data_version });
+        try appendJsonString(a, &json, @tagName(info.source));
+        try json.appendSlice(a, ",\"iconPath\":");
+        if (info.icon_path) |icon| try appendJsonString(a, &json, icon) else try json.appendSlice(a, "null");
+        try json.append(a, '}');
+        std.debug.print("VANTAGE_WORLD {s}\n", .{json.items});
+    }
+    std.debug.print("VANTAGE_DISCOVERY_DONE {{\"count\":{d}}}\n", .{worlds.len});
+}
+
+fn runDesktopRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len != 2) return usage();
+    var progress: RenderProgress = .{
+        .callback = emitDesktopProgress,
+    };
+    try renderWorld(init, a, .{
+        .save_dir = args[0],
+        .out_dir = args[1],
+    }, &progress);
+}
+
+fn emitDesktopProgress(_: ?*anyopaque, snapshot: RenderProgress.Snapshot) void {
+    std.debug.print(
+        "VANTAGE_PROGRESS {{\"phase\":\"{s}\",\"completed\":{d},\"total\":{d}}}\n",
+        .{ @tagName(snapshot.phase), snapshot.completed, snapshot.total },
+    );
 }
 
 /// Scan args for `--light flat|smooth` (default `smooth`). The bake-time light
@@ -548,7 +597,109 @@ fn enumerateTilesSpawnOutward(
 /// spans `--tile-chunks`² chunks and is meshed with a 1-chunk apron of
 /// neighbour data, so culling, AO, light (range 15 < 16-block apron), and
 /// biome blending are seam-free across tile borders.
-fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+pub const RenderPhase = enum(u8) {
+    idle,
+    scanning,
+    tiles,
+    lowres,
+    finalizing,
+    done,
+    failed,
+};
+
+pub const RenderProgress = struct {
+    phase: std.atomic.Value(u8) = .init(@intFromEnum(RenderPhase.idle)),
+    completed: std.atomic.Value(usize) = .init(0),
+    total: std.atomic.Value(usize) = .init(0),
+    callback: ?*const fn (?*anyopaque, Snapshot) void = null,
+    callback_context: ?*anyopaque = null,
+
+    pub const Snapshot = struct {
+        phase: RenderPhase,
+        completed: usize,
+        total: usize,
+
+        pub fn fraction(self: Snapshot) f32 {
+            if (self.total == 0) return 0;
+            return @as(f32, @floatFromInt(self.completed)) / @as(f32, @floatFromInt(self.total));
+        }
+    };
+
+    pub fn snapshot(self: *const RenderProgress) Snapshot {
+        return .{
+            .phase = @enumFromInt(self.phase.load(.acquire)),
+            .completed = self.completed.load(.acquire),
+            .total = self.total.load(.acquire),
+        };
+    }
+
+    fn setPhase(self: *RenderProgress, phase: RenderPhase) void {
+        self.phase.store(@intFromEnum(phase), .release);
+        self.notify();
+    }
+
+    fn beginTiles(self: *RenderProgress, total: usize) void {
+        self.completed.store(0, .release);
+        self.total.store(total, .release);
+        self.setPhase(.tiles);
+    }
+
+    fn setCompleted(self: *RenderProgress, completed: usize) void {
+        self.completed.store(completed, .release);
+        self.notify();
+    }
+
+    fn notify(self: *RenderProgress) void {
+        if (self.callback) |callback| callback(self.callback_context, self.snapshot());
+    }
+};
+
+pub const RenderOptions = struct {
+    save_dir: []const u8,
+    out_dir: []const u8,
+    full_caves: bool = false,
+};
+
+/// Typed, in-process render entry point shared by the desktop app and future
+/// embedders. The CLI remains an argument adapter around the same implementation.
+pub fn renderWorld(
+    init: std.process.Init,
+    a: std.mem.Allocator,
+    options: RenderOptions,
+    progress: *RenderProgress,
+) !void {
+    var args: [5][]const u8 = undefined;
+    var len: usize = 0;
+    args[len] = options.save_dir;
+    len += 1;
+    args[len] = "--out";
+    len += 1;
+    args[len] = options.out_dir;
+    len += 1;
+    if (options.full_caves) {
+        args[len] = "--caves";
+        len += 1;
+        args[len] = "full";
+        len += 1;
+    }
+    progress.setPhase(.scanning);
+    renderWorldArgs(init, a, args[0..len], progress) catch |err| {
+        progress.setPhase(.failed);
+        return err;
+    };
+    progress.setPhase(.done);
+}
+
+pub fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    return renderWorldArgs(init, a, args, null);
+}
+
+fn renderWorldArgs(
+    init: std.process.Init,
+    a: std.mem.Allocator,
+    args: []const []const u8,
+    observer: ?*RenderProgress,
+) !void {
     if (args.len < 1) return usage();
     const save = args[0];
     var assets_opt: ?[]const u8 = null;
@@ -607,6 +758,9 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         loaded.len,    bounds.count, bounds.spanX(), bounds.spanZ(),
         tile_keys.len, tile_chunks,  tile_chunks,
     });
+    if (observer) |p| {
+        p.beginTiles(tile_keys.len);
+    }
 
     // ---- parallel tile rendering --------------------------------------------
     // Workers pull tile indices from an atomic counter; each renders into its
@@ -669,6 +823,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         .live = &live,
         .plain_progress = plain_progress,
         .progress = tiles_node,
+        .observer = observer,
     };
 
     // Progressive render: a background thread republishes manifest.json (and the
@@ -706,6 +861,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
         t.join();
     }
     tiles_node.end();
+    if (observer) |p| p.setPhase(.lowres);
 
     // Merge per-tile results in key order (deterministic manifest).
     var stats: grid.Stats = .{};
@@ -871,6 +1027,7 @@ fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const
     }
     lod_node.end();
 
+    if (observer) |p| p.setPhase(.finalizing);
     const tex_node = root.start("writing textures + manifest", 0);
     const arr = try sh.builder.finish();
     // Atomic (temp + rename) like the progressive flusher: a browser still
@@ -1203,6 +1360,7 @@ const RenderCtx = struct {
     /// std.Progress' live bar is invisible to whoever is reading us).
     plain_progress: bool,
     progress: std.Progress.Node,
+    observer: ?*RenderProgress,
 };
 
 /// One tile's outcome, written only by the worker that owns the slot.
@@ -1253,6 +1411,7 @@ fn tileWorker(ctx: *RenderCtx) void {
         }
         ctx.progress.completeOne();
         const done = ctx.done.fetchAdd(1, .monotonic) + 1;
+        if (ctx.observer) |p| p.setCompleted(done);
         if (ctx.plain_progress) {
             // ~1% steps (every tile on small worlds) keeps the line count
             // bounded no matter how many tiles a world has.
@@ -2234,4 +2393,5 @@ test {
     _ = lang;
     _ = world;
     _ = serve;
+    _ = discovery;
 }

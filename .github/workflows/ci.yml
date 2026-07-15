@@ -60,11 +60,12 @@ jobs:
 
   web:
     name: web (node ${{ matrix.node }})
-    # 18 is the documented floor, 22 the everyday version — test both.
+    # 20 is the documented floor (Vite/Vitest require ^20.19 || >=22.12),
+    # 22 the everyday version — test both.
     strategy:
       fail-fast: false
       matrix:
-        node: [18, 22]
+        node: [20, 22]
     runs-on: ubuntu-latest
     defaults:
       run:

@@ -37,7 +37,7 @@ just desktop-build        # Windows installer + bundled Zig sidecar
 
 The bootstrap only runs `npm ci` on the first launch or when a lockfile changes.
 Native requirements are Zig 0.16, Rust stable with the Windows MSVC toolchain,
-Node 18+, and WebView2. The first native compile takes a little longer;
+Node 20+, and WebView2. The first native compile takes a little longer;
 subsequent launches use Cargo and Zig's incremental caches.
 
 Versioned Windows MSI and NSIS installers are signed with Microsoft Artifact
@@ -91,7 +91,7 @@ against write time (1..12, default 9).
 
 ## Quick start
 
-Requires [Zig](https://ziglang.org) `0.16.0` and Node 18+. A
+Requires [Zig](https://ziglang.org) `0.16.0` and Node 20+. A
 [`Justfile`](./Justfile) wraps the common tasks ([`just`](https://just.systems)):
 
 ```sh

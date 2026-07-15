@@ -5,6 +5,7 @@ import biomesShot from './assets/render-biomes.jpg';
 import { DEMO_MANIFEST } from './App.js';
 import { RaceReplay } from './RaceReplay.js';
 import { CaveReveal } from './CaveReveal.js';
+import { DesktopShowcase } from './DesktopShowcase.js';
 
 const GITHUB = 'https://github.com/thoughts-on-things/vantage-mc';
 const RELEASES = `${GITHUB}/releases`;
@@ -104,6 +105,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
           vantage
         </a>
         <div className="nav-links">
+          <a href="#desktop">download</a>
           <a href="#numbers">numbers</a>
           <a href="#caves">cave view</a>
           <a href="#how">how it works</a>
@@ -141,8 +143,11 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
               →
             </span>
           </button>
-          <a className="cta cta-ghost" href={RELEASES} rel="noreferrer">
-            Get vantage
+          <a className="cta cta-ghost" href="#desktop">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" aria-hidden="true">
+              <path d="M3 5.4 10.4 4.4V11.4H3ZM10.4 12.3V19.4L3 18.4V12.3ZM11.4 4.2 21 3V11.4H11.4ZM21 12.3V21L11.4 19.7V12.3Z" />
+            </svg>
+            Get the desktop app
           </a>
         </div>
         {demoReady === false && (
@@ -193,6 +198,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
         </div>
         <figcaption>Live viewer, not a video — click it.</figcaption>
       </figure>
+
+      <DesktopShowcase />
 
       <section className="numbers" id="numbers">
         <p className="kicker reveal">the numbers</p>

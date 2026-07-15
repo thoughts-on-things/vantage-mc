@@ -9,5 +9,7 @@ export default defineConfig({
   // PORT lets a harness (or `PORT=… npm run dev`) pick a free port; 8753 stays
   // the human-friendly default (`just serve`).
   server: { port: Number(process.env['PORT']) || 8753, host: '127.0.0.1' },
-  build: { outDir: 'dist-demo' },
+  // Three.js is the app, not an accidentally eager dependency. Keep builds
+  // quiet unless the single demo bundle grows materially beyond today's size.
+  build: { outDir: 'dist-demo', chunkSizeWarningLimit: 800 },
 });

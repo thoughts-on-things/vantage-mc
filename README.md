@@ -40,6 +40,9 @@ Native requirements are Zig 0.16, Rust stable with the Windows MSVC toolchain,
 Node 18+, and WebView2. The first native compile takes a little longer;
 subsequent launches use Cargo and Zig's incremental caches.
 
+Versioned Windows MSI and NSIS installers are signed with Microsoft Artifact
+Signing and attached to each GitHub release.
+
 The desktop boundary is deliberately small: Zig emits line-delimited discovery
 and progress records, Rust manages the child process and a loopback-only asset
 endpoint, and React owns the application UI. See [`desktop/README.md`](./desktop/README.md)

@@ -11,6 +11,7 @@
     "dev:ui": "node scripts/dev.mjs ui",
     "setup": "node scripts/dev.mjs setup",
     "doctor": "node scripts/dev.mjs doctor",
+    "version:check": "node scripts/check-versions.mjs",
     "test": "node scripts/dev.mjs check",
     "check": "node scripts/dev.mjs check",
     "build": "node scripts/dev.mjs build"

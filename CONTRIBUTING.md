@@ -9,6 +9,7 @@ reports, and PRs are all welcome.
 | --- | --- |
 | `src/` | The native generator (Zig): region/NBT parsing, model resolver, mesher, tile encoder |
 | `web/` | The `@thoughts-on-things/vantage-mc` npm package (tile decoder, three.js renderer, React components) and its demo app |
+| `desktop/` | Windows Tauri 2 app: React/Vite frontend, Rust host, and bundled Zig sidecar |
 | `vendor/` | Vendored C libraries (libdeflate, stb_image) — don't edit, update wholesale |
 
 ## Dev setup
@@ -56,7 +57,8 @@ serves the demo viewer over them.
 
 ## Before you open a PR
 
-- `just ci` passes (CI runs the same: `zig fmt --check`, tests, build).
+- `just check` passes (version sync, Zig formatting/tests, renderer + site builds, desktop frontend, Rustfmt, and strict Clippy).
+- `just ci` remains the fast Zig-only check when a change cannot affect the web or desktop workspaces.
 - For web changes: `npm ci && npm run ci && npm run build:demo` in `web/`.
 - New behavior comes with a test where practical — decoder/format changes in
   particular (there are inline `test` blocks in the Zig sources and vitest
@@ -75,9 +77,10 @@ that should appear in a release: `feat:` creates a minor release and `fix:` or
 
 Release Please maintains the release PR and changelog from commits merged to
 `main`. Merging that PR creates the tag and GitHub release, cross-compiles the
-five binary archives, and publishes `@thoughts-on-things/vantage-mc` to npm with provenance. A
-failed publish job can be retried safely; uploads are overwrite-safe and npm
-publishing first checks whether that exact version already exists.
+five CLI archives, builds the Windows desktop MSI and NSIS installers, and
+publishes `@thoughts-on-things/vantage-mc` to npm with provenance. A failed
+publish job can be retried safely; uploads are overwrite-safe and npm publishing
+first checks whether that exact version already exists.
 
 Maintainers must configure the npm package's trusted publisher once with
 organization `thoughts-on-things`, repository `vantage-mc`, workflow

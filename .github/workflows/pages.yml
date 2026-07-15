@@ -86,7 +86,7 @@ jobs:
       - name: Render the demo world
         run: ./zig-out/bin/vantage render site/demo-world --caves full --out site/dist/demo
 
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site/dist
 

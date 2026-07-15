@@ -351,6 +351,55 @@ pub fn downsample(
 }
 
 pub const MAGIC = "VLR1";
+pub const CACHE_MAGIC = "VCM1";
+
+/// Serialize an internal color-map checkpoint. Batch renders spill level maps
+/// here between pyramid passes instead of retaining ~80 KiB per world tile in
+/// the process arena. This is deliberately a tiny private format: checkpoints
+/// live only for the duration of one render and are deleted on completion.
+pub fn serializeCache(arena: std.mem.Allocator, m: ColorMap) ![]u8 {
+    const n: usize = @as(usize, m.size) * m.size;
+    if (m.height.len != n or m.rgb.len != 3 * n) return error.BadColorMap;
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, CACHE_MAGIC);
+    try appendU32(arena, &out, m.size);
+    try appendI32(arena, &out, m.min_x);
+    try appendI32(arena, &out, m.min_z);
+    try appendU32(arena, &out, m.span);
+    for (m.height) |h| {
+        var buf: [2]u8 = undefined;
+        std.mem.writeInt(i16, &buf, h, .little);
+        try out.appendSlice(arena, &buf);
+    }
+    try out.appendSlice(arena, m.rgb);
+    return out.toOwnedSlice(arena);
+}
+
+/// Read a color-map checkpoint into caller-owned arrays. Parsing copies the
+/// two payloads so callers can freely reuse/reset their input buffer arena.
+pub fn parseCache(arena: std.mem.Allocator, bytes: []const u8) !ColorMap {
+    const header = 20;
+    if (bytes.len < header or !std.mem.eql(u8, bytes[0..4], CACHE_MAGIC)) return error.BadColorMap;
+    const size = std.mem.readInt(u32, bytes[4..8], .little);
+    const min_x = std.mem.readInt(i32, bytes[8..12], .little);
+    const min_z = std.mem.readInt(i32, bytes[12..16], .little);
+    const span = std.mem.readInt(u32, bytes[16..20], .little);
+    const n = std.math.mul(usize, size, size) catch return error.BadColorMap;
+    const height_bytes = std.math.mul(usize, n, 2) catch return error.BadColorMap;
+    const rgb_bytes = std.math.mul(usize, n, 3) catch return error.BadColorMap;
+    const payload = std.math.add(usize, header, height_bytes) catch return error.BadColorMap;
+    const expected = std.math.add(usize, payload, rgb_bytes) catch return error.BadColorMap;
+    if (size == 0 or bytes.len != expected) return error.BadColorMap;
+
+    const height = try arena.alloc(i16, n);
+    var off: usize = header;
+    for (height) |*h| {
+        h.* = std.mem.readInt(i16, bytes[off..][0..2], .little);
+        off += 2;
+    }
+    const rgb = try arena.dupe(u8, bytes[off..]);
+    return .{ .size = size, .min_x = min_x, .min_z = min_z, .span = span, .rgb = rgb, .height = height };
+}
 
 /// Serialize a lowres tile with a 1-cell apron duplicated from the +x/+z
 /// neighbours (same level), so adjacent heightfield meshes share edge samples.
@@ -479,4 +528,21 @@ test "serialize writes an apron row/col from neighbours" {
     try std.testing.expectEqual(@as(u8, 10), blob[rgb_off]);
     try std.testing.expectEqual(@as(u8, 20), blob[rgb_off + 3 * (gw - 1)]);
     try std.testing.expectEqual(@as(usize, 0), blob.len % 4);
+}
+
+test "color map cache round trips without retaining the source arrays" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const rgb = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    const height = [_]i16{ 64, EMPTY, -20, 319 };
+    const original: ColorMap = .{ .size = 2, .min_x = -128, .min_z = 256, .span = 4, .rgb = @constCast(&rgb), .height = @constCast(&height) };
+    const encoded = try serializeCache(a, original);
+    const decoded = try parseCache(a, encoded);
+    try std.testing.expectEqual(original.size, decoded.size);
+    try std.testing.expectEqual(original.min_x, decoded.min_x);
+    try std.testing.expectEqual(original.min_z, decoded.min_z);
+    try std.testing.expectEqual(original.span, decoded.span);
+    try std.testing.expectEqualSlices(u8, &rgb, decoded.rgb);
+    try std.testing.expectEqualSlices(i16, &height, decoded.height);
 }

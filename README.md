@@ -143,9 +143,12 @@ The renderer only ever reads the world — it never writes to it. Useful flags:
   view** — press `C` and slice the world at any Y. Costs disk (New World:
   25 → 47 MB gzipped), not bake time.
 - `--tile-chunks <n>` — tile span in chunks (default 8 = 128×128 blocks).
-- `--threads <n>` — tile-render parallelism (default: all logical cores).
-  Peak memory is roughly one tile's working set per thread; lower it on
-  RAM-constrained machines.
+- `--threads <n>` — upper bound on tile-render parallelism. By default Vantage
+  uses the smaller of the logical-core count and its memory admission limit.
+- `--memory <MiB>` — memory capacity available to concurrent tile bakes. The
+  default is 1/8 of physical RAM, clamped to 512–1024 MiB; set this explicitly
+  for containers or shared hosts. Vantage estimates each tile's working set
+  from `--tile-chunks` and admits only as many bakes as fit both limits.
 - `--light flat|smooth` — bake-time light quality (default `smooth`).
 - `--biome-blend on|off` — vanilla-style biome tint gradients (default `on`).
 
@@ -161,12 +164,13 @@ vantage live "~/.minecraft/saves/My World" --open   # → http://127.0.0.1:8268/
 
 The whole populated map is listed up front, but a tile is only baked when you
 look at it — so a 24 000-tile world is explorable in seconds instead of an
-hour, with a flat memory footprint (the world stays on disk; only the assets
-and texture atlas are resident). Tiles cache into `--out` (default
+hour, with a bounded memory footprint (the world stays on disk and concurrent
+bakes pass through the same `--threads` / `--memory` admission gate). Duplicate
+requests for an in-flight tile share one bake. Tiles cache into `--out` (default
 `web/public`) as they bake, so panning back is instant, and the cache doubles
 as a partial `render` you can `serve` later. It takes the same world flags as
 `render` (`--tile-chunks`, `--radius`, `--caves`, `--light`, `--biome-blend`,
-`--gz`) plus `serve`'s `--port` / `--host` / `--open`.
+`--gz`, `--threads`, `--memory`) plus `serve`'s `--port` / `--host` / `--open`.
 
 `vantage render` is still the way to produce a self-contained static map to
 deploy; `live` is for exploring one on your own machine without the wait.

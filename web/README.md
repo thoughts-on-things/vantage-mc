@@ -50,9 +50,12 @@ provides the engine state to children via context. `<BiomeLayer>` adds the
 interactive biome legend (click to isolate, hover the map to identify, press
 `B` to toggle) — aggregated live across whatever tiles are resident. Add
 `<SettingsPanel />` for a quality menu: low/med/high/ultra
-presets plus view-distance, tile-budget, render-scale, and haze sliders, all
+presets plus view-distance, tile-count, memory-budget, render-scale, and haze sliders, all
 applied live (`viewer.setStreaming` re-plans in place, no reload). Or set the
-ring up-front with `streaming={{ viewDistance: 1024, maxTiles: 128 }}`.
+ring up-front with
+`streaming={{ viewDistance: 1024, maxTiles: 128, maxBytes: 512 * 1024 * 1024 }}`.
+`maxTiles` is a count guard; `maxBytes` is the stronger residency limit for
+worlds whose tile complexity varies widely.
 
 The camera also lives in the URL hash (`#@x,y,z,dist,rot,tilt`), so **every
 view is a shareable deep link**: the hash follows the camera (debounced,
@@ -120,7 +123,8 @@ shader!.uniforms.uBiomeMix.value = 1; // recolour by biome
 ```
 
 Or stream a whole world into your scene with `TileManager` (shared materials,
-nearest-first fetch queue, distance-based unload, height/biome queries):
+camera-lookahead priority, bounded fetch/decode/upload backpressure,
+byte-weighted residency, height/biome queries):
 
 ```ts
 import { biomePalette, maybeInflate, parseManifest, parseTextureArray } from '@thoughts-on-things/vantage-mc/core';
@@ -136,6 +140,7 @@ const tiles = new TileManager({
   material,
   waterMaterial: createWaterMaterial(material),
   palette: biomePalette(manifest.biomes.length),
+  maxBytes: 512 * 1024 * 1024,
 });
 // each frame: keep the resident set centred on your camera
 tiles.update(camera.position.x, camera.position.z);
@@ -149,7 +154,7 @@ import { VantageViewer } from '@thoughts-on-things/vantage-mc/three';
 const viewer = await VantageViewer.mount('#app', { world: '/manifest.json' });
 viewer.setBiomeLayer(true);
 viewer.on('hover', (biomeId) => { /* ... */ });
-viewer.on('stats', ({ loaded, triangleCount }) => { /* streaming HUD */ });
+viewer.on('stats', ({ loaded, triangleCount, residentBytes }) => { /* streaming HUD */ });
 ```
 
 ## Just the format

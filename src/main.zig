@@ -82,7 +82,7 @@ fn printUsage() void {
         \\usage:
         \\  vantage render  <world-save-dir> [--assets <dir>] [--out <dir>] [--tile-chunks <n>]
         \\                  [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
-        \\                  [--threads <n>] [--gz <1..12>]
+        \\                  [--threads <n>] [--memory <MiB>] [--gz <1..12>]
         \\      Render the whole populated world as streamable tiles + manifest.json
         \\      (default out: web/public). --radius caps to a window around spawn.
         \\      Missing assets are extracted automatically from your newest client jar.
@@ -92,7 +92,7 @@ fn printUsage() void {
         \\      browser; --host 0.0.0.0 shares the map on your local network.
         \\  vantage live    <world-save-dir> [--out <dir>] [--tile-chunks <n>] [--radius <chunks>]
         \\                  [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
-        \\                  [--gz <1..12>] [--port <n>] [--host <addr>] [--open]
+        \\                  [--threads <n>] [--memory <MiB>] [--gz <1..12>] [--port <n>] [--host <addr>] [--open]
         \\      Open a world in the browser NOW — no full pre-render. Every tile is
         \\      listed up front and baked on demand as it scrolls into view, caching
         \\      into --out (default web/public) so panning back is instant.
@@ -183,8 +183,9 @@ fn parseCaveY(args: []const []const u8) error{InvalidArgument}!?i32 {
     return 55;
 }
 
-/// Scan args for `--threads <n>`. Null means "not given" — the render defaults
-/// to the logical CPU count. `--threads 1` renders tiles serially.
+/// Scan args for `--threads <n>`. Null means "not given" — the memory planner
+/// chooses a safe value from the logical CPU count. `--threads 1` renders tiles
+/// serially; the memory budget remains a hard upper bound on parallel bakes.
 fn parseThreads(args: []const []const u8) error{InvalidArgument}!?usize {
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
@@ -192,6 +193,62 @@ fn parseThreads(args: []const []const u8) error{InvalidArgument}!?usize {
         return std.fmt.parseInt(usize, args[i + 1], 10) catch badValue("--threads", args[i + 1], "<n>");
     }
     return null;
+}
+
+/// Scan args for `--memory <MiB>`. This bounds concurrent tile working sets,
+/// not the process's small long-lived asset/index state. Null selects an
+/// adaptive fraction of physical RAM; explicit values make container/host
+/// policy predictable.
+fn parseMemoryMiB(args: []const []const u8) error{InvalidArgument}!?usize {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--memory")) continue;
+        const mib = std.fmt.parseInt(usize, args[i + 1], 10) catch return badValue("--memory", args[i + 1], "64..");
+        if (mib < 64) return badValue("--memory", args[i + 1], "64..");
+        return mib;
+    }
+    return null;
+}
+
+const MiB: usize = 1024 * 1024;
+
+/// Conservative peak for one tile arena. The dense id/light grid is three
+/// bytes per voxel; NBT decode, lighting scratch, parallel mesh partials, the
+/// final compact mesh, and compression temporarily coexist. Four dense-grid
+/// equivalents plus fixed headroom tracks measured pathological/full-cave tiles while
+/// still allowing useful parallelism for the default 8-chunk tile.
+fn estimatedTileWorkingSet(tile_chunks: i32) usize {
+    const edge: usize = @intCast((tile_chunks + 2) * 16); // one-chunk apron on each side
+    const voxels = std.math.mul(usize, edge * edge, 384) catch return std.math.maxInt(usize);
+    const dense_and_scratch = std.math.mul(usize, voxels, 14) catch return std.math.maxInt(usize);
+    return std.math.add(usize, dense_and_scratch, 64 * MiB) catch std.math.maxInt(usize);
+}
+
+/// Default to one eighth of physical RAM, clamped so small hosts keep room for
+/// the OS/viewer and large workstations do not turn every logical core into a
+/// 150+ MiB tile arena. `--memory` overrides this capacity directly.
+fn bakeMemoryBudget(explicit_mib: ?usize) usize {
+    if (explicit_mib) |mib| return std.math.mul(usize, mib, MiB) catch std.math.maxInt(usize);
+    const physical: usize = @intCast(@min(std.process.totalSystemMemory() catch 4 * 1024 * MiB, std.math.maxInt(usize)));
+    return std.math.clamp(physical / 8, 512 * MiB, 1024 * MiB);
+}
+
+fn bakeWorkerCount(cpu_count: usize, work_items: usize, requested: ?usize, memory_bytes: usize, per_worker: usize) usize {
+    const cpu_limit = @max(1, requested orelse cpu_count);
+    const memory_limit = @max(1, memory_bytes / @max(1, per_worker));
+    return @max(1, @min(@min(cpu_limit, memory_limit), @max(1, work_items)));
+}
+
+test "bake admission is bounded by memory, cpu, request, and work" {
+    try std.testing.expectEqual(@as(usize, 4), bakeWorkerCount(16, 64, null, 800 * MiB, 200 * MiB));
+    try std.testing.expectEqual(@as(usize, 2), bakeWorkerCount(16, 64, 2, 800 * MiB, 200 * MiB));
+    try std.testing.expectEqual(@as(usize, 1), bakeWorkerCount(16, 1, null, 800 * MiB, 200 * MiB));
+    try std.testing.expectEqual(@as(usize, 1), bakeWorkerCount(16, 64, null, 64 * MiB, 200 * MiB));
+}
+
+test "tile working-set estimate grows with tile area" {
+    try std.testing.expect(estimatedTileWorkingSet(8) > estimatedTileWorkingSet(4));
+    try std.testing.expect(estimatedTileWorkingSet(16) > estimatedTileWorkingSet(8));
 }
 
 /// Scan args for `--biome-blend on|off` (default `on`). When on, biome tint
@@ -710,6 +767,8 @@ fn renderWorldArgs(
     const quality = try parseLightQuality(args);
     const blend_biomes = try parseBiomeBlend(args);
     const cave_y = try parseCaveY(args);
+    const requested_threads = try parseThreads(args);
+    const memory_budget = bakeMemoryBudget(try parseMemoryMiB(args));
     var argi: usize = 1;
     while (argi < args.len) : (argi += 1) {
         const arg = args[argi];
@@ -729,7 +788,7 @@ fn renderWorldArgs(
             const n = std.fmt.parseInt(i32, v, 10) catch return badValue("--gz", v, "1..12");
             gz_level = std.math.clamp(n, 1, 12);
         } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
-            std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads"))
+            std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "--memory"))
         {
             // Parsed by their dedicated scanners above; skip the value here.
             argi += 1;
@@ -768,7 +827,25 @@ fn renderWorldArgs(
     // order no matter how tiles interleave. Peak memory is one tile's working
     // set per thread (each worker keeps a reusable arena).
     const cpu_count = std.Thread.getCpuCount() catch 4;
-    const thread_count = @max(1, @min((try parseThreads(args)) orelse cpu_count, tile_keys.len));
+    const worker_bytes = estimatedTileWorkingSet(tile_chunks);
+    const thread_count = bakeWorkerCount(cpu_count, tile_keys.len, requested_threads, memory_budget, worker_bytes);
+    std.debug.print("bakes:   {d} concurrent · {d} MiB budget · ~{d} MiB/worker\n", .{
+        thread_count,
+        memory_budget / MiB,
+        worker_bytes / MiB,
+    });
+
+    const tiles_dir = try std.fmt.allocPrint(a, "{s}/tiles", .{out_dir});
+    try std.Io.Dir.cwd().createDirPath(init.io, tiles_dir);
+
+    // Lowres source maps are external-memory checkpoints. Keeping one ~80 KiB
+    // map per tile in the run arena made a 24k-tile world retain ~1.9 GiB before
+    // its pyramid even began. Workers now spill them here and the level builder
+    // reads only one parent group/neighbour apron at a time.
+    const lod_cache_dir = try std.fmt.allocPrint(a, "{s}/.vantage-lod", .{out_dir});
+    std.Io.Dir.cwd().deleteTree(init.io, lod_cache_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(init.io, lod_cache_dir);
+    defer std.Io.Dir.cwd().deleteTree(init.io, lod_cache_dir) catch {};
 
     // Long-lived shared bake state (resolver + memo, atlas, biome
     // registry/colormaps/lang, world biome table). When tiles already run in
@@ -782,18 +859,11 @@ fn renderWorldArgs(
         .cave_y = cave_y,
         .gz_level = gz_level,
         .mesh_threads = if (thread_count > 1) 1 else 0,
+        .lod_cache_dir = lod_cache_dir,
     });
 
     var manifest_tiles: std.ArrayList(TileEntry) = .empty;
-
-    // Lowres LOD source data: every tile also yields a per-column color map
-    // (kept for the whole run — ~80 KB per tile), downsampled into the quadtree
-    // pyramid after the main loop.
-    var color_maps = std.AutoHashMap(u64, *lowres.ColorMap).init(a);
     const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
-
-    const tiles_dir = try std.fmt.allocPrint(a, "{s}/tiles", .{out_dir});
-    try std.Io.Dir.cwd().createDirPath(init.io, tiles_dir);
 
     const root = std.Progress.start(init.io, .{ .root_name = "vantage render" });
     defer root.end();
@@ -900,7 +970,6 @@ fn renderWorldArgs(
         write_ms += r.write_ms;
         if (!r.written) continue;
         try manifest_tiles.append(a, r.entry);
-        if (r.cmap) |cm| try color_maps.put(key, cm);
         total_solid_verts += r.solid_verts;
         total_fluid_verts += r.fluid_verts;
         max_section_verts = @max(max_section_verts, @max(r.solid_verts, r.fluid_verts));
@@ -945,86 +1014,10 @@ fn renderWorldArgs(
     // coarse levels resident far beyond the hires ring, so zooming out shows
     // the whole world instead of a fogged edge.
     const lod_node = root.start("lowres pyramid", 0);
-    var lowres_levels: std.ArrayList(LowresLevel) = .empty;
-    var lowres_count: usize = 0;
-    var lowres_bytes: u64 = 0;
-    {
-        var cur = color_maps;
-        var level: u5 = 1;
-        // Stop once a level fits in ≤4 tiles: an origin-anchored quadtree never
-        // merges tiles straddling (0,0), so "count == 1" may never come — the
-        // 2×2 around the origin is the practical root.
-        while (cur.count() > 4 and level <= 10) : (level += 1) {
-            const lvl_blocks: i64 = tile_blocks << level;
-
-            // Group this level's children under their parent tile (quadrants).
-            var parents = std.AutoHashMap(u64, [2][2]?*const lowres.ColorMap).init(a);
-            var it = cur.iterator();
-            while (it.next()) |e| {
-                const tx: i32 = @bitCast(@as(u32, @truncate(e.key_ptr.* >> 32)));
-                const tz: i32 = @bitCast(@as(u32, @truncate(e.key_ptr.*)));
-                const px = @divFloor(tx, 2);
-                const pz = @divFloor(tz, 2);
-                const qx: usize = @intCast(tx - px * 2);
-                const qz: usize = @intCast(tz - pz * 2);
-                const gop = try parents.getOrPut(world.packChunk(px, pz));
-                if (!gop.found_existing) gop.value_ptr.* = .{ .{ null, null }, .{ null, null } };
-                gop.value_ptr.*[qz][qx] = e.value_ptr.*;
-            }
-
-            var next = std.AutoHashMap(u64, *lowres.ColorMap).init(a);
-            var par_it = parents.iterator();
-            while (par_it.next()) |e| {
-                const px: i32 = @bitCast(@as(u32, @truncate(e.key_ptr.* >> 32)));
-                const pz: i32 = @bitCast(@as(u32, @truncate(e.key_ptr.*)));
-                const m = try a.create(lowres.ColorMap);
-                m.* = try lowres.downsample(
-                    a,
-                    e.value_ptr.*,
-                    @intCast(@as(i64, px) * lvl_blocks),
-                    @intCast(@as(i64, pz) * lvl_blocks),
-                    @as(u32, 1) << level,
-                );
-                try next.put(e.key_ptr.*, m);
-            }
-
-            // Serialize with neighbour aprons (needs the whole level built).
-            var keys: std.ArrayList(u64) = .empty;
-            var kit = next.keyIterator();
-            while (kit.next()) |k| try keys.append(a, k.*);
-            std.mem.sort(u64, keys.items, {}, struct {
-                fn lt(_: void, x: u64, y: u64) bool {
-                    return x < y;
-                }
-            }.lt);
-            var entries: std.ArrayList(LowresTileEntry) = .empty;
-            for (keys.items) |k| {
-                const px: i32 = @bitCast(@as(u32, @truncate(k >> 32)));
-                const pz: i32 = @bitCast(@as(u32, @truncate(k)));
-                const m = next.get(k).?;
-                const blob = try lowres.serialize(
-                    a,
-                    m.*,
-                    if (next.get(world.packChunk(px + 1, pz))) |p| p else null,
-                    if (next.get(world.packChunk(px, pz + 1))) |p| p else null,
-                    if (next.get(world.packChunk(px + 1, pz + 1))) |p| p else null,
-                );
-                const zipped = try compress.gzipCompress(a, blob, 6);
-                const path = try std.fmt.allocPrint(a, "{s}/tiles/l{d}.{d}.{d}.vlr", .{ out_dir, level, px, pz });
-                try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = zipped });
-                try entries.append(a, .{ .x = px, .z = pz, .bytes = zipped.len });
-                lowres_count += 1;
-                lowres_bytes += zipped.len;
-            }
-            try lowres_levels.append(a, .{
-                .level = level,
-                .tile_blocks = lvl_blocks,
-                .span = @as(u32, 1) << level,
-                .tiles = try entries.toOwnedSlice(a),
-            });
-            cur = next;
-        }
-    }
+    const pyramid = try buildLowresPyramid(a, init.io, out_dir, lod_cache_dir, manifest_tiles.items, tile_blocks);
+    const lowres_levels = pyramid.levels;
+    const lowres_count = pyramid.count;
+    const lowres_bytes = pyramid.bytes;
     lod_node.end();
 
     if (observer) |p| p.setPhase(.finalizing);
@@ -1039,7 +1032,7 @@ fn renderWorldArgs(
         .spawn = spawn,
         .biomes = sh.world_display.items,
         .tiles = manifest_tiles.items,
-        .lowres = lowres_levels.items,
+        .lowres = lowres_levels,
         .max_section_verts = max_section_verts,
         .caves = cave_y == null,
         .y_range = if (world_y_min < world_y_max) .{ world_y_min, world_y_max } else null,
@@ -1049,7 +1042,7 @@ fn renderWorldArgs(
     // Re-rendering onto an existing output dir can leave tiles from a previous
     // bake behind; now that the manifest is written, sweep anything tile-shaped
     // it doesn't reference.
-    const stale_removed = sweepStaleTiles(a, init.io, out_dir, manifest_tiles.items, lowres_levels.items);
+    const stale_removed = sweepStaleTiles(a, init.io, out_dir, manifest_tiles.items, lowres_levels);
     tex_node.end();
     const t_end = std.Io.Timestamp.now(init.io, .awake);
 
@@ -1074,7 +1067,7 @@ fn renderWorldArgs(
         @as(f64, @floatFromInt(total_raw_bytes)) / (1024.0 * 1024.0),
         arr.layer_count,
         lowres_count,
-        lowres_levels.items.len,
+        lowres_levels.len,
         @as(f64, @floatFromInt(lowres_bytes)) / (1024.0 * 1024.0),
         total_solid_verts + total_fluid_verts,
         total_tris,
@@ -1276,6 +1269,9 @@ const Shared = struct {
     blend_biomes: bool,
     cave_y: ?i32,
     gz_level: i32,
+    /// Batch-only external-memory checkpoints for the lowres pyramid. Null for
+    /// live bakes, which do not build/retain color maps.
+    lod_cache_dir: ?[]const u8,
     /// Thread budget for each tile's internal mesh pass: 1 when tiles already
     /// run in parallel, 0 (= all cores) for a single-worker bake.
     mesh_threads: usize,
@@ -1307,6 +1303,7 @@ const SharedConfig = struct {
     cave_y: ?i32,
     gz_level: i32,
     mesh_threads: usize,
+    lod_cache_dir: ?[]const u8 = null,
 };
 
 /// Build the long-lived bake context once: model resolver (+ memo), texture
@@ -1326,6 +1323,7 @@ fn setupShared(io: std.Io, a: std.mem.Allocator, assets: []const u8, loaded: []c
         .cave_y = cfg.cave_y,
         .gz_level = cfg.gz_level,
         .mesh_threads = cfg.mesh_threads,
+        .lod_cache_dir = cfg.lod_cache_dir,
     };
     sh.locked = .{ .child = a, .io = io };
     sh.sa = sh.locked.allocator();
@@ -1369,7 +1367,6 @@ const TileResult = struct {
     /// False for empty tiles (nothing meshed) — skipped in the manifest.
     written: bool = false,
     entry: TileEntry = .{ .tx = 0, .tz = 0, .bytes = 0 },
-    cmap: ?*lowres.ColorMap = null,
     /// World-Y extent of this tile's grid (min inclusive, max exclusive) —
     /// aggregated into the manifest's `yRange` for the viewer's depth slider.
     y_min: i32 = 0,
@@ -1509,12 +1506,14 @@ fn bakeTile(sh: *Shared, ta: std.mem.Allocator, tx: i32, tz: i32, keep_cmap: boo
     const surface = try grid.buildSurface(ta, g2, interior);
     const geo = try tile.serializeWithLightmap(ta, built, surface, display_names);
 
-    // The tile's lowres source map (long-lived: feeds the pyramid later).
+    // Spill the tile's lowres source map to the batch checkpoint directory.
+    // It stays in this tile arena only until the write completes; the pyramid
+    // later reads four children at a time, keeping host memory independent of
+    // world tile count.
     if (keep_cmap) {
         const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
-        const cmap = try sh.sa.create(lowres.ColorMap);
-        cmap.* = try lowres.buildColorMap(sh.sa, g2, interior, &sh.surf_colors, @intCast(bx0), @intCast(bz0), @intCast(tile_blocks));
-        res.cmap = cmap;
+        const cmap = try lowres.buildColorMap(ta, g2, interior, &sh.surf_colors, @intCast(bx0), @intCast(bz0), @intCast(tile_blocks));
+        try writeColorMapCache(io, ta, sh.lod_cache_dir.?, 0, tx, tz, cmap);
     }
 
     // Tiles ship gzip-wrapped (~8× smaller): any static host can serve
@@ -1546,6 +1545,165 @@ const LowresLevel = struct {
     span: u32,
     tiles: []const LowresTileEntry,
 };
+
+const LowresPyramid = struct {
+    levels: []const LowresLevel,
+    count: usize,
+    bytes: u64,
+};
+
+fn colorMapCachePath(a: std.mem.Allocator, dir: []const u8, level: u5, x: i32, z: i32) ![]u8 {
+    return std.fmt.allocPrint(a, "{s}/c.{d}.{d}.{d}.vcm", .{ dir, level, x, z });
+}
+
+fn writeColorMapCache(io: std.Io, a: std.mem.Allocator, dir: []const u8, level: u5, x: i32, z: i32, m: lowres.ColorMap) !void {
+    const path = try colorMapCachePath(a, dir, level, x, z);
+    const data = try lowres.serializeCache(a, m);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
+}
+
+fn readColorMapCache(io: std.Io, a: std.mem.Allocator, dir: []const u8, level: u5, key: u64) !lowres.ColorMap {
+    const x: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+    const z: i32 = @bitCast(@as(u32, @truncate(key)));
+    const path = try colorMapCachePath(a, dir, level, x, z);
+    const data = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .unlimited);
+    return lowres.parseCache(a, data);
+}
+
+fn deleteColorMapLevel(io: std.Io, dir: []const u8, level: u5, keys: []const u64) void {
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
+    for (keys) |key| {
+        _ = scratch.reset(.retain_capacity);
+        const x: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+        const z: i32 = @bitCast(@as(u32, @truncate(key)));
+        const path = colorMapCachePath(scratch.allocator(), dir, level, x, z) catch continue;
+        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    }
+}
+
+/// External-memory quadtree construction. Only a four-child parent group (or a
+/// tile plus its three apron neighbours) is resident at once. World size now
+/// grows temporary disk by ~80 KiB/tile, while process memory remains flat.
+fn buildLowresPyramid(
+    a: std.mem.Allocator,
+    io: std.Io,
+    out_dir: []const u8,
+    cache_dir: []const u8,
+    hires: []const TileEntry,
+    tile_blocks: i64,
+) !LowresPyramid {
+    var initial: std.ArrayList(u64) = .empty;
+    for (hires) |t| try initial.append(a, world.packChunk(t.tx, t.tz));
+    var current = try initial.toOwnedSlice(a);
+    var current_level: u5 = 0;
+    var levels: std.ArrayList(LowresLevel) = .empty;
+    var total_count: usize = 0;
+    var total_bytes: u64 = 0;
+
+    // An origin-anchored quadtree can end as the 2×2 around (0,0); ≤4 tiles is
+    // therefore the practical root rather than waiting for an impossible one.
+    var level: u5 = 1;
+    while (current.len > 4 and level <= 10) : (level += 1) {
+        const lvl_blocks = tile_blocks << level;
+        var parents = std.AutoHashMap(u64, [2][2]?u64).init(a);
+        for (current) |key| {
+            const x: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+            const z: i32 = @bitCast(@as(u32, @truncate(key)));
+            const px = @divFloor(x, 2);
+            const pz = @divFloor(z, 2);
+            const qx: usize = @intCast(x - px * 2);
+            const qz: usize = @intCast(z - pz * 2);
+            const gop = try parents.getOrPut(world.packChunk(px, pz));
+            if (!gop.found_existing) gop.value_ptr.* = .{ .{ null, null }, .{ null, null } };
+            gop.value_ptr.*[qz][qx] = key;
+        }
+
+        var next_list: std.ArrayList(u64) = .empty;
+        var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer scratch.deinit();
+        var pit = parents.iterator();
+        while (pit.next()) |entry| {
+            _ = scratch.reset(.free_all);
+            const sa = scratch.allocator();
+            var maps: [2][2]?lowres.ColorMap = .{ .{ null, null }, .{ null, null } };
+            var refs: [2][2]?*const lowres.ColorMap = .{ .{ null, null }, .{ null, null } };
+            for (0..2) |qz| {
+                for (0..2) |qx| {
+                    if (entry.value_ptr.*[qz][qx]) |child_key| {
+                        maps[qz][qx] = try readColorMapCache(io, sa, cache_dir, current_level, child_key);
+                        if (maps[qz][qx]) |*m| refs[qz][qx] = m;
+                    }
+                }
+            }
+            const px: i32 = @bitCast(@as(u32, @truncate(entry.key_ptr.* >> 32)));
+            const pz: i32 = @bitCast(@as(u32, @truncate(entry.key_ptr.*)));
+            const parent = try lowres.downsample(
+                sa,
+                refs,
+                @intCast(@as(i64, px) * lvl_blocks),
+                @intCast(@as(i64, pz) * lvl_blocks),
+                @as(u32, 1) << level,
+            );
+            try writeColorMapCache(io, sa, cache_dir, level, px, pz, parent);
+            try next_list.append(a, entry.key_ptr.*);
+        }
+
+        const next = try next_list.toOwnedSlice(a);
+        std.mem.sort(u64, next, {}, struct {
+            fn lt(_: void, x: u64, y: u64) bool {
+                return x < y;
+            }
+        }.lt);
+        deleteColorMapLevel(io, cache_dir, current_level, current);
+
+        var next_index = std.AutoHashMap(u64, void).init(a);
+        for (next) |key| try next_index.put(key, {});
+        var entries: std.ArrayList(LowresTileEntry) = .empty;
+        for (next) |key| {
+            _ = scratch.reset(.free_all);
+            const sa = scratch.allocator();
+            const px: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+            const pz: i32 = @bitCast(@as(u32, @truncate(key)));
+            const center = try readColorMapCache(io, sa, cache_dir, level, key);
+            var right: ?lowres.ColorMap = if (next_index.contains(world.packChunk(px + 1, pz)))
+                try readColorMapCache(io, sa, cache_dir, level, world.packChunk(px + 1, pz))
+            else
+                null;
+            var down: ?lowres.ColorMap = if (next_index.contains(world.packChunk(px, pz + 1)))
+                try readColorMapCache(io, sa, cache_dir, level, world.packChunk(px, pz + 1))
+            else
+                null;
+            var corner: ?lowres.ColorMap = if (next_index.contains(world.packChunk(px + 1, pz + 1)))
+                try readColorMapCache(io, sa, cache_dir, level, world.packChunk(px + 1, pz + 1))
+            else
+                null;
+            const blob = try lowres.serialize(
+                sa,
+                center,
+                if (right) |*m| m else null,
+                if (down) |*m| m else null,
+                if (corner) |*m| m else null,
+            );
+            const zipped = try compress.gzipCompress(sa, blob, 6);
+            const path = try std.fmt.allocPrint(sa, "{s}/tiles/l{d}.{d}.{d}.vlr", .{ out_dir, level, px, pz });
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = zipped });
+            try entries.append(a, .{ .x = px, .z = pz, .bytes = zipped.len });
+            total_count += 1;
+            total_bytes += zipped.len;
+        }
+        try levels.append(a, .{
+            .level = level,
+            .tile_blocks = lvl_blocks,
+            .span = @as(u32, 1) << level,
+            .tiles = try entries.toOwnedSlice(a),
+        });
+        current = next;
+        current_level = level;
+    }
+    deleteColorMapLevel(io, cache_dir, current_level, current);
+    return .{ .levels = try levels.toOwnedSlice(a), .count = total_count, .bytes = total_bytes };
+}
 
 const ManifestInput = struct {
     tile_chunks: i32,
@@ -1817,12 +1975,22 @@ const LiveServer = struct {
 
     /// Guards the session cache ledger + the live manifest aggregates below.
     mutex: std.Io.Mutex = .init,
+    ready: std.Io.Condition = .init,
+    /// Immutable membership gate: arbitrary URLs cannot make the host bake
+    /// coordinates that were not advertised by this world's manifest.
+    known: std.AutoHashMap(u64, void) = undefined,
     /// Tiles baked THIS session → gzipped bytes on disk (0 = an empty tile, or
     /// one that failed to bake: a gap). A tile is served from the on-disk cache
     /// only when it's here, so the cache always agrees with THIS session's
     /// atlas — a prior session's tiles, baked against a different atlas layer
     /// order, are simply re-baked on first fetch.
     baked: std.AutoHashMap(u64, usize) = undefined,
+    /// Keys currently being filled. Duplicate requests wait on `ready` and
+    /// share the first result instead of stampeding the same expensive bake.
+    baking: std.AutoHashMap(u64, void) = undefined,
+    /// Admission control for the actual memory-heavy work. Connection threads
+    /// may wait cheaply, but only this many tile arenas can exist at once.
+    bake_slots: std.Io.Semaphore = .{},
     max_section_verts: u64 = 0,
     y_min: i32 = std.math.maxInt(i32),
     y_max: i32 = std.math.minInt(i32),
@@ -1837,6 +2005,12 @@ const LiveServer = struct {
     fn record(self: *LiveServer, key: u64, res: ?*const TileResult) void {
         self.mutex.lockUncancelable(self.sh.io);
         defer self.mutex.unlock(self.sh.io);
+        self.recordLocked(key, res);
+        _ = self.baking.remove(key);
+        self.ready.broadcast(self.sh.io);
+    }
+
+    fn recordLocked(self: *LiveServer, key: u64, res: ?*const TileResult) void {
         self.baked.put(key, if (res) |r| r.entry.bytes else 0) catch {};
         if (res) |r| {
             self.max_section_verts = @max(self.max_section_verts, @max(r.solid_verts, r.fluid_verts));
@@ -1874,16 +2048,32 @@ fn parseTilePath(path: []const u8) ?[2]i32 {
 }
 
 /// Serve one tile: from the session cache if already baked (0 bytes = a valid
-/// empty body), else bake it now. Shared caches self-synchronize, so a rare
-/// concurrent double-fetch of the same fresh tile just bakes it twice
-/// (idempotent). A bake failure becomes a gap (an empty body the viewer marks
-/// empty), never a retry storm.
+/// empty body), else join or lead a single in-flight fill. Leaders wait for a
+/// memory-budgeted bake permit before allocating their tile arena. A failure
+/// becomes a gap (an empty body the viewer marks empty), never a retry storm.
 fn liveTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32) ![]const u8 {
     const key = world.packChunk(tx, tz);
+    if (!self.known.contains(key)) return "";
+
     self.mutex.lockUncancelable(self.sh.io);
-    const hit = self.baked.get(key);
-    self.mutex.unlock(self.sh.io);
-    if (hit) |bytes| return if (bytes == 0) "" else readCachedTile(self, arena, tx, tz);
+    while (true) {
+        if (self.baked.get(key)) |bytes| {
+            self.mutex.unlock(self.sh.io);
+            return if (bytes == 0) "" else readCachedTile(self, arena, tx, tz);
+        }
+        if (!self.baking.contains(key)) {
+            self.baking.put(key, {}) catch |e| {
+                self.mutex.unlock(self.sh.io);
+                return e;
+            };
+            self.mutex.unlock(self.sh.io);
+            break;
+        }
+        self.ready.waitUncancelable(self.sh.io, &self.mutex);
+    }
+
+    self.bake_slots.waitUncancelable(self.sh.io);
+    defer self.bake_slots.post(self.sh.io);
 
     var res: TileResult = .{};
     bakeTile(self.sh, arena, tx, tz, false, &res) catch |e| {
@@ -1974,6 +2164,8 @@ fn runLive(init: std.process.Init, a: std.mem.Allocator, args: []const []const u
     const quality = try parseLightQuality(args);
     const blend_biomes = try parseBiomeBlend(args);
     const cave_y = try parseCaveY(args);
+    const requested_threads = try parseThreads(args);
+    const memory_budget = bakeMemoryBudget(try parseMemoryMiB(args));
     var argi: usize = 1;
     while (argi < args.len) : (argi += 1) {
         const arg = args[argi];
@@ -2000,7 +2192,7 @@ fn runLive(init: std.process.Init, a: std.mem.Allocator, args: []const []const u
         } else if (std.mem.eql(u8, arg, "--open")) {
             open = true;
         } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
-            std.mem.eql(u8, arg, "--caves"))
+            std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "--memory"))
         {
             argi += 1; // value parsed by the dedicated scanners above
         } else if (std.mem.startsWith(u8, arg, "-")) {
@@ -2020,6 +2212,15 @@ fn runLive(init: std.process.Init, a: std.mem.Allocator, args: []const []const u
         wl.loaded.len, wl.bounds.count, tile_keys.len, tile_chunks, tile_chunks,
     });
 
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const worker_bytes = estimatedTileWorkingSet(tile_chunks);
+    const bake_count = bakeWorkerCount(cpu_count, tile_keys.len, requested_threads, memory_budget, worker_bytes);
+    std.debug.print("bakes:   {d} concurrent · {d} MiB budget · ~{d} MiB/worker\n", .{
+        bake_count,
+        memory_budget / MiB,
+        worker_bytes / MiB,
+    });
+
     const sh = try setupShared(init.io, a, wl.assets, wl.loaded, .{
         .tile_chunks = tile_chunks,
         .out_dir = out_dir,
@@ -2036,11 +2237,16 @@ fn runLive(init: std.process.Init, a: std.mem.Allocator, args: []const []const u
     try std.Io.Dir.cwd().createDirPath(init.io, tiles_dir);
 
     const server = try a.create(LiveServer);
+    var known = std.AutoHashMap(u64, void).init(sh.sa);
+    for (tile_keys) |key| try known.put(key, {});
     server.* = .{
         .sh = sh,
         .tile_keys = tile_keys,
         .spawn = wl.spawn,
+        .known = known,
         .baked = std.AutoHashMap(u64, usize).init(sh.sa),
+        .baking = std.AutoHashMap(u64, void).init(sh.sa),
+        .bake_slots = .{ .permits = bake_count },
     };
 
     // Seed the nearest tile synchronously: fail fast if assets/pipeline are

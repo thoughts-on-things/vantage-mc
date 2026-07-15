@@ -89,6 +89,8 @@ export interface StreamingSettings {
   maxTiles?: number;
   /** Concurrent tile fetches. Default `4`. */
   concurrency?: number;
+  /** Estimated CPU/GPU tile residency budget, in bytes. Default `512 MiB`. */
+  maxBytes?: number;
 }
 
 export interface VantageViewerOptions {
@@ -1104,19 +1106,20 @@ export class VantageViewer {
 
   // --- streaming -------------------------------------------------------------
 
-  /** The current streaming settings (view distance, tile budget, concurrency). */
+  /** The current streaming settings (view distance, tile/byte budgets, concurrency). */
   get streamingSettings(): Required<StreamingSettings> {
     return {
       viewDistance: this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768,
       maxTiles: this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 120,
       concurrency: this.options.streaming.concurrency ?? 4,
+      maxBytes: this.tiles?.maxBytes ?? this.options.streaming.maxBytes ?? 512 * 1024 * 1024,
     };
   }
 
-  /** Live-tune streaming: view distance, resident-tile budget, concurrency.
+  /** Live-tune streaming: view distance, resident tile/byte budgets, concurrency.
    *  Applies immediately to a streamed world (tiles re-plan, fog and camera
    *  range follow) and persists for future loads. The fidelity dial: raise
-   *  viewDistance/maxTiles to see farther, lower them on weak hardware. */
+   *  viewDistance/maxTiles/maxBytes to see farther, lower them on weak hardware. */
   setStreaming(settings: StreamingSettings): void {
     this.options.streaming = { ...this.options.streaming, ...settings };
     if (!this.tiles) return;

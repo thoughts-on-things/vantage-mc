@@ -30,6 +30,7 @@ import {
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
 import { buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, isSharedQuadIndex, sharedQuadIndex, type TileMeshes } from './terrain.js';
+import { admitTiles, nearbyTiles } from './streaming.js';
 
 export interface TileManagerOptions {
   manifest: WorldManifest;
@@ -56,6 +57,10 @@ export interface TileManagerOptions {
   maxTiles?: number;
   /** Concurrent tile fetches. Default `4`. */
   concurrency?: number;
+  /** Estimated CPU/GPU residency budget in bytes. Unlike `maxTiles`, this
+   *  accounts for large and small tiles having very different geometry. One
+   *  nearest oversized tile is allowed for forward progress. Default `512 MiB`. */
+  maxBytes?: number;
   /** Live/on-demand renders grow the shared texture atlas in viewport order, so
    *  a fetched tile can reference layers the atlas doesn't have yet. When set,
    *  the manager widens the atlas (awaiting this) before building a tile that
@@ -79,6 +84,8 @@ export interface TileStats {
   triangleCount: number;
   /** Compressed bytes fetched and resident. */
   bytes: number;
+  /** Estimated CPU/GPU bytes held by resident and upload-pending resources. */
+  residentBytes: number;
 }
 
 interface TileEvents extends Record<string, unknown> {
@@ -111,6 +118,8 @@ interface Record_ {
   biomes?: BiomeEntry[];
   vertexCount: number;
   triangleCount: number;
+  /** Estimated retained CPU/GPU bytes for this record. */
+  memoryBytes: number;
 }
 
 /** Record key: hires tiles keep the plain tile key, lowres prefix their level. */
@@ -133,6 +142,28 @@ function releaseAfterUpload(geom: THREE.BufferGeometry): void {
   if (geom.index && !isSharedQuadIndex(geom.index)) geom.index.onUpload(release);
 }
 
+function arrayBytes(value: unknown): number {
+  return ArrayBuffer.isView(value) ? value.byteLength : 0;
+}
+
+/** Count per-tile vertex/index storage. Shared indices are global and counted
+ *  nowhere per tile; every other typed array becomes a same-sized GPU buffer. */
+function geometryBytes(geom: THREE.BufferGeometry): number {
+  let bytes = 0;
+  for (const name of Object.keys(geom.attributes)) {
+    bytes += arrayBytes((geom.getAttribute(name) as THREE.BufferAttribute).array);
+  }
+  if (geom.index && !isSharedQuadIndex(geom.index)) bytes += arrayBytes(geom.index.array);
+  return bytes;
+}
+
+function textureBytes(texture: THREE.DataTexture | undefined): number {
+  if (!texture) return 0;
+  // DataTexture retains its source pixels after upload, so the browser holds
+  // both the JS backing array and an equally sized GPU texture.
+  return 2 * arrayBytes((texture.image as { data?: unknown }).data);
+}
+
 export class TileManager {
   private readonly opts: Required<Omit<TileManagerOptions, 'lowresMaterial' | 'lmMaterial' | 'ensureAtlas'>>;
   private readonly lowresMaterial: THREE.ShaderMaterial | null;
@@ -150,7 +181,7 @@ export class TileManager {
   /** Lowres pyramid levels, finest first ([] when the manifest has none). */
   private readonly lowLevels: LowresLevel[];
   /** Tile-existence index per lowres level (for the coverage pass). */
-  private readonly lowIndex = new Map<number, Set<string>>();
+  private readonly lowIndex = new Map<number, Map<string, ManifestTile>>();
   /** Set when residency changed and lowres visibility needs recomputing. */
   private coverageDirty = false;
   /** Tiles mid stream-in fade; drained by update(), keeps the viewer drawing. */
@@ -160,6 +191,9 @@ export class TileManager {
   /** Built tiles awaiting scene insertion — flushed ONE per update() call so
    *  multi-MB GPU uploads never pile into a single frame. */
   private pendingAdd: string[] = [];
+  /** Built records still holding upload-pending typed arrays. Pumping pauses at
+   *  one concurrency-window so decode cannot outrun GPU submission. */
+  private pendingBuilt = 0;
   private inFlight = 0;
   private lastFocusX = Infinity;
   private lastFocusZ = Infinity;
@@ -168,6 +202,11 @@ export class TileManager {
    *  backoff escalates; cleared on success or unload (a fresh pan-in retries). */
   private failCounts = new Map<string, number>();
   private nextRetrySweep = 0;
+  /** Learned tile weights survive eviction and make future admission byte-aware. */
+  private readonly sizeHints = new Map<string, number>();
+  private averageHiresBytes = 12 * 1024 * 1024;
+  private focusX = 0;
+  private focusZ = 0;
 
   private biomesCache: BiomeEntry[] | null = null;
   private statsCache: TileStats | null = null;
@@ -185,6 +224,7 @@ export class TileManager {
       // panel's "med" preset exactly.
       maxTiles: 120,
       concurrency: 4,
+      maxBytes: 512 * 1024 * 1024,
       ...rest,
     };
     this.lowresMaterial = lowresMaterial ?? null;
@@ -198,7 +238,7 @@ export class TileManager {
     for (const t of options.manifest.tiles) this.index.set(tileKey(t.x, t.z), t);
     this.lowLevels = this.lowresMaterial ? [...(options.manifest.lowres?.levels ?? [])].sort((a, b) => a.level - b.level) : [];
     for (const lvl of this.lowLevels) {
-      this.lowIndex.set(lvl.level, new Set(lvl.tiles.map((t) => tileKey(t.x, t.z))));
+      this.lowIndex.set(lvl.level, new Map(lvl.tiles.map((t) => [tileKey(t.x, t.z), t])));
     }
   }
 
@@ -226,6 +266,8 @@ export class TileManager {
    */
   update(focusX: number, focusZ: number): void {
     if (this.disposed) return;
+    this.focusX = focusX;
+    this.focusZ = focusZ;
     this.flushOne();
     this.retrySweep();
     // Retire finished fades: the tile is now fully opaque, so the lowres
@@ -243,26 +285,36 @@ export class TileManager {
     if (this.coverageDirty) this.applyCoverage();
     // Re-plan only when the focus has moved a quarter tile; otherwise just keep
     // the fetch pipeline full. (The first call always plans: lastFocus = ∞.)
-    const moved = Math.hypot(focusX - this.lastFocusX, focusZ - this.lastFocusZ);
+    const priorX = this.lastFocusX;
+    const priorZ = this.lastFocusZ;
+    const moved = Math.hypot(focusX - priorX, focusZ - priorZ);
     if (moved < this.tileBlocks / 4) {
       this.pump();
       return;
     }
+    const finitePrior = Number.isFinite(priorX) && Number.isFinite(priorZ);
+    const dx = finitePrior ? focusX - priorX : 0;
+    const dz = finitePrior ? focusZ - priorZ : 0;
+    const travel = Math.hypot(dx, dz);
+    const lookahead = travel > 0 ? Math.min(2, (this.tileBlocks * 2) / travel) : 0;
+    const predictedX = focusX + dx * lookahead;
+    const predictedZ = focusZ + dz * lookahead;
     this.lastFocusX = focusX;
     this.lastFocusZ = focusZ;
 
-    const { viewDistance, maxTiles } = this.opts;
+    const { viewDistance, maxTiles, maxBytes } = this.opts;
 
-    // Hires: the nearest maxTiles tiles within viewDistance of the focus.
-    // (`d` values are squared throughout the plan — only compared and sorted.)
-    const desired: { t: ManifestTile; d: number }[] = [];
-    const viewDistSq = viewDistance * viewDistance;
-    for (const t of this.index.values()) {
-      const d = this.distSqTo(t, 0, focusX, focusZ);
-      if (d <= viewDistSq) desired.push({ t, d });
-    }
-    desired.sort((a, b) => a.d - b.d);
-    if (desired.length > maxTiles) desired.length = maxTiles;
+    // Hires: sparse regular-grid lookup makes planning O(visible tiles), then a
+    // weighted admission pass respects both count and actual geometry budgets.
+    let lowBytes = 0;
+    for (const rec of this.records.values()) if (rec.level > 0) lowBytes += rec.memoryBytes;
+    const hiresBytes = Math.max(1, maxBytes - lowBytes);
+    const desired = admitTiles(
+      nearbyTiles(this.index, this.tileBlocks, focusX, focusZ, viewDistance, predictedX, predictedZ),
+      maxTiles,
+      hiresBytes,
+      (t) => this.sizeHints.get(tileKey(t.x, t.z)) ?? Math.max(this.averageHiresBytes, t.bytes * 20),
+    ).map((candidate) => ({ t: candidate.ref, d: candidate.distanceSq }));
     const desiredKeys = new Set(desired.map(({ t }) => recKey(0, t.x, t.z)));
 
     // Lowres rings: level 1 underlays the whole hires disc out to 2× the view
@@ -274,13 +326,15 @@ export class TileManager {
     for (let i = 0; i < this.lowLevels.length; i++) {
       const lvl = this.lowLevels[i]!;
       const top = i === this.lowLevels.length - 1;
-      const outer = top ? Infinity : (viewDistance * 2 ** lvl.level) ** 2;
+      const outerDistance = viewDistance * 2 ** lvl.level;
+      const outer = top ? Infinity : outerDistance ** 2;
       const inner = top || i === 0 ? 0 : (viewDistance * 2 ** (lvl.level - 1) * 0.85) ** 2;
-      const ring: { ref: ManifestTile; level: number; d: number }[] = [];
-      for (const t of lvl.tiles) {
-        const d = this.distSqTo(t, lvl.level, focusX, focusZ);
-        if (d <= outer && d >= inner) ring.push({ ref: t, level: lvl.level, d });
-      }
+      const candidates = top
+        ? lvl.tiles.map((ref) => ({ ref, distanceSq: this.distSqTo(ref, lvl.level, focusX, focusZ), priority: 0 }))
+        : nearbyTiles(this.lowIndex.get(lvl.level)!, lvl.tileBlocks, focusX, focusZ, outerDistance, predictedX, predictedZ);
+      const ring: { ref: ManifestTile; level: number; d: number }[] = candidates
+        .filter((candidate) => candidate.distanceSq <= outer && candidate.distanceSq >= inner)
+        .map((candidate) => ({ ref: candidate.ref, level: lvl.level, d: candidate.distanceSq }));
       ring.sort((a, b) => a.d - b.d);
       if (ring.length > 160) ring.length = 160; // per-level cap for huge worlds
       for (const r of ring) {
@@ -289,16 +343,19 @@ export class TileManager {
       }
     }
 
-    // Unload with hysteresis: resident tiles stay until they fall outside
-    // 1.25× their ring (or the budget forces the farthest out). Everything not
-    // desired and beyond its keep ring goes: in-flight fetches abort,
-    // built-but-not-inserted tiles drop, failures forget (so they can retry).
+    // Hires obey a real hard cap: stale fetches/builds are canceled immediately
+    // and old resident tiles cannot accumulate inside a hysteresis halo. Lowres
+    // stays hysteretic because its records are tiny and hide refinement gaps.
     for (const [key, rec] of this.records) {
       if (desiredKeys.has(key)) continue;
+      if (rec.level === 0) {
+        this.unload(key, rec);
+        continue;
+      }
       const top = this.lowLevels.length > 0 && rec.level === this.lowLevels[this.lowLevels.length - 1]!.level;
       if (top) continue; // the blanket never unloads
       const d = this.distSqTo(rec.ref, rec.level, focusX, focusZ);
-      const keep = rec.level === 0 ? viewDistance * 1.25 : viewDistance * 2 ** rec.level * 1.25;
+      const keep = viewDistance * 2 ** rec.level * 1.25;
       if (d > keep * keep) this.unload(key, rec);
     }
 
@@ -314,13 +371,16 @@ export class TileManager {
         .filter((r) => r.level !== topLevel && !this.records.has(recKey(r.level, r.ref.x, r.ref.z)))
         .sort((a, b) => a.level - b.level || a.d - b.d)
         .map((r) => ({ ref: r.ref, level: r.level })),
-    ];
+    ].reverse(); // pump pops the highest-priority item in O(1)
     this.pump();
   }
 
   private pump(): void {
-    while (this.inFlight < this.opts.concurrency && this.queue.length > 0) {
-      const { ref, level } = this.queue.shift()!;
+    // Backpressure crosses fetch → decode → GPU upload. Without the pending
+    // bound, fast I/O can build the entire desired ring while one tile/frame is
+    // uploaded, pinning hundreds of megabytes of typed arrays.
+    while (this.inFlight < this.opts.concurrency && this.inFlight + this.pendingBuilt < this.opts.concurrency && this.queue.length > 0) {
+      const { ref, level } = this.queue.pop()!;
       if (level === 0) void this.loadTile(ref);
       else void this.loadLowres(ref, level);
     }
@@ -338,6 +398,7 @@ export class TileManager {
       const rec = this.records.get(key);
       if (!rec || rec.state !== 'built') continue; // unloaded while queued
       rec.state = 'ready';
+      this.pendingBuilt--;
       // Dissolve in rather than pop: the tile starts fully transparent and
       // fades up over FADE_MS (alpha-to-coverage dither under MSAA). The
       // lowres placeholder keeps showing beneath until the fade retires, so
@@ -353,6 +414,7 @@ export class TileManager {
       this.emitter.emit('change', this.stats);
       budget--;
     }
+    this.pump();
   }
 
   /** Stream-in fade length. Long enough to read as a dissolve, short enough
@@ -455,7 +517,7 @@ export class TileManager {
     if (!this.lowresMaterial || this.lowLevels.length > 0) return;
     const levels = [...lowres.levels].sort((a, b) => a.level - b.level);
     this.lowLevels.push(...levels);
-    for (const lvl of levels) this.lowIndex.set(lvl.level, new Set(lvl.tiles.map((t) => tileKey(t.x, t.z))));
+    for (const lvl of levels) this.lowIndex.set(lvl.level, new Map(lvl.tiles.map((t) => [tileKey(t.x, t.z), t])));
     this.lastFocusX = Infinity;
     this.lastFocusZ = Infinity;
     this.coverageDirty = true;
@@ -464,10 +526,11 @@ export class TileManager {
 
   /** Live-tune streaming (view distance, tile budget, fetch concurrency).
    *  Takes effect on the next update(): the plan is recomputed from scratch. */
-  configure(settings: { viewDistance?: number; maxTiles?: number; concurrency?: number }): void {
+  configure(settings: { viewDistance?: number; maxTiles?: number; concurrency?: number; maxBytes?: number }): void {
     if (settings.viewDistance !== undefined) this.opts.viewDistance = settings.viewDistance;
     if (settings.maxTiles !== undefined) this.opts.maxTiles = settings.maxTiles;
     if (settings.concurrency !== undefined) this.opts.concurrency = settings.concurrency;
+    if (settings.maxBytes !== undefined) this.opts.maxBytes = settings.maxBytes;
     this.lastFocusX = Infinity; // force a re-plan on the next update()
     this.lastFocusZ = Infinity;
   }
@@ -482,12 +545,17 @@ export class TileManager {
     return this.opts.maxTiles;
   }
 
+  /** The current estimated CPU+GPU residency budget. */
+  get maxBytes(): number {
+    return this.opts.maxBytes;
+  }
+
   /** Fetch + decode one lowres LOD tile into a heightfield mesh. */
   private async loadLowres(ref: ManifestTile, level: number): Promise<void> {
     const key = recKey(level, ref.x, ref.z);
     if (this.records.has(key) || !this.lowresMaterial) return;
     const abort = new AbortController();
-    const rec: Record_ = { ref, level, state: 'loading', abort, vertexCount: 0, triangleCount: 0 };
+    const rec: Record_ = { ref, level, state: 'loading', abort, vertexCount: 0, triangleCount: 0, memoryBytes: 0 };
     this.records.set(key, rec);
     this.inFlight++;
     try {
@@ -516,7 +584,9 @@ export class TileManager {
       };
       rec.vertexCount = tile.width * tile.depth;
       rec.triangleCount = mesh.geometry.index!.count / 3;
+      rec.memoryBytes = geometryBytes(mesh.geometry) + rec.low.heights.byteLength;
       rec.state = 'built';
+      this.pendingBuilt++;
       this.failCounts.delete(key);
       this.pendingAdd.push(key);
       this.invalidate();
@@ -560,7 +630,7 @@ export class TileManager {
     const key = tileKey(ref.x, ref.z);
     if (this.records.has(key)) return;
     const abort = new AbortController();
-    const rec: Record_ = { ref, level: 0, state: 'loading', abort, vertexCount: 0, triangleCount: 0 };
+    const rec: Record_ = { ref, level: 0, state: 'loading', abort, vertexCount: 0, triangleCount: 0, memoryBytes: 0 };
     this.records.set(key, rec);
     this.inFlight++;
     try {
@@ -625,12 +695,22 @@ export class TileManager {
       this.attachFade(rec, meshes.terrain, meshes.terrainLm, meshes.water);
       this.minY = Math.min(this.minY, meshes.bounds.min.y);
       this.maxY = Math.max(this.maxY, meshes.bounds.max.y);
+      rec.memoryBytes =
+        geometryBytes(meshes.terrain.geometry) +
+        (meshes.terrainLm ? geometryBytes(meshes.terrainLm.geometry) : 0) +
+        (meshes.water ? geometryBytes(meshes.water.geometry) : 0) +
+        textureBytes(meshes.lightmapTex) +
+        (rec.surface ? rec.surface.biome.byteLength + rec.surface.height.byteLength : 0);
+      this.sizeHints.set(key, rec.memoryBytes);
+      this.averageHiresBytes = this.averageHiresBytes * 0.875 + rec.memoryBytes * 0.125;
       // Don't insert into the scene here: adds are staggered one per frame so
       // several tiles finishing together can't stack their GPU uploads into a
       // single frame. update() flushes the queue.
       rec.state = 'built';
+      this.pendingBuilt++;
       this.failCounts.delete(key);
       this.pendingAdd.push(key);
+      this.trimToMemoryBudget();
       this.invalidate();
       this.emitter.emit('change', this.stats);
     } catch (e) {
@@ -646,6 +726,7 @@ export class TileManager {
 
   private unload(key: string, rec: Record_): void {
     rec.abort?.abort();
+    if (rec.state === 'built') this.pendingBuilt--;
     for (const mesh of [rec.terrain, rec.terrainLm, rec.water]) {
       if (!mesh) continue;
       this.opts.scene.remove(mesh);
@@ -661,6 +742,32 @@ export class TileManager {
     this.coverageDirty = true; // an uncovered lowres parent may need to reappear
     this.invalidate();
     this.emitter.emit('change', this.stats);
+  }
+
+  /** Correct estimation misses after a tile is decoded. Farthest hires records
+   *  leave first; one nearest tile is always kept so an oversized outlier does
+   *  not create an unload/refetch loop. Learned weights make the next plan fit. */
+  private trimToMemoryBudget(): void {
+    let total = 0;
+    const hires: { key: string; rec: Record_; d: number }[] = [];
+    for (const [key, rec] of this.records) {
+      total += rec.memoryBytes;
+      if (rec.level === 0 && rec.state !== 'failed' && rec.state !== 'empty') {
+        hires.push({ key, rec, d: this.distSqTo(rec.ref, 0, this.focusX, this.focusZ) });
+      }
+    }
+    if (total <= this.opts.maxBytes || hires.length <= 1) return;
+    hires.sort((a, b) => b.d - a.d);
+    let remaining = hires.length;
+    for (const entry of hires) {
+      if (total <= this.opts.maxBytes || remaining <= 1) break;
+      total -= entry.rec.memoryBytes;
+      remaining--;
+      this.unload(entry.key, entry.rec);
+    }
+    // Re-admit with the newly learned byte weights on the next update.
+    this.lastFocusX = Infinity;
+    this.lastFocusZ = Infinity;
   }
 
   private invalidate(): void {
@@ -679,7 +786,9 @@ export class TileManager {
     let vertexCount = 0;
     let triangleCount = 0;
     let bytes = 0;
+    let residentBytes = 0;
     for (const rec of this.records.values()) {
+      residentBytes += rec.memoryBytes;
       if (rec.state === 'ready') {
         if (rec.level === 0) loaded++;
         else lowres++;
@@ -688,7 +797,7 @@ export class TileManager {
         bytes += rec.ref.bytes;
       } else if (rec.state === 'loading' || rec.state === 'built') loading++;
     }
-    this.statsCache = { loaded, loading, total: this.index.size, lowres, vertexCount, triangleCount, bytes };
+    this.statsCache = { loaded, loading, total: this.index.size, lowres, vertexCount, triangleCount, bytes, residentBytes };
     return this.statsCache;
   }
 

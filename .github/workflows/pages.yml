@@ -48,7 +48,7 @@ jobs:
 
       - name: Cache Minecraft assets
         id: mc-assets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/vantage/assets
           key: mc-assets-${{ env.MC_VERSION }}

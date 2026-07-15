@@ -763,7 +763,9 @@ fn renderWorldArgs(
     var out_dir: []const u8 = "web/public";
     var tile_chunks: i32 = 8; // tile span in chunks (128×128 blocks)
     var radius: i32 = 0; // optional cap: only tiles within ±radius chunks of spawn/centre (0 = whole world)
-    var gz_level: i32 = 9; // libdeflate 1 (fastest) .. 12 (smallest)
+    // Level 7 is the measured Pareto point for quantized tiles: much less CPU
+    // than 9 for only a small payload increase. Users can still choose 1..12.
+    var gz_level: i32 = 7;
     const quality = try parseLightQuality(args);
     const blend_biomes = try parseBiomeBlend(args);
     const cave_y = try parseCaveY(args);
@@ -1840,8 +1842,8 @@ test "isTileFileName accepts render-owned tiles and nothing else" {
 /// Hand-rolled (the shape is tiny and fixed) to stay off the std.json churn.
 fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    // Format 4 = VTL8 tiles (compact quads + lightmap atlas) + maxSectionVerts.
-    try out.print(a, "{{\n  \"format\": 4,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"maxSectionVerts\": {d},\n  \"textures\": \"terrain.vtexarr\",\n  \"textureLayers\": {d},\n", .{
+    // Format 5 = VTL9 tiles (losslessly packed RG8 lightmaps).
+    try out.print(a, "{{\n  \"format\": 5,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"maxSectionVerts\": {d},\n  \"textures\": \"terrain.vtexarr\",\n  \"textureLayers\": {d},\n", .{
         m.tile_chunks, m.tile_chunks * 16, m.max_section_verts, m.texture_layers,
     });
     if (m.rendering) try out.appendSlice(a, "  \"rendering\": true,\n");

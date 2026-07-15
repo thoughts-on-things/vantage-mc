@@ -64,6 +64,10 @@ versioned binary tile contract, so each can evolve independently.
 - **GPU dequantization** — tiles upload in their on-disk quantized encoding and
   the vertex shader dequantizes, so arriving tiles cost the main thread nearly
   nothing and panning stays stutter-free.
+- **Byte-bounded end to end** — native bakes, network/decode/upload staging,
+  and viewer residency all have explicit capacities; see the
+  [streaming design](./docs/streaming.md) and
+  [performance roadmap](./docs/performance-roadmap.md).
 - **LOD pyramid** — a quadtree of colored heightfields (~1% of the hires bytes)
   keeps the *entire* world visible: zoom out to a whole-world satellite view,
   never a fog wall.
@@ -86,8 +90,8 @@ stores fixed-point UVs — 5× smaller than the previous format), streaming at
 120+ FPS. Baked light and AO live in per-tile lightmap atlases, so greedy
 meshing merges across lighting gradients: ~23% fewer vertices (~12.8M
 triangles resident for the whole world) with per-block light fidelity intact.
-Tiles render in parallel across all cores by default; `--gz` trades size
-against write time (1..12, default 9).
+Tiles render in parallel within the configured memory budget; `--gz` trades
+size against write time (1..12, default 7, the measured latency/size knee).
 
 ## Quick start
 

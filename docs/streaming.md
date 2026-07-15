@@ -72,3 +72,8 @@ or richer texture pages—should expose three values to the same planner:
 Keeping these properties at the resource boundary lets new streams share one
 global capacity instead of adding independent queues that can collectively
 oversubscribe the host.
+
+The profiled, ranked continuation of this design—including SSE/foveated HLOD,
+worker backpressure, deterministic incremental baking, bit-parallel meshing,
+entities, texture pages, and WebGPU meshlets—is in
+[the performance architecture roadmap](./performance-roadmap.md).

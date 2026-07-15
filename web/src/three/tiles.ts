@@ -43,7 +43,7 @@ export interface TileManagerOptions {
   /** The shared water shader (from {@link createWaterMaterial}). */
   waterMaterial: THREE.ShaderMaterial;
   /** The shared atlas-lit shader (from {@link createLightmappedMaterial});
-   *  required to draw VTL8 tiles' lightmapped geometry (manifest format 4+). */
+   *  required to draw VTL8+ tiles' lightmapped geometry (manifest format 4+). */
   lmMaterial?: THREE.ShaderMaterial;
   /** The shared lowres LOD shader (from {@link createLowresMaterial}); required
    *  to stream a format-2 manifest's lowres pyramid. */
@@ -107,9 +107,9 @@ interface Record_ {
   /** When the tile entered the scene — drives its stream-in fade. Undefined
    *  means "no fade" (already fully opaque). */
   fadeStart?: number;
-  /** VTL8: the atlas-lit solid tail (drawn with the lightmapped material). */
+  /** VTL8+: the atlas-lit solid tail (drawn with the lightmapped material). */
   terrainLm?: THREE.Mesh;
-  /** VTL8: the tile's lightmap texture, disposed with the tile. */
+  /** VTL8+: the tile's lightmap texture, disposed with the tile. */
   lightmapTex?: THREE.DataTexture;
   water?: THREE.Mesh;
   surface?: SurfaceMap;
@@ -159,9 +159,12 @@ function geometryBytes(geom: THREE.BufferGeometry): number {
 
 function textureBytes(texture: THREE.DataTexture | undefined): number {
   if (!texture) return 0;
-  // DataTexture retains its source pixels after upload, so the browser holds
-  // both the JS backing array and an equally sized GPU texture.
-  return 2 * arrayBytes((texture.image as { data?: unknown }).data);
+  // Before first draw the bytes live on the CPU; after upload lightmapTexture
+  // releases that source and the same-sized GPU allocation remains.
+  const gpuBytes = texture.userData['vantageGpuBytes'];
+  return typeof gpuBytes === 'number'
+    ? gpuBytes
+    : arrayBytes((texture.image as { data?: unknown }).data);
 }
 
 export class TileManager {

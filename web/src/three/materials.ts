@@ -30,7 +30,7 @@ const VERT = /* glsl */ `
   in float alight;                                 // packed (sky<<4)|block, 0..255
 #endif
 #ifdef LIGHTMAP
-  // Atlas-lit geometry (VTL8's greedy tail): baked light + AO come from a
+  // Atlas-lit geometry (VTL8+'s greedy tail): baked light + AO come from a
   // per-tile texture sampled in the fragment shader — per-BLOCK gradients on
   // arbitrarily large merged quads — instead of per-vertex values.
   in vec2 almuv;                                   // half-texel atlas coords
@@ -129,6 +129,7 @@ const FRAG = /* glsl */ `
   in float vWorldY;
 #ifdef LIGHTMAP
   uniform sampler2D uLightmap;                    // per-tile baked light+AO atlas
+  uniform float uLmPacked;                        // 1 = VTL9 packed RG8
   in vec2 vLmUv;
 #endif
   out vec4 frag;
@@ -184,6 +185,13 @@ const FRAG = /* glsl */ `
     return max(c, vec3(0.0));
   }
 
+#ifdef LIGHTMAP
+  vec3 decodePackedLight(vec2 rg) {
+    float packed = floor(rg.r * 255.0 + 0.5);
+    return vec3(floor(packed / 16.0), mod(packed, 16.0), rg.g);
+  }
+#endif
+
   void main() {
     // Depth slice (cave view): cut everything above the clip plane. With
     // backface culling on, the first thing visible below the cut is a cave
@@ -196,10 +204,32 @@ const FRAG = /* glsl */ `
     float blkL = vBlk;
     float aoV = vTint.a;
 #ifdef LIGHTMAP
-    vec3 lmS = texture(uLightmap, vLmUv).rgb;
-    skyL = lmS.r;
-    blkL = lmS.g;
-    aoV = lmS.b;
+    if (uLmPacked > 0.5) {
+      // Packing sky/block into one byte is lossless, but filtering that byte
+      // before unpacking would mix the nibbles. Fetch and decode the four
+      // neighbours first, then reproduce bilinear interpolation exactly.
+      vec2 p = vLmUv * vec2(textureSize(uLightmap, 0)) - 0.5;
+      ivec2 base = ivec2(floor(p));
+      vec2 f = fract(p);
+      ivec2 hi = textureSize(uLightmap, 0) - 1;
+      vec2 s00 = texelFetch(uLightmap, clamp(base, ivec2(0), hi), 0).rg;
+      vec2 s10 = texelFetch(uLightmap, clamp(base + ivec2(1, 0), ivec2(0), hi), 0).rg;
+      vec2 s01 = texelFetch(uLightmap, clamp(base + ivec2(0, 1), ivec2(0), hi), 0).rg;
+      vec2 s11 = texelFetch(uLightmap, clamp(base + ivec2(1, 1), ivec2(0), hi), 0).rg;
+      vec3 l00 = decodePackedLight(s00);
+      vec3 l10 = decodePackedLight(s10);
+      vec3 l01 = decodePackedLight(s01);
+      vec3 l11 = decodePackedLight(s11);
+      vec3 lmS = mix(mix(l00, l10, f.x), mix(l01, l11, f.x), f.y);
+      skyL = lmS.r / 15.0;
+      blkL = lmS.g / 15.0;
+      aoV = lmS.b;
+    } else {
+      vec3 lmS = texture(uLightmap, vLmUv).rgb;
+      skyL = lmS.r;
+      blkL = lmS.g;
+      aoV = lmS.b;
+    }
 #endif
     float lightAmt; vec3 lightCol;
     bakedLight(skyL, blkL, lightAmt, lightCol);
@@ -392,6 +422,7 @@ export function createTerrainMaterial(texData: DecodedTextureArray, opts: Terrai
       // material — see createLightmappedMaterial; inert here).
       uLightmap: { value: null },
       uLmSize: { value: new THREE.Vector2(1, 1) },
+      uLmPacked: { value: 0.0 },
       uPalette: { value: opts.quantized ? paletteTexture(opts.palette ?? []) : null },
       uFogCenter: { value: new THREE.Vector2() }, // streaming focus (world XZ)
       uFogRadial: { value: 0.0 }, // 1 = radial fog around uFogCenter (streaming)
@@ -425,7 +456,7 @@ export function createTerrainMaterial(texData: DecodedTextureArray, opts: Terrai
 }
 
 /**
- * The atlas-lit sibling of the terrain material (VTL8): shares every uniform
+ * The atlas-lit sibling of the terrain material (VTL8+): shares every uniform
  * OBJECT with it (fog, biome mix, light controls stay in lock-step) and adds
  * the LIGHTMAP define — geometry drawn with it samples baked light + AO from
  * the per-tile atlas (`uLightmap`/`uLmSize`, set per mesh) instead of vertex

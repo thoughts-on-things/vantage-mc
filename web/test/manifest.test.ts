@@ -57,6 +57,10 @@ describe('parseManifest', () => {
     expect(parseManifest(good).maxSectionVerts).toBeUndefined();
   });
 
+  it('accepts format 5 packed-lightmap manifests', () => {
+    expect(parseManifest({ ...good, format: 5, maxSectionVerts: 524288 }).format).toBe(5);
+  });
+
   it('carries the caves flag and yRange for the depth slice', () => {
     const m = parseManifest({ ...good, caves: true, yRange: { min: -64, max: 320 } });
     expect(m.caves).toBe(true);
@@ -89,7 +93,7 @@ describe('parseManifest', () => {
 
   it('rejects wrong format versions and malformed shapes', () => {
     expect(() => parseManifest(null)).toThrow(/not an object/);
-    expect(() => parseManifest({ ...good, format: 5 })).toThrow(/format/);
+    expect(() => parseManifest({ ...good, format: 6 })).toThrow(/format/);
     expect(() => parseManifest({ ...good, tiles: [{ x: 0 }] })).toThrow(/tile 0/);
     expect(() => parseManifest({ ...good, biomes: [1] })).toThrow(/biomes/);
     expect(() => parseManifest({ ...good, format: 2, lowres: { grid: 0, levels: [] } })).toThrow(/lowres/);

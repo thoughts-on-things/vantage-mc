@@ -12,6 +12,7 @@ import {
   encodeVTL6,
   encodeVTL7,
   encodeVTL8,
+  encodeVTL9,
   LEGEND,
 } from './encode.js';
 
@@ -145,6 +146,18 @@ describe('parseTile', () => {
     expect(t.colors![4 * 4 + 3]).toBe(255); // AO from the atlas
   });
 
+  it('decodes VTL9 packed lightmaps without changing corner light or AO', () => {
+    const t = parseTile(encodeVTL9());
+    expect(t.magic).toBe('VTL9');
+    expect(t.lightmap?.packed).toBe(true);
+    expect(Array.from(t.lightmap!.pixels.slice(2, 4))).toEqual([0x12, 255]);
+    // Same logical samples as VTL8: sky=1/block=2 at texel (1,0), then
+    // sky=6/block=2 at texel (2,1).
+    expect(t.light![4]).toBe((1 << 4) | 2);
+    expect(t.light![6]).toBe((6 << 4) | 2);
+    expect(t.colors![4 * 4 + 3]).toBe(255);
+  });
+
   it('throws on an unrecognized magic', () => {
     const buf = new ArrayBuffer(16);
     new Uint8Array(buf).set([88, 88, 88, 88]); // "XXXX"
@@ -217,6 +230,16 @@ describe('parseTileQuantized', () => {
     // Surface + legend still parse after the atlas block.
     expect(Array.from(q!.surface.height)).toEqual([64, 65, 66, 67]);
     expect(q!.biomeNames).toEqual(LEGEND);
+  });
+
+  it('keeps VTL9 lightmaps as a compact packed RG8 upload', () => {
+    const q = parseTileQuantized(encodeVTL9());
+    expect(q?.magic).toBe('VTL9');
+    expect(q?.lightmap?.packed).toBe(true);
+    expect(q?.lightmap?.pixels).toHaveLength(4 * 2 * 2);
+    expect(Array.from(q!.lightmap!.pixels.slice(0, 6))).toEqual([0x02, 255, 0x12, 255, 0x22, 255]);
+    expect(Array.from(q!.solid.lmuv!)).toEqual([3, 1, 3, 3, 5, 3, 5, 1]);
+    expect(Array.from(q!.surface.height)).toEqual([64, 65, 66, 67]);
   });
 
   it('parses the same VTL7 buffer twice without corruption (delta decode copies)', () => {

@@ -27,6 +27,9 @@ export const TILE_MAGIC = {
    *  light/AO from a texture instead of vertices, so lighting gradients no
    *  longer fragment greedy merges (~23% fewer vertices). */
   VTL8: 'VTL8',
+  /** VTL8 geometry + a losslessly packed RG8 lightmap (sky/block nibbles,
+   *  full-byte AO), stored as gzip-friendly planes. */
+  VTL9: 'VTL9',
 } as const;
 
 export type TileMagic = (typeof TILE_MAGIC)[keyof typeof TILE_MAGIC];

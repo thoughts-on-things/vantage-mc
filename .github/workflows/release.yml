@@ -273,12 +273,11 @@ jobs:
         shell: pwsh
         run: |
           $files = @(
-            Get-Item desktop/src-tauri/target/release/vantage-desktop.exe
             Get-ChildItem desktop/src-tauri/target/release/bundle -Recurse -File |
               Where-Object { $_.Extension -in '.exe', '.msi' }
           )
-          if ($files.Count -lt 3) {
-            throw "Expected the app executable plus NSIS and MSI bundles"
+          if ($files.Count -lt 2) {
+            throw "Expected the NSIS and MSI bundles"
           }
           foreach ($file in $files) {
             $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName

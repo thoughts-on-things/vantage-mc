@@ -9,6 +9,11 @@
       "extra-files": [
         {
           "type": "json",
+          "path": "package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
           "path": "web/package.json",
           "jsonpath": "$.version"
         },
@@ -54,7 +59,7 @@
         {
           "type": "toml",
           "path": "desktop/src-tauri/Cargo.lock",
-          "jsonpath": "$.package[?(@.name == 'vantage-desktop')].version"
+          "jsonpath": "$.package[?(@.name.value == 'vantage-desktop')].version"
         }
       ]
     }

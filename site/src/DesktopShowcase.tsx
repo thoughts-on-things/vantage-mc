@@ -230,8 +230,9 @@ export function DesktopShowcase() {
         No command line. Just <em>your worlds</em>.
       </h2>
       <p className="lede reveal">
-        Vantage Desktop finds every Java world on your PC — across Minecraft, Prism, MultiMC,
-        CurseForge and more — renders it locally, and drops you straight into the 3D viewer.
+        Vantage Desktop finds every Java world on your PC — across Minecraft, Beacon, Prism, MultiMC,
+        CurseForge and more — then uses the native Zig engine to build a cave-ready map and drops you
+        straight into the 3D viewer. Nothing leaves your machine.
       </p>
 
       <div className="studio-stage reveal">
@@ -327,7 +328,7 @@ export function DesktopShowcase() {
                   <div className="studio-preview">
                     <div className="studio-preview-map" style={{ backgroundImage: `url(${mapTop})` }} />
                     <span className="studio-preview-tag">
-                      <MapIcon size={11} /> top-down · press 2
+                      <LayersIcon size={11} /> cave-ready · press C
                     </span>
                   </div>
                   <p className="studio-eyebrow">Selected world</p>
@@ -429,17 +430,17 @@ export function DesktopShowcase() {
         <div className="dl-feat reveal">
           <span className="dl-feat-ic"><SearchIcon size={18} /></span>
           <h4>Finds your worlds for you</h4>
-          <p>Scans every launcher on the machine — vanilla, Prism, MultiMC, CurseForge, Modrinth, GDLauncher.</p>
+          <p>Scans every launcher, then replaces stale launcher icons with real previews captured from your rendered map.</p>
         </div>
         <div className="dl-feat reveal">
           <span className="dl-feat-ic"><SparklesIcon size={18} /></span>
-          <h4>Never touches your save</h4>
-          <p>Reads the world read-only and renders into its own cache folder. Nothing is uploaded, ever.</p>
+          <h4>Tuned for your machine</h4>
+          <p>Balanced mode plans around CPU and memory automatically, or ask for every logical thread with Maximum.</p>
         </div>
         <div className="dl-feat reveal">
-          <span className="dl-feat-ic"><CompassIcon size={18} /></span>
-          <h4>Straight into the viewer</h4>
-          <p>The same GPU viewer as the web, at 120+ FPS — one double-click from a rendered world.</p>
+          <span className="dl-feat-ic"><LayersIcon size={18} /></span>
+          <h4>Go below the surface</h4>
+          <p>Cave-ready geometry is built in. Press C, then scrub the depth gauge from sea level to bedrock.</p>
         </div>
       </div>
     </section>

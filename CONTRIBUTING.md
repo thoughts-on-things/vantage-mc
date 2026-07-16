@@ -32,10 +32,12 @@ so `zig build` works out of the box on macOS, Linux, and Windows.
 For the Windows desktop studio, the same task runner owns the complete loop:
 
 ```sh
-just dev           # native Tauri app + Zig sidecar, with automatic bootstrap
-just dev-ui        # fast browser-only React/CSS loop
+just desktop       # native Tauri app + Zig sidecar, with automatic bootstrap
+just desktop-ui    # fast browser-only React/CSS loop
+just site          # marketing site + linked viewer
 just doctor        # actionable prerequisite diagnostics
-just check         # Zig + renderer + desktop + Rust checks
+just verify        # Zig + renderer + desktop + Rust checks
+just package       # production Windows installers
 ```
 
 To render something you need assets extracted from a Minecraft client jar
@@ -57,7 +59,7 @@ serves the demo viewer over them.
 
 ## Before you open a PR
 
-- `just check` passes (version sync, Zig formatting/tests, renderer + site builds, desktop frontend, Rustfmt, and strict Clippy).
+- `just verify` passes (version sync, Zig formatting/tests, renderer + site builds, desktop frontend, Rustfmt, and strict Clippy).
 - `just ci` remains the fast Zig-only check when a change cannot affect the web or desktop workspaces.
 - For web changes: `npm ci && npm run ci && npm run build:demo` in `web/`.
 - New behavior comes with a test where practical — decoder/format changes in

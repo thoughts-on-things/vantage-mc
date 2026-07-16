@@ -135,14 +135,20 @@ fn runDesktopDiscover(init: std.process.Init, a: std.mem.Allocator) !void {
 }
 
 fn runDesktopRender(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len != 2) return usage();
+    if (args.len < 2) return usage();
     var progress: RenderProgress = .{
         .callback = emitDesktopProgress,
     };
-    try renderWorld(init, a, .{
-        .save_dir = args[0],
-        .out_dir = args[1],
-    }, &progress);
+    var render_args: std.ArrayList([]const u8) = .empty;
+    try render_args.append(a, args[0]);
+    try render_args.appendSlice(a, &.{ "--out", args[1] });
+    try render_args.appendSlice(a, args[2..]);
+    progress.setPhase(.scanning);
+    renderWorldArgs(init, a, render_args.items, &progress) catch |err| {
+        progress.setPhase(.failed);
+        return err;
+    };
+    progress.setPhase(.done);
 }
 
 fn emitDesktopProgress(_: ?*anyopaque, snapshot: RenderProgress.Snapshot) void {

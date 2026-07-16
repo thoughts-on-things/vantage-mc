@@ -78,10 +78,18 @@ web-install:
 setup:
     npm run setup
 
+# Launch the real native desktop app (world discovery, Zig renders, WebView viewer).
+desktop: dev
+
+# Launch the fast desktop UI preview with mock worlds (Node only).
+desktop-ui: dev-ui
+
 dev:
+    node scripts/free-port.mjs 1420
     npm run dev
 
 dev-ui:
+    node scripts/free-port.mjs 1420
     npm run dev:ui
 
 doctor:
@@ -89,6 +97,12 @@ doctor:
 
 check:
     npm test
+
+# Run the complete repo validation suite used before a PR.
+verify: check
+
+# Build the Windows NSIS + MSI installers and bundled ReleaseFast Zig sidecar.
+package: desktop-build
 
 desktop-build:
     npm run build
@@ -100,6 +114,7 @@ render save *args: build
 
 # Serve the web viewer with the Vite dev server (Ctrl-C to stop). Needs `just web-install` once.
 serve:
+    node scripts/free-port.mjs {{port}}
     @echo "→ http://127.0.0.1:{{port}}/   (press B for the biome layer)"
     cd web && npm run dev
 
@@ -119,8 +134,12 @@ site-demo: build
 
 # Serve the site locally (needs `just site-install` and `just site-demo` once).
 site-serve:
+    node scripts/free-port.mjs 8754
     @echo "→ http://127.0.0.1:8754/"
     cd site && npm run dev
+
+# Install what changed, build the linked viewer, and launch the marketing site.
+site: site-install site-serve
 
 # Extract the assets + biome data + lang a render needs (built into the binary;
 # `just extract` auto-discovers the newest jar in .minecraft/versions).

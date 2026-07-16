@@ -5,8 +5,14 @@
 
 A high-performance Minecraft (Java Edition) world → 3D web map renderer, written in Zig.
 
-**Live demo: [vantage.beacon-mc.io](https://vantage.beacon-mc.io)** — the real
-viewer streaming a real world, plus a measured side-by-side against BlueMap.
+**[Explore Vantage](https://vantage.beacon-mc.io)** — launch the live viewer,
+see cave slicing in action, compare real performance numbers, and download the
+desktop app.
+
+[Live site](https://vantage.beacon-mc.io) ·
+[Download Vantage Desktop](https://vantage.beacon-mc.io/#desktop) ·
+[Download the CLI](https://github.com/thoughts-on-things/vantage-mc/releases/latest) ·
+[Embed the viewer](https://www.npmjs.com/package/@thoughts-on-things/vantage-mc)
 
 Vantage turns a Minecraft world into a fast, beautiful, navigable 3D map in the
 browser, built around four ordered goals:
@@ -17,36 +23,42 @@ browser, built around four ordered goals:
 3. **Usability** — never break across Minecraft updates; trivial to deploy and scale.
 4. **Fidelity** — modern, configurable, high-quality rendering.
 
-## Desktop app (Windows MVP)
+## Choose how you use Vantage
 
-The `desktop/` workspace is a Tauri 2 world studio for Windows. It discovers
-Java Edition saves from the vanilla launcher, Prism, MultiMC, CurseForge,
-Modrinth, and GDLauncher; renders through the same bundled Zig core as the CLI;
-and opens the result in Vantage's GPU-accelerated streaming viewer. Save files
-are read-only and generated renders stay in the user's local application cache.
+### Vantage Desktop for Windows
 
-From the repository root—no per-folder install dance:
+The easiest way to map worlds on your own PC. Vantage Desktop finds Java
+Edition saves from Minecraft, Prism, MultiMC, CurseForge, Modrinth, GDLauncher,
+and Beacon, renders them locally, and opens them directly in the GPU viewer.
+It includes cave-ready renders, native performance profiles, quality settings,
+real map thumbnails, and a searchable world library—without a command line.
 
-```powershell
-just dev                  # bootstrap dependencies, then launch the native app
-just dev-ui               # instant browser-only UI loop with mock worlds
-just doctor               # diagnose Node / Zig / Rust / Windows setup
-just check                # the complete local check suite
-just desktop-build        # Windows installer + bundled Zig sidecar
+Save files are always read-only, generated maps stay in Vantage's local cache,
+and nothing is uploaded. Download the signed installer from the
+**[Vantage site](https://vantage.beacon-mc.io/#desktop)** or the
+**[latest GitHub release](https://github.com/thoughts-on-things/vantage-mc/releases/latest)**.
+
+### Vantage CLI for Windows, macOS, and Linux
+
+Use the native CLI for automation, servers, static map generation, or the
+fastest path from a save directory to deployable files. Release archives are
+available for x86-64 and ARM64 where supported; the binary includes its own web
+server and viewer, with no JVM or Node runtime required.
+
+Go to the **[CLI quick start](#cli-quick-start)** or download a
+**[prebuilt release](https://github.com/thoughts-on-things/vantage-mc/releases/latest)**.
+
+### Viewer package for web apps
+
+Already have Vantage render output? `@thoughts-on-things/vantage-mc` provides a
+zero-dependency decoder, a Three.js engine, and drop-in React components for
+streaming the map in your own application.
+
+```sh
+npm install @thoughts-on-things/vantage-mc three
 ```
 
-The bootstrap only runs `npm ci` on the first launch or when a lockfile changes.
-Native requirements are Zig 0.16, Rust stable with the Windows MSVC toolchain,
-Node 20+, and WebView2. The first native compile takes a little longer;
-subsequent launches use Cargo and Zig's incremental caches.
-
-Versioned Windows MSI and NSIS installers are signed with Microsoft Artifact
-Signing and attached to each GitHub release.
-
-The desktop boundary is deliberately small: Zig emits line-delimited discovery
-and progress records, Rust manages the child process and a loopback-only asset
-endpoint, and React owns the application UI. See [`desktop/README.md`](./desktop/README.md)
-for the architecture and development workflow.
+See the **[viewer package guide](./web/README.md)** for framework and engine APIs.
 
 ![Vantage — textured 3D terrain streaming in the browser](./docs/render-hero.jpg)
 
@@ -93,16 +105,29 @@ triangles resident for the whole world) with per-block light fidelity intact.
 Tiles render in parallel within the configured memory budget; `--gz` trades
 size against write time (1..12, default 7, the measured latency/size knee).
 
-## Quick start
+## CLI quick start
 
-Requires [Zig](https://ziglang.org) `0.16.0` and Node 20+. A
-[`Justfile`](./Justfile) wraps the common tasks ([`just`](https://just.systems)):
+Download the archive for your platform from the
+**[latest release](https://github.com/thoughts-on-things/vantage-mc/releases/latest)**:
+
+| Platform | Release asset |
+| --- | --- |
+| Windows x86-64 | `vantage-x86_64-windows.zip` |
+| macOS Apple Silicon | `vantage-aarch64-macos.tar.gz` |
+| macOS Intel | `vantage-x86_64-macos.tar.gz` |
+| Linux ARM64 | `vantage-aarch64-linux.tar.gz` |
+| Linux x86-64 | `vantage-x86_64-linux.tar.gz` |
+
+Extract `vantage` (`vantage.exe` on Windows), put it somewhere on your `PATH`,
+and confirm it is ready:
 
 ```sh
-just build         # build the binary into zig-out/bin
-just test          # run unit tests
-just web-install   # once: install the viewer's npm deps
+vantage --version
 ```
+
+Building from source requires Zig and Node, but using a release binary does
+not. Source setup, Just recipes, tests, and packaging live in
+**[CONTRIBUTING.md](./CONTRIBUTING.md)**.
 
 ### 1. Extract assets
 
@@ -134,8 +159,7 @@ vantage serve my-map --open      # → http://127.0.0.1:8268/
 ```
 
 `vantage serve` is a tiny local web server with the whole viewer embedded in
-the binary — no Node needed to *view* a map, only to develop the viewer
-itself (`just serve` runs the hot-reloading dev server instead). Pass
+the binary — no Node needed to view a map. Pass
 `--host 0.0.0.0` to share the map with your local network.
 
 The renderer only ever reads the world — it never writes to it. Useful flags:
@@ -189,6 +213,10 @@ array) — serve it from any web server or object store. The viewer is an
 installable npm package, **[`@thoughts-on-things/vantage-mc`](./web/README.md)**, with three layers:
 a zero-dependency tile decoder, a three.js renderer, and drop-in React
 components:
+
+```sh
+npm install @thoughts-on-things/vantage-mc three
+```
 
 ```tsx
 import { VantageViewer, BiomeLayer } from '@thoughts-on-things/vantage-mc/react';

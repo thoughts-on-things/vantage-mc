@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.5.0...v0.6.0) (2026-07-16)
+
+
+### Features
+
+* **desktop:** expand native world studio ([#47](https://github.com/thoughts-on-things/vantage-mc/issues/47)) ([9d32e28](https://github.com/thoughts-on-things/vantage-mc/commit/9d32e280ee2d0b29ee0dc77eb205bb461c6f7a81))
+
+
+### Bug Fixes
+
+* **desktop:** hide Windows console in release builds ([#45](https://github.com/thoughts-on-things/vantage-mc/issues/45)) ([20fa2b2](https://github.com/thoughts-on-things/vantage-mc/commit/20fa2b2d0f84e40698ded25eb1461670563a20f0))
+
 ## [0.5.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.4.0...v0.5.0) (2026-07-15)
 
 

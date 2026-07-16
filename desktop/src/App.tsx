@@ -6,6 +6,7 @@ import {
   Compass,
   Cpu,
   FolderSearch,
+  ImageIcon,
   Layers3,
   LoaderCircle,
   Map,
@@ -14,18 +15,28 @@ import {
   Search,
   Settings,
   Sparkles,
+  Trash2,
   X,
 } from 'lucide-react';
 import {
+  cancelRender,
   discoverWorlds,
+  getSystemProfile,
   onRenderProgress,
   openCachedWorld,
+  resetWorldRender,
+  resetWorldThumbnail,
   renderWorld,
   type RenderProgress,
+  type SystemProfile,
   type WorldInfo,
 } from './bridge.js';
+import { SettingsSheet } from './SettingsSheet.js';
+import { loadSettings, renderThreadCount, saveSettings, type DesktopSettings } from './settings.js';
 
 type Screen = 'library' | 'viewer';
+type WorldActionKind = 'opening' | 'rendering' | 'resetting' | 'thumbnail';
+interface WorldAction { path: string; kind: WorldActionKind }
 const loadViewer = () => import('./ViewerScreen.js');
 const ViewerScreen = lazy(loadViewer);
 
@@ -49,7 +60,16 @@ export function App() {
   const [progress, setProgress] = useState<RenderProgress | null>(null);
   const [manifestUrl, setManifestUrl] = useState<string | null>(null);
   const [screen, setScreen] = useState<Screen>('library');
+  const [settings, setSettings] = useState<DesktopSettings>(loadSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [system, setSystem] = useState<SystemProfile>({ logicalCores: navigator.hardwareConcurrency || 4, architecture: 'native', platform: 'windows' });
+  const [cancelling, setCancelling] = useState(false);
+  const [worldAction, setWorldAction] = useState<WorldAction | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const cancelledRender = useRef(false);
+  const worldActionRef = useRef<WorldAction | null>(null);
+  const cancelInFlightRef = useRef(false);
   const deferredQuery = useDeferredValue(query);
 
   const selected = worlds.find((world) => world.path === selectedPath) ?? null;
@@ -76,52 +96,156 @@ export function App() {
 
   useEffect(() => {
     void refresh();
+    void getSystemProfile().then(setSystem);
     let dispose: (() => void) | undefined;
     void onRenderProgress(setProgress).then((unlisten) => (dispose = unlisten));
     return () => dispose?.();
   }, [refresh]);
 
-  const startRender = useCallback(async (target: WorldInfo | null = selected) => {
-    if (!target) return;
+  useEffect(() => saveSettings(settings), [settings]);
+
+  const closeSettings = useCallback(() => {
+    settingsButtonRef.current?.focus({ preventScroll: true });
+    setSettingsOpen(false);
+  }, []);
+
+  const claimWorldAction = useCallback((path: string, kind: WorldActionKind): boolean => {
+    if (worldActionRef.current) return false;
+    const action = { path, kind };
+    worldActionRef.current = action;
+    setWorldAction(action);
+    return true;
+  }, []);
+
+  const updateWorldAction = useCallback((path: string, kind: WorldActionKind) => {
+    if (worldActionRef.current?.path !== path) return;
+    const action = { path, kind };
+    worldActionRef.current = action;
+    setWorldAction(action);
+  }, []);
+
+  const releaseWorldAction = useCallback((path: string) => {
+    if (worldActionRef.current?.path !== path) return;
+    worldActionRef.current = null;
+    setWorldAction(null);
+  }, []);
+
+  const updateWorldThumbnail = useCallback((path: string, thumbnailUrl: string) => {
+    setWorlds((current) => current.map((world) => (world.path === path ? { ...world, thumbnailUrl } : world)));
+  }, []);
+
+  const renderClaimedWorld = useCallback(async (target: WorldInfo) => {
+    updateWorldAction(target.path, 'rendering');
     setSelectedPath(target.path);
     setError(null);
+    cancelledRender.current = false;
+    cancelInFlightRef.current = false;
+    setCancelling(false);
+    setWorlds((current) => current.map((world) => (world.path === target.path ? { ...world, thumbnailUrl: null } : world)));
     setProgress({ phase: 'scanning', completed: 0, total: 0, worldPath: target.path });
     try {
-      const [ready] = await Promise.all([renderWorld(target.path), loadViewer()]);
+      const [ready] = await Promise.all([renderWorld(target.path, settings, renderThreadCount(settings.performanceMode, system.logicalCores)), loadViewer()]);
       setManifestUrl(ready.manifestUrl);
       setWorlds((current) => current.map((world) => (world.path === target.path ? { ...world, cached: true } : world)));
       setScreen('viewer');
     } catch (reason) {
       setProgress(null);
-      setError(reason instanceof Error ? reason.message : String(reason));
+      if (!cancelledRender.current) setError(userFacingError(reason));
+    } finally {
+      cancelInFlightRef.current = false;
+      setCancelling(false);
+      releaseWorldAction(target.path);
     }
-  }, [selected]);
+  }, [releaseWorldAction, settings, system.logicalCores, updateWorldAction]);
+
+  const startRender = useCallback(async (target: WorldInfo | null = selected) => {
+    if (!target || !claimWorldAction(target.path, 'rendering')) return;
+    await renderClaimedWorld(target);
+  }, [claimWorldAction, renderClaimedWorld, selected]);
 
   const openWorld = useCallback(async (target: WorldInfo | null = selected) => {
     if (!target) return;
     if (!target.cached) return startRender(target);
+    if (!claimWorldAction(target.path, 'opening')) return;
     setSelectedPath(target.path);
     setError(null);
     try {
-      const [ready] = await Promise.all([openCachedWorld(target.path), loadViewer()]);
+      const [ready] = await Promise.all([openCachedWorld(target.path, settings), loadViewer()]);
       setManifestUrl(ready.manifestUrl);
       setScreen('viewer');
     } catch {
-      await startRender(target);
+      await renderClaimedWorld(target);
+    } finally {
+      releaseWorldAction(target.path);
     }
-  }, [selected, startRender]);
+  }, [claimWorldAction, releaseWorldAction, renderClaimedWorld, selected, settings, startRender]);
+
+  const stopRender = useCallback(async () => {
+    if (worldActionRef.current?.kind !== 'rendering' || cancelInFlightRef.current) return;
+    cancelInFlightRef.current = true;
+    cancelledRender.current = true;
+    setCancelling(true);
+    try {
+      await cancelRender();
+    } finally {
+      setProgress(null);
+    }
+  }, []);
+
+  const regenerateThumbnail = useCallback(async (target: WorldInfo | null = selected) => {
+    if (!target?.cached || !claimWorldAction(target.path, 'thumbnail')) return;
+    setSelectedPath(target.path);
+    setError(null);
+    try {
+      await resetWorldThumbnail(target.path);
+      setWorlds((current) => current.map((world) => (world.path === target.path ? { ...world, thumbnailUrl: null } : world)));
+      updateWorldAction(target.path, 'opening');
+      const [ready] = await Promise.all([openCachedWorld(target.path, settings), loadViewer()]);
+      setManifestUrl(ready.manifestUrl);
+      setScreen('viewer');
+    } catch (reason) {
+      setError(userFacingError(reason));
+    } finally {
+      releaseWorldAction(target.path);
+    }
+  }, [claimWorldAction, releaseWorldAction, selected, settings, updateWorldAction]);
+
+  const resetRenderCache = useCallback(async (target: WorldInfo | null = selected) => {
+    if (!target?.cached || !claimWorldAction(target.path, 'resetting')) return;
+    setSelectedPath(target.path);
+    setError(null);
+    try {
+      await resetWorldRender(target.path);
+      setManifestUrl(null);
+      setProgress(null);
+      setWorlds((current) => current.map((world) => (
+        world.path === target.path ? { ...world, cached: false, thumbnailUrl: null } : world
+      )));
+    } catch (reason) {
+      setError(userFacingError(reason));
+    } finally {
+      releaseWorldAction(target.path);
+    }
+  }, [claimWorldAction, releaseWorldAction, selected]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing = target?.matches('input, textarea, select, [contenteditable="true"]');
       if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'k' || (event.key === '/' && !typing)) {
+        if (worldActionRef.current) return;
         event.preventDefault();
         searchRef.current?.focus();
         searchRef.current?.select();
         return;
       }
+      if (event.key === 'Escape' && settingsOpen) {
+        event.preventDefault();
+        closeSettings();
+        return;
+      }
       if (typing || screen !== 'library' || !filtered.length) return;
+      if (worldActionRef.current) return;
       if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
         event.preventDefault();
         const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
@@ -140,7 +264,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [filtered, openWorld, screen, selectedPath]);
+  }, [closeSettings, filtered, openWorld, screen, selectedPath, settingsOpen]);
 
   if (screen === 'viewer' && selected && manifestUrl) {
     return (
@@ -148,6 +272,10 @@ export function App() {
         <ViewerScreen
           world={selected}
           manifestUrl={manifestUrl}
+          settings={settings}
+          system={system}
+          hasThumbnail={Boolean(selected.thumbnailUrl)}
+          onThumbnail={(thumbnailUrl) => updateWorldThumbnail(selected.path, thumbnailUrl)}
           onBack={() => {
             setScreen('library');
             setProgress(null);
@@ -167,7 +295,7 @@ export function App() {
         </nav>
         <div className="sidebar-footer">
           <div className="engine-pill"><span /><b>Zig core</b><small>connected</small></div>
-          <button className="icon-button" aria-label="Settings"><Settings size={18} /></button>
+          <button ref={settingsButtonRef} className="icon-button" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={18} /></button>
         </div>
       </aside>
 
@@ -179,7 +307,7 @@ export function App() {
             <p>Every Java world on this PC, ready to explore.</p>
           </div>
           <div className="header-actions">
-            <label className="search-box">
+            <label className={`search-box${worldAction ? ' disabled' : ''}`}>
               <Search size={17} />
               <input
                 ref={searchRef}
@@ -193,11 +321,12 @@ export function App() {
                 }}
                 placeholder="Search worlds"
                 aria-label="Search worlds"
+                disabled={Boolean(worldAction)}
               />
-              {query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={14} /></button>}
+              {query && <button onClick={() => setQuery('')} aria-label="Clear search" disabled={Boolean(worldAction)}><X size={14} /></button>}
               {!query && <kbd>Ctrl K</kbd>}
             </label>
-            <button className="icon-button bordered" onClick={() => void refresh(true)} aria-label="Scan again">
+            <button className="icon-button bordered" onClick={() => void refresh(true)} aria-label="Scan again" disabled={Boolean(worldAction)}>
               <RefreshCw size={17} className={refreshing ? 'spin' : ''} />
             </button>
           </div>
@@ -221,6 +350,8 @@ export function App() {
                     world={world}
                     index={index}
                     selected={selectedPath === world.path}
+                    busy={worldAction?.path === world.path ? worldAction.kind : null}
+                    locked={Boolean(worldAction)}
                     onSelect={() => setSelectedPath(world.path)}
                     onOpen={() => void openWorld(world)}
                   />
@@ -231,9 +362,20 @@ export function App() {
             )}
           </div>
 
-          <WorldDetail key={selected?.path ?? 'empty'} world={selected} progress={progress} onOpen={() => void openWorld()} />
+          <WorldDetail
+            key={selected?.path ?? 'empty'}
+            world={selected}
+            progress={progress}
+            action={worldAction}
+            cancelling={cancelling}
+            onOpen={() => void openWorld()}
+            onCancel={() => void stopRender()}
+            onRegenerateThumbnail={() => void regenerateThumbnail()}
+            onResetRender={() => void resetRenderCache()}
+          />
         </section>
       </main>
+      {settingsOpen && <SettingsSheet settings={settings} system={system} onChange={setSettings} onClose={closeSettings} />}
     </div>
   );
 }
@@ -247,23 +389,25 @@ function Brand() {
   );
 }
 
-const WorldCard = memo(function WorldCard({ world, index, selected, onSelect, onOpen }: {
-  world: WorldInfo; index: number; selected: boolean; onSelect: () => void; onOpen: () => void;
+const WorldCard = memo(function WorldCard({ world, index, selected, busy, locked, onSelect, onOpen }: {
+  world: WorldInfo; index: number; selected: boolean; busy: WorldActionKind | null; locked: boolean; onSelect: () => void; onOpen: () => void;
 }) {
   return (
     <article
-      className={`world-card world-tone-${index % 4}${selected ? ' selected' : ''}`}
+      className={`world-card world-tone-${index % 4}${selected ? ' selected' : ''}${busy ? ' busy' : ''}${locked ? ' locked' : ''}`}
       style={{ '--card-index': Math.min(index, 12) } as React.CSSProperties}
       role="button"
-      tabIndex={0}
+      tabIndex={locked ? -1 : 0}
       aria-pressed={selected}
+      aria-disabled={locked}
       aria-label={`${world.name}, ${world.cached ? 'render ready' : 'not rendered'}`}
       data-world-index={index}
-      onClick={onSelect}
-      onDoubleClick={onOpen}
+      onClick={() => { if (!locked) onSelect(); }}
+      onDoubleClick={() => { if (!locked) onOpen(); }}
       onPointerEnter={() => { if (world.cached) void loadViewer(); }}
-      onFocus={() => { onSelect(); if (world.cached) void loadViewer(); }}
+      onFocus={() => { if (!locked) onSelect(); if (world.cached) void loadViewer(); }}
       onKeyDown={(event) => {
+        if (locked) return;
         if (event.key === 'Enter') onOpen();
         if (event.key === ' ') {
           event.preventDefault();
@@ -272,11 +416,13 @@ const WorldCard = memo(function WorldCard({ world, index, selected, onSelect, on
       }}
     >
       <div className="world-art">
-        {world.iconUrl ? <img src={world.iconUrl} alt="" /> : <GeneratedWorldArt seed={world.name} />}
+        {world.thumbnailUrl || world.iconUrl ? <img className={world.thumbnailUrl ? 'render-thumbnail' : 'world-icon'} src={world.thumbnailUrl ?? world.iconUrl ?? ''} alt="" /> : <GeneratedWorldArt seed={world.name} />}
         <div className="world-art-shade" />
         {world.cached && <span className="ready-badge"><Check size={12} /> rendered</span>}
-        <button className="card-open" onClick={(event) => { event.stopPropagation(); onOpen(); }} aria-label={`Open ${world.name}`}>
-          <Play size={16} fill="currentColor" />
+        {!world.thumbnailUrl && !busy && <span className="thumbnail-state">{world.iconUrl ? 'Minecraft icon · open for preview' : world.cached ? 'Open for real preview' : 'Preview after render'}</span>}
+        {busy && <div className="card-busy" role="status"><LoaderCircle className="spin" size={16} /><span>{worldActionLabel(busy)}</span></div>}
+        <button className="card-open" disabled={locked} onClick={(event) => { event.stopPropagation(); if (!locked) onOpen(); }} aria-label={`${busy ? worldActionLabel(busy) : 'Open'} ${world.name}`}>
+          {busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} fill="currentColor" />}
         </button>
       </div>
       <div className="world-card-copy">
@@ -296,12 +442,23 @@ function GeneratedWorldArt({ seed }: { seed: string }) {
   );
 }
 
-function WorldDetail({ world, progress, onOpen }: { world: WorldInfo | null; progress: RenderProgress | null; onOpen: () => void }) {
+function WorldDetail({ world, progress, action, cancelling, onOpen, onCancel, onRegenerateThumbnail, onResetRender }: {
+  world: WorldInfo | null;
+  progress: RenderProgress | null;
+  action: WorldAction | null;
+  cancelling: boolean;
+  onOpen: () => void;
+  onCancel: () => void;
+  onRegenerateThumbnail: () => void;
+  onResetRender: () => void;
+}) {
   const activeProgress = world && progress?.worldPath === world.path && !['done', 'failed'].includes(progress.phase) ? progress : null;
   if (!world) return <aside className="world-detail empty"><Compass size={28} /><p>Select a world to see its details.</p></aside>;
+  const actionKind = action?.path === world.path ? action.kind : null;
+  const rendering = actionKind === 'rendering';
   const fraction = activeProgress?.phase === 'tiles' && activeProgress.total > 0
     ? activeProgress.completed / activeProgress.total
-    : activeProgress ? 0.12 : 0;
+    : activeProgress || rendering ? 0.12 : 0;
   return (
     <aside className="world-detail">
       <div className="detail-top">
@@ -318,25 +475,78 @@ function WorldDetail({ world, progress, onOpen }: { world: WorldInfo | null; pro
         <Sparkles size={16} />
         <p><b>{world.cached ? 'Your render is ready.' : 'Built locally, stays local.'}</b> Vantage reads your save without modifying it.</p>
       </div>
-      {activeProgress ? (
-        <div className="render-progress">
-          <div className="progress-heading"><span><LoaderCircle className="spin" size={17} /> {phaseCopy[activeProgress.phase]}</span><b>{Math.round(fraction * 100)}%</b></div>
+      {actionKind === 'opening' ? (
+        <div className="render-progress opening-progress" role="status" aria-live="polite">
+          <div className="progress-heading"><span><LoaderCircle className="spin" size={17} /> Opening GPU viewer</span></div>
+          <div className="progress-track indeterminate"><span /></div>
+          <p>Loading the cached terrain and warming the renderer.</p>
+        </div>
+      ) : actionKind === 'thumbnail' || actionKind === 'resetting' ? (
+        <div className="render-progress maintenance-progress" role="status" aria-live="polite">
+          <div className="progress-heading"><span><LoaderCircle className="spin" size={17} /> {actionKind === 'thumbnail' ? 'Preparing a fresh preview' : 'Resetting render cache'}</span></div>
+          <div className="progress-track indeterminate"><span /></div>
+          <p>{actionKind === 'thumbnail' ? 'Opening the existing map; the new preview appears after terrain settles.' : 'Removing generated files. Your Minecraft save stays untouched.'}</p>
+        </div>
+      ) : activeProgress || rendering ? (
+        <div className="render-progress" role="status" aria-live="polite">
+          <div className="progress-heading"><span><LoaderCircle className="spin" size={17} /> {cancelling ? 'Stopping safely' : activeProgress ? phaseCopy[activeProgress.phase] : 'Finishing render'}</span>{!cancelling && <b>{Math.round(fraction * 100)}%</b>}</div>
           <div className="progress-track"><span style={{ width: `${Math.max(4, fraction * 100)}%` }} /></div>
-          <p>{activeProgress.phase === 'tiles' ? `${activeProgress.completed} of ${activeProgress.total} terrain tiles` : 'This usually takes only a moment.'}</p>
+          <p>{cancelling ? 'Closing workers and leaving the cache in a safe state.' : activeProgress?.phase === 'tiles' ? `${activeProgress.completed} of ${activeProgress.total} terrain tiles` : 'This usually takes only a moment.'}</p>
+          <button className="cancel-button" onClick={onCancel} disabled={cancelling}>{cancelling ? 'Stopping…' : 'Cancel render'}</button>
         </div>
       ) : (
-        <button className="primary-button" onClick={onOpen}>
-          {world.cached ? <><Compass size={18} /> Explore world</> : <><Sparkles size={18} /> Render this world</>}
-          <ChevronRight size={18} />
-        </button>
+        <>
+          <button className="primary-button" onClick={onOpen} disabled={Boolean(action)}>
+            {world.cached ? <><Compass size={18} /> Explore world</> : <><Sparkles size={18} /> Render this world</>}
+            <ChevronRight size={18} />
+          </button>
+          {world.cached && <RenderTools onRegenerateThumbnail={onRegenerateThumbnail} onResetRender={onResetRender} />}
+        </>
       )}
-      <p className="shortcut-hint">Double-click a rendered world to open it instantly.</p>
+      <p className="shortcut-hint">{actionKind ? actionHint(actionKind) : 'Double-click a rendered world to open it instantly.'}</p>
     </aside>
   );
 }
 
+function RenderTools({ onRegenerateThumbnail, onResetRender }: { onRegenerateThumbnail: () => void; onResetRender: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  if (confirming) {
+    return (
+      <div className="reset-confirm" role="group" aria-label="Confirm render reset">
+        <div><Trash2 size={15} /><p><b>Reset this render?</b><span>The map and preview will be deleted. The original world is never changed.</span></p></div>
+        <span><button onClick={() => setConfirming(false)}>Keep render</button><button className="danger" onClick={onResetRender}>Reset render</button></span>
+      </div>
+    );
+  }
+  return (
+    <div className="render-tools" aria-label="Render maintenance">
+      <button onClick={onRegenerateThumbnail}><ImageIcon size={14} /> Regenerate preview</button>
+      <button onClick={() => setConfirming(true)}><Trash2 size={14} /> Reset render</button>
+    </div>
+  );
+}
+
 function ErrorBanner({ message, onClose }: { message: string; onClose: () => void }) {
-  return <div className="error-banner"><span>Something went wrong</span><p>{message}</p><button onClick={onClose}><X size={15} /></button></div>;
+  return <div className="error-banner" role="alert"><span>Couldn&apos;t complete that action</span><p>{message}</p><button onClick={onClose} aria-label="Dismiss error"><X size={15} /></button></div>;
+}
+
+function userFacingError(reason: unknown): string {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  if (/another world is already rendering/i.test(message)) {
+    return 'The current render is still finishing. Cancel it or wait for it to complete before opening another world.';
+  }
+  return message;
+}
+
+function worldActionLabel(action: WorldActionKind): string {
+  return ({ opening: 'Opening', rendering: 'Rendering', resetting: 'Resetting', thumbnail: 'Refreshing preview' })[action];
+}
+
+function actionHint(action: WorldActionKind): string {
+  if (action === 'opening') return 'Your world will open as soon as the GPU is ready.';
+  if (action === 'thumbnail') return 'The existing render is kept; only its preview is replaced.';
+  if (action === 'resetting') return 'Only Vantage-generated files are being removed.';
+  return 'You can keep Vantage open while the native engine works.';
 }
 
 function EmptyLibrary({ searching }: { searching: boolean }) {
@@ -348,7 +558,7 @@ function WorldSkeleton() {
 }
 
 function sourceLabel(source: string): string {
-  return ({ vanilla: 'Minecraft', prism: 'Prism', multimc: 'MultiMC', curseforge: 'CurseForge', modrinth: 'Modrinth', gdlauncher: 'GDLauncher' } as Record<string, string>)[source] ?? source;
+  return ({ vanilla: 'Minecraft', prism: 'Prism', multimc: 'MultiMC', curseforge: 'CurseForge', modrinth: 'Modrinth', gdlauncher: 'GDLauncher', beacon: 'Beacon' } as Record<string, string>)[source] ?? source;
 }
 
 function relativeTime(timestamp: number): string {

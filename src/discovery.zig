@@ -17,6 +17,7 @@ pub const Source = enum {
     curseforge,
     modrinth,
     gdlauncher,
+    beacon,
     custom,
 
     pub fn label(self: Source) []const u8 {
@@ -27,6 +28,7 @@ pub const Source = enum {
             .curseforge => "CurseForge",
             .modrinth => "Modrinth",
             .gdlauncher => "GDLauncher",
+            .beacon => "Beacon",
             .custom => "Custom folder",
         };
     }
@@ -55,6 +57,7 @@ pub const Environment = struct {
     local_appdata: ?[]const u8 = null,
     userprofile: ?[]const u8 = null,
     home: ?[]const u8 = null,
+    beacon_project_dir: ?[]const u8 = null,
 };
 
 /// Discover worlds from known launcher locations and optional caller-provided
@@ -93,6 +96,7 @@ pub fn environmentFromProcess(environ: anytype) Environment {
         .local_appdata = environ.get("LOCALAPPDATA"),
         .userprofile = environ.get("USERPROFILE"),
         .home = environ.get("HOME"),
+        .beacon_project_dir = environ.get("BEACON_PROJECT_DIR"),
     };
 }
 
@@ -104,6 +108,10 @@ fn appendKnownRoots(arena: std.mem.Allocator, roots: *std.ArrayList(Root), env: 
         try addRoot(arena, roots, appdata, "CurseForge/minecraft/Instances", .curseforge, 3);
         try addRoot(arena, roots, appdata, "com.modrinth.theseus/profiles", .modrinth, 3);
         try addRoot(arena, roots, appdata, "gdlauncher_next/instances", .gdlauncher, 4);
+        // Beacon gives every installed server its own hermetic gameDir. Any
+        // single-player saves created from that client live under
+        // `<loadout>/saves`; multiplayer server chunks are not cached here.
+        try addRoot(arena, roots, appdata, "io.beacon-mc.BeaconLauncher/instances", .beacon, 3);
     }
     if (env.local_appdata) |local| {
         try addRoot(arena, roots, local, "Packages/Microsoft.MinecraftUWP_8wekyb3d8bbwe/LocalState/games/com.mojang/minecraftWorlds", .vanilla, 1);
@@ -111,6 +119,7 @@ fn appendKnownRoots(arena: std.mem.Allocator, roots: *std.ArrayList(Root), env: 
     }
     if (env.userprofile) |profile| {
         try addRoot(arena, roots, profile, "curseforge/minecraft/Instances", .curseforge, 3);
+        try addRoot(arena, roots, profile, ".beacon/data", .beacon, 1);
     }
     // macOS and Linux defaults are harmless on Windows and make the discovery
     // API portable from day one.
@@ -119,6 +128,15 @@ fn appendKnownRoots(arena: std.mem.Allocator, roots: *std.ArrayList(Root), env: 
         try addRoot(arena, roots, home, ".minecraft/saves", .vanilla, 1);
         try addRoot(arena, roots, home, ".local/share/PrismLauncher/instances", .prism, 4);
         try addRoot(arena, roots, home, ".local/share/multimc/instances", .multimc, 4);
+        try addRoot(arena, roots, home, "Library/Application Support/io.beacon-mc.BeaconLauncher/instances", .beacon, 3);
+        try addRoot(arena, roots, home, ".local/share/io.beacon-mc.BeaconLauncher/instances", .beacon, 3);
+        // A local Beacon server mounts `<project>/data` as Minecraft's /data.
+        // Its world directories are complete Anvil saves and are safe to render
+        // read-only. The default project root is ~/.beacon.
+        try addRoot(arena, roots, home, ".beacon/data", .beacon, 1);
+    }
+    if (env.beacon_project_dir) |project| {
+        try addRoot(arena, roots, project, "data", .beacon, 1);
     }
 }
 
@@ -302,4 +320,29 @@ test "normalizedPathKey is stable for separators" {
     } else {
         try std.testing.expectEqualStrings("C:/Games/World", key);
     }
+}
+
+test "known roots include Beacon launcher and server worlds" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var roots: std.ArrayList(Root) = .empty;
+    try appendKnownRoots(a, &roots, .{
+        .appdata = "C:/Users/test/AppData/Roaming",
+        .home = "/home/test",
+        .beacon_project_dir = "/srv/friends",
+    });
+
+    try expectRoot(a, roots.items, "C:/Users/test/AppData/Roaming", "io.beacon-mc.BeaconLauncher/instances", 3);
+    try expectRoot(a, roots.items, "/home/test", ".local/share/io.beacon-mc.BeaconLauncher/instances", 3);
+    try expectRoot(a, roots.items, "/home/test", ".beacon/data", 1);
+    try expectRoot(a, roots.items, "/srv/friends", "data", 1);
+}
+
+fn expectRoot(arena: std.mem.Allocator, roots: []const Root, base: []const u8, suffix: []const u8, max_depth: u8) !void {
+    const expected = try std.fs.path.join(arena, &.{ base, suffix });
+    for (roots) |root| {
+        if (root.source == .beacon and root.max_depth == max_depth and std.mem.eql(u8, root.path, expected)) return;
+    }
+    return error.TestExpectedEqual;
 }

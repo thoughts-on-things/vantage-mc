@@ -510,7 +510,7 @@ export class TileManager {
   }
 
   private reconcileTiles(tiles: ManifestTile[], prune: boolean): boolean {
-    let added = false;
+    let changed = false;
     const incoming = prune ? new Set(tiles.map((tile) => tileKey(tile.x, tile.z))) : null;
     if (incoming) {
       for (const [key] of this.index) {
@@ -518,7 +518,7 @@ export class TileManager {
         this.index.delete(key);
         const rec = this.records.get(key);
         if (rec) this.unload(key, rec);
-        added = true;
+        changed = true;
       }
     }
     for (const t of tiles) {
@@ -526,12 +526,12 @@ export class TileManager {
       const previous = this.index.get(k);
       if (!previous) {
         this.index.set(k, t);
-        added = true;
+        changed = true;
       } else if (t.revision !== previous.revision) {
         this.index.set(k, t);
         const rec = this.records.get(k);
         if (rec) this.unload(k, rec);
-        added = true;
+        changed = true;
       } else {
         // Same source generation: refresh size/path metadata in place so
         // queued references remain current and live-bake byte estimates can
@@ -540,13 +540,13 @@ export class TileManager {
         previous.bytes = t.bytes;
       }
     }
-    if (added) {
+    if (changed) {
       this.lastFocusX = Infinity; // re-plan around the (unchanged) focus next update
       this.lastFocusZ = Infinity;
       this.invalidate();
-      this.emitter.emit('change', this.stats); // total grew — refresh the readout
+      this.emitter.emit('change', this.stats); // the tile set moved — refresh the readout
     }
-    return added;
+    return changed;
   }
 
   /** Install the lowres pyramid once a progressive render finishes (its earlier

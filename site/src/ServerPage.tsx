@@ -4,7 +4,6 @@ import heroShot from './assets/render-hero-v2.png';
 const GITHUB = 'https://github.com/thoughts-on-things/vantage-mc';
 const SERVER_DOCS = `${GITHUB}/blob/main/docs/server.md`;
 const OPENAPI = `${GITHUB}/blob/main/docs/server-openapi.json`;
-const BEACON = 'https://beacon-mc.io';
 
 function useReveal<T extends HTMLElement>() {
   const ref = useRef<T>(null);
@@ -65,7 +64,7 @@ export function ServerPage() {
         </a>
         <div className="nav-links">
           <a href="#architecture">architecture</a>
-          <a href="#beacon">beacon</a>
+          <a href="#integration">integration</a>
           <a href="#protocol">protocol</a>
           <a href="#security">security</a>
           <a href="#deploy">deploy</a>
@@ -95,7 +94,7 @@ export function ServerPage() {
               <a className="cta cta-primary" href="#deploy">
                 Run the sidecar <span className="cta-arrow" aria-hidden="true">→</span>
               </a>
-              <a className="cta cta-ghost" href="#beacon">Integrate a launcher</a>
+              <a className="cta cta-ghost" href="#integration">Integrate a launcher</a>
             </div>
             <ul className="server-proof reveal" aria-label="Server properties">
               <li><span /> read-only world access</li>
@@ -119,7 +118,7 @@ export function ServerPage() {
               </div>
             </div>
             <div className="server-request-flow" aria-label="Request flow">
-              <span>Minecraft save</span><b>→</b><span>Vantage</span><b>→</b><span>Beacon</span><b>→</b><span>player</span>
+              <span>Minecraft save</span><b>→</b><span>Vantage</span><b>→</b><span>host</span><b>→</b><span>player</span>
             </div>
           </figure>
         </header>
@@ -135,7 +134,7 @@ export function ServerPage() {
             <article className="reveal">
               <span className="server-card-number">01</span>
               <h3>Sidecar, not plugin</h3>
-              <p>No code on the game tick thread. Vanilla, Paper, and other Java hosts can opt in without changing gameplay.</p>
+              <p>No code on the game tick thread. Vanilla and modded Java servers can opt in without changing gameplay.</p>
             </article>
             <article className="reveal">
               <span className="server-card-number">02</span>
@@ -145,42 +144,42 @@ export function ServerPage() {
             <article className="reveal">
               <span className="server-card-number">03</span>
               <h3>Identity stays upstream</h3>
-              <p>Beacon or another host decides who may view a world. Vantage never needs a Microsoft or Minecraft token.</p>
+              <p>The server host decides who may view a world. Vantage never needs a Microsoft or Minecraft token.</p>
             </article>
           </div>
         </section>
 
-        <section className="beacon-section" id="beacon">
-          <div className="beacon-heading reveal">
+        <section className="integration-section" id="integration">
+          <div className="integration-heading reveal">
             <div>
-              <p className="kicker">built around beacon</p>
+              <p className="kicker">built for hosts</p>
               <h2>One session, one private data plane</h2>
             </div>
-            <a href={BEACON} rel="noreferrer">Explore Beacon ↗</a>
+            <a href={SERVER_DOCS} rel="noreferrer">Integration guide ↗</a>
           </div>
-          <div className="trust-diagram reveal" aria-label="Beacon integration trust boundary">
-            <div className="trust-node trust-player"><small>PLAYER</small><strong>Beacon launcher</strong><span>existing Beacon session</span></div>
+          <div className="trust-diagram reveal" aria-label="Host integration trust boundary">
+            <div className="trust-node trust-player"><small>PLAYER</small><strong>Game launcher</strong><span>existing player session</span></div>
             <b aria-hidden="true">→</b>
-            <div className="trust-node trust-beacon"><small>AUTH BOUNDARY</small><strong>Beacon map proxy</strong><span>session + rate policy</span></div>
+            <div className="trust-node trust-host"><small>AUTH BOUNDARY</small><strong>Host map proxy</strong><span>session + rate policy</span></div>
             <b aria-hidden="true">→</b>
             <div className="trust-node trust-vantage"><small>PRIVATE NETWORK</small><strong>Vantage sidecar</strong><span>internal bearer only</span></div>
             <b aria-hidden="true">→</b>
             <div className="trust-node trust-world"><small>READ ONLY</small><strong>World + cache</strong><span>no remote control</span></div>
           </div>
-          <div className="beacon-details">
+          <div className="integration-details">
             <ol className="integration-steps reveal">
-              <li><span>1</span><p><strong>Beacon starts Vantage</strong> beside the selected save with a persistent cache and a private listener.</p></li>
+              <li><span>1</span><p><strong>The host starts Vantage</strong> beside the selected save with a persistent cache and a private listener.</p></li>
               <li><span>2</span><p><strong>The launcher opens its existing session-gated route.</strong> No second login or account link is introduced.</p></li>
-              <li><span>3</span><p><strong>Beacon validates the player</strong>, removes client authorization headers, and attaches its internal Vantage credential.</p></li>
+              <li><span>3</span><p><strong>The host validates the player</strong>, removes client authorization headers, and attaches its internal Vantage credential.</p></li>
               <li><span>4</span><p><strong>The viewer streams the map.</strong> Unchanged terrain stays on the GPU while revised tiles replace themselves.</p></li>
             </ol>
-            <CodeBlock label="beacon launcher">
+            <CodeBlock label="launcher integration">
 {`const world = await worldFromHttp(
-  \`${'${beaconOrigin}'}/map-app/world/manifest.json\`,
+  \`${'${hostOrigin}'}/map-app/world/manifest.json\`,
   {
-    accessToken: beaconSession,
+    accessToken: hostSession,
     fetch: nativeHttpFetch,
-    label: beaconName,
+    label: hostLabel,
   },
 );
 
@@ -274,7 +273,7 @@ just server-smoke`}
           <div className="deploy-copy reveal">
             <p className="kicker">quick start</p>
             <h2>Private by default</h2>
-            <p>On the same machine as Beacon, leave Vantage on loopback and let Beacon own the public HTTPS route.</p>
+            <p>On the same machine as the authenticating host, leave Vantage on loopback and let the host own the public HTTPS route.</p>
             <CodeBlock label="same-host sidecar">
 {`vantage server /srv/minecraft/world \\
   --assets /srv/vantage/assets/minecraft \\
@@ -315,9 +314,9 @@ vantage server /data/world \\
 
         <section className="server-final">
           <div className="server-final-card reveal">
-            <p className="kicker">for beacon and beyond</p>
+            <p className="kicker">for every launcher</p>
             <h2>Make every supported server explorable</h2>
-            <p>Start with Beacon’s existing session boundary. The same protocol is ready for Modrinth and other launchers when their hosts opt in.</p>
+            <p>Bring your host’s existing session boundary. The same protocol is ready for any launcher whose server host opts in.</p>
             <div>
               <a className="cta cta-primary" href={SERVER_DOCS} rel="noreferrer">Read the integration guide <span aria-hidden="true">→</span></a>
               <a className="cta cta-ghost" href={GITHUB} rel="noreferrer">View the source</a>
@@ -329,7 +328,7 @@ vantage server /data/world \\
       <footer className="footer server-footer">
         <div className="footer-main">
           <div className="footer-brand"><span className="wordmark-tile" aria-hidden="true" /> <strong>vantage</strong><span className="footer-license">MIT licensed</span></div>
-          <div className="footer-links"><a href="../">Overview</a><a href={SERVER_DOCS} rel="noreferrer">Server guide</a><a href={OPENAPI} rel="noreferrer">OpenAPI</a><a href={BEACON} rel="noreferrer">Beacon</a><a href={GITHUB} rel="noreferrer">GitHub</a></div>
+          <div className="footer-links"><a href="../">Overview</a><a href={SERVER_DOCS} rel="noreferrer">Server guide</a><a href={OPENAPI} rel="noreferrer">OpenAPI</a><a href={GITHUB} rel="noreferrer">GitHub</a></div>
         </div>
         <div className="footer-fine">Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.</div>
       </footer>

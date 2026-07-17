@@ -119,8 +119,8 @@ export async function worldFromHttp(url: string, options: HttpWorldOptions = {})
 }
 
 /** Connect to the Vantage server protocol v1. This is the direct-server path
- *  for launchers; an authenticating host such as Beacon can use
- *  {@link worldFromHttp} with its own session-gated manifest URL instead. */
+ *  for launchers; a host with its own player sessions can use
+ *  {@link worldFromHttp} with a session-gated manifest URL instead. */
 export function worldFromVantageServer(endpoint: string, options: VantageServerOptions = {}): Promise<WorldSource> {
   const worldId = options.worldId ?? 'default';
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(worldId)) throw new Error(`vantage: invalid server world id`);

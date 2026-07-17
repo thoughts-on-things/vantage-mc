@@ -64,13 +64,12 @@ See the **[viewer package guide](./web/README.md)** for framework and engine API
 
 `vantage server` runs beside a Minecraft Java server and turns its persisted
 world into a continuously updating, on-demand tile stream. It is designed to
-sit behind an authenticating host such as Beacon: the launcher keeps ownership
-of player identity and access, while Vantage remains a read-only, bounded
-rendering data plane. Generic launchers can also connect through the versioned
-bearer-authenticated protocol.
+sit behind an authenticating host: the launcher backend or reverse proxy keeps
+ownership of player identity and access, while Vantage remains a read-only,
+bounded rendering data plane. Launchers can also connect directly through the
+versioned bearer-authenticated protocol.
 
-See the **[Vantage Server site](https://vantage.beacon-mc.io/server/)** and the
-**[multiplayer architecture and Beacon integration guide](./docs/server.md)**.
+See the **[multiplayer architecture and host integration guide](./docs/server.md)**.
 
 ![Vantage — textured 3D terrain streaming in the browser](./docs/render-hero.jpg)
 
@@ -260,14 +259,14 @@ vantage server /srv/minecraft/world \
   --out /var/cache/vantage/world
 ```
 
-It binds to loopback by default for a session-authenticating Beacon proxy. A
+It binds to loopback by default for a session-authenticating reverse proxy. A
 non-loopback bind requires a long bearer secret from an environment variable;
 public deployments terminate TLS and enforce player/session policy at the
 reverse proxy. Only tiles listed by the world manifest can trigger work,
 concurrent bakes and connections are bounded, duplicate requests coalesce, and
 changed region files invalidate only their overlapping map tiles.
 
-The protocol, deployment examples, threat model, and Beacon migration path are
+The protocol, deployment examples, threat model, and host integration path are
 in **[docs/server.md](./docs/server.md)**.
 
 ### 3. Deploy anywhere

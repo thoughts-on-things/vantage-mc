@@ -4,7 +4,7 @@
     "title": "Vantage Server Protocol",
     "version": "1.0.0",
     "summary": "Read-only world-rendering data plane for Minecraft launchers and server hosts.",
-    "description": "Protocol v1 exposes discovery, health, world metadata, and immutable render artifacts. A Vantage process currently serves one world with the id `default`. Player identity and authorization remain the responsibility of an upstream host such as Beacon.\n\nEvery endpoint (including the public discovery ones) additionally enforces a request policy that can answer before the documented responses: `403` when a browser `Origin` header is present but not on the configured allowlist, `400` when a security-relevant header (`Origin`, `Authorization`, `Access-Control-Request-Method`) appears more than once, `405` for methods other than GET/HEAD/OPTIONS, and `414` for request targets over 1024 bytes."
+    "description": "Protocol v1 exposes discovery, health, world metadata, and immutable render artifacts. A Vantage process currently serves one world with the id `default`. Player identity and authorization remain the responsibility of an upstream authenticating host.\n\nEvery endpoint (including the public discovery ones) additionally enforces a request policy that can answer before the documented responses: `403` when a browser `Origin` header is present but not on the configured allowlist, `400` when a security-relevant header (`Origin`, `Authorization`, `Access-Control-Request-Method`) appears more than once, `405` for methods other than GET/HEAD/OPTIONS, and `414` for request targets over 1024 bytes."
   },
   "servers": [
     { "url": "/", "description": "The discovered Vantage server origin" }

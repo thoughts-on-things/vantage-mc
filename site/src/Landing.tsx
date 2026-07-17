@@ -209,7 +209,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
           <h2>The world doesn&apos;t have to live on your PC</h2>
           <p className="lede">
             <code>vantage server</code> runs beside a Java server and streams its persisted world to authorized
-            players. Beacon keeps the session; Vantage stays a read-only, bounded rendering sidecar.
+            players. Your host keeps the session; Vantage stays a read-only, bounded rendering sidecar.
           </p>
           <div className="server-home-actions">
             <a className="cta cta-primary" href={SERVER}>
@@ -223,7 +223,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
           <b aria-hidden="true">→</b>
           <div className="server-home-active"><small>02 · DATA PLANE</small><strong>Vantage sidecar</strong><span>render + bounded cache</span></div>
           <b aria-hidden="true">→</b>
-          <div><small>03 · ACCESS</small><strong>Beacon launcher</strong><span>existing player session</span></div>
+          <div><small>03 · ACCESS</small><strong>Launcher / proxy</strong><span>existing player session</span></div>
         </div>
       </section>
 

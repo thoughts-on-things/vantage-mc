@@ -580,10 +580,10 @@ test "mimeType maps the served extensions" {
 }
 
 test "origin allowlist is exact" {
-    const allowed = [_][]const u8{ "https://beacon.example", "http://127.0.0.1:3000" };
-    try std.testing.expect(originAllowed(&allowed, "https://beacon.example"));
-    try std.testing.expect(!originAllowed(&allowed, "https://beacon.example.evil"));
-    try std.testing.expect(!originAllowed(&allowed, "https://beacon.example/"));
+    const allowed = [_][]const u8{ "https://maps.example", "http://127.0.0.1:3000" };
+    try std.testing.expect(originAllowed(&allowed, "https://maps.example"));
+    try std.testing.expect(!originAllowed(&allowed, "https://maps.example.evil"));
+    try std.testing.expect(!originAllowed(&allowed, "https://maps.example/"));
 }
 
 test "bearer values are parsed and verified without prefix ambiguity" {

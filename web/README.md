@@ -82,18 +82,17 @@ import { worldFromHttp } from '@thoughts-on-things/vantage-mc/core';
 import { VantageViewer } from '@thoughts-on-things/vantage-mc/three';
 
 const world = await worldFromHttp(
-  'https://beacon.example/map-app/world/manifest.json',
+  'https://host.example/map-app/world/manifest.json',
   { accessToken: sessionToken, fetch: nativeHttpFetch },
 );
 const viewer = await VantageViewer.mount('#app', { world });
 ```
 
 For a direct connection to protocol v1, use
-`worldFromVantageServer('https://map.example/', { accessToken })`. Beacon
-deployments should prefer their existing session-gated same-origin proxy. See
-the [Vantage Server overview](https://vantage.beacon-mc.io/server/) and
-[multiplayer server guide](../docs/server.md) for the trust boundary and
-deployment contract.
+`worldFromVantageServer('https://map.example/', { accessToken })`. Hosts with
+their own player sessions should prefer an existing session-gated same-origin
+proxy. See the [multiplayer server guide](../docs/server.md) for the trust
+boundary and deployment contract.
 
 The viewer **renders on demand**: a frame draws only when something changed —
 camera motion, tiles streaming in, a setting — plus a gentle 10 fps tick while

@@ -2,26 +2,26 @@
 
 `vantage server` is the multiplayer data plane for Vantage. It runs beside a
 Minecraft Java server, reads that server's world files, renders tiles lazily,
-and exposes the versioned Vantage world protocol to an authenticating host such
-as Beacon. Players can explore a server map without downloading the save and
-without granting Vantage their Minecraft, Microsoft, or launcher credentials.
+and exposes the versioned Vantage world protocol to an authenticating host — a
+launcher backend, server web portal, or reverse proxy. Players can explore a
+server map without downloading the save and without granting Vantage their
+Minecraft, Microsoft, or launcher credentials.
 
-The public product and integration overview lives at
-[vantage.beacon-mc.io/server](https://vantage.beacon-mc.io/server/). The
-machine-readable protocol contract is [server-openapi.json](./server-openapi.json).
+The machine-readable protocol contract is
+[server-openapi.json](./server-openapi.json).
 
 The design deliberately separates two responsibilities:
 
-- **The launcher or server host owns identity and authorization.** Beacon
-  already knows which user and Beacon instance a session belongs to. It should
-  keep making the access decision.
+- **The launcher or server host owns identity and authorization.** It already
+  knows which player a session belongs to, and it keeps making the access
+  decision.
 - **Vantage owns rendering and artifact streaming.** It has read-only world
   access, a bounded bake scheduler, and no account database or public control
   plane.
 
 ```mermaid
 flowchart LR
-  P["Player in Beacon launcher"] -->|"existing Beacon session"| B["Beacon API / map proxy"]
+  P["Player in a launcher"] -->|"existing launcher session"| B["host API / map proxy"]
   B -->|"private bearer credential"| V["vantage server"]
   M["Minecraft Java server"] -->|"autosave or controlled save-all flush"| W["world region files"]
   W -->|"read only"| V
@@ -108,9 +108,9 @@ pattern.
 
 ### Production sidecar
 
-For a same-host Beacon service, keep the listener on its default loopback
-address. No bearer is required because only the authenticating local proxy can
-reach it:
+When the authenticating host runs on the same machine, keep the listener on
+its default loopback address. No bearer is required because only the
+authenticating local proxy can reach it:
 
 ```sh
 vantage server /srv/minecraft/world \
@@ -120,7 +120,7 @@ vantage server /srv/minecraft/world \
   --threads 8
 ```
 
-When Beacon and Vantage are in separate containers, put them on a private
+When the host and Vantage run in separate containers, put them on a private
 network and use an internal secret. `vantage server` refuses a non-loopback
 bind unless the environment variable contains at least 32 bytes:
 
@@ -140,7 +140,8 @@ the command line, and never printed. Send it as an HTTP header:
 Authorization: Bearer <secret>
 ```
 
-Terminate HTTPS at Caddy, nginx, the platform load balancer, or Beacon itself.
+Terminate HTTPS at a trusted reverse proxy, the platform load balancer, or the
+authenticating host itself.
 Do not expose the native HTTP listener or send a bearer token over cleartext
 outside a trusted loopback/private network. This follows the bearer-token
 requirements in [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750).
@@ -188,25 +189,25 @@ Manifest tiles from a continuous server carry an opaque `revision` string. A
 client that polls the dynamic manifest keeps unchanged GPU tiles resident,
 unloads only removed or changed revisions, and fetches replacements on demand.
 
-## Beacon integration
+## Host integration
 
-Beacon already has the right trust boundary: its launcher establishes a
-per-Beacon session through the trusted Atlas broker, its web routes enforce
-that session, and its admin service owns the Minecraft process and save path.
-Vantage should plug into that boundary rather than introduce another player
-identity system.
+A server host that already authenticates its players has the right trust
+boundary: its launcher or web routes establish and enforce the session, and
+its admin tier owns the Minecraft process and save path. Vantage should plug
+into that boundary rather than introduce another player identity system.
 
-The recommended migration from Beacon's periodic full-map supervisor is:
+The recommended integration for a host that currently ships periodic full-map
+renders is:
 
-1. Start one long-running `vantage server` for the Beacon save. Keep its cache
-   on persistent storage and its listener reachable only from the Beacon
-   service tier.
-2. Keep Beacon's existing map session middleware. Add a streaming proxy below
-   a stable same-origin prefix such as `/map-app/world/`.
-3. On every request, validate the player's existing Beacon session. Remove any
+1. Start one long-running `vantage server` for the save. Keep its cache on
+   persistent storage and its listener reachable only from the host's service
+   tier.
+2. Keep the host's existing map session middleware. Add a streaming proxy
+   below a stable same-origin prefix such as `/map-app/world/`.
+3. On every request, validate the player's existing session. Remove any
    client-supplied `Authorization` header, then attach the Vantage internal
    bearer before forwarding to `/v1/worlds/default/`.
-4. Apply player/session rate limits at Beacon or the edge. Never expose an
+4. Apply player/session rate limits at the host or the edge. Never expose an
    endpoint that lets a player choose a filesystem path, cache directory,
    command, or arbitrary tile coordinate.
 5. Return the session-gated manifest URL to the launcher. A browser can use the
@@ -217,11 +218,11 @@ The recommended migration from Beacon's periodic full-map supervisor is:
 import { worldFromHttp } from '@thoughts-on-things/vantage-mc/core';
 
 const world = await worldFromHttp(
-  `${beaconOrigin}/map-app/world/manifest.json`,
+  `${hostOrigin}/map-app/world/manifest.json`,
   {
-    accessToken: beaconSession,
-    fetch: nativeHttpFetch, // e.g. the launcher's Tauri HTTP transport
-    label: beaconName,
+    accessToken: hostSession,
+    fetch: nativeHttpFetch, // e.g. the launcher's native HTTP transport
+    label: hostLabel,
   },
 );
 
@@ -231,7 +232,7 @@ const viewer = await VantageViewer.mount(container, { world });
 The Vantage client confines every manifest-owned artifact path to the
 manifest's HTTP origin and directory before attaching credentials. An absolute
 URL, encoded traversal, backslash, empty path segment, or `..` is rejected, so
-a compromised manifest cannot redirect the player's Beacon token elsewhere.
+a compromised manifest cannot redirect the player's session token elsewhere.
 
 A generic launcher that connects directly to a TLS-terminated Vantage endpoint
 can use the protocol helper instead:
@@ -247,8 +248,8 @@ const world = await worldFromVantageServer('https://map.example.net/', {
 ## Continuous consistency and performance
 
 The sidecar never writes to the Minecraft save. Minecraft remains responsible
-for persisting live chunks; Vantage observes them on the next scan. If Beacon
-needs a stronger freshness point, its privileged supervisor may issue
+for persisting live chunks; Vantage observes them on the next scan. If the
+host needs a stronger freshness point, its privileged supervisor may issue
 `save-all flush` before a planned snapshot. That operation must not be exposed
 to map clients, and should be debounced because it can pause a busy server.
 

@@ -34,6 +34,22 @@ Normal CLI diagnostics may still appear around those records. The host ignores
 unprefixed output, so human CLI output and the desktop contract can evolve
 independently.
 
+Frontend layout:
+
+- `src/hooks/useLibrary.ts` — all library state and world actions. One world
+  action runs at a time; the lock lives in a ref so same-tick double clicks
+  cannot claim it twice.
+- `src/components/` — presentational pieces (library screen, world cards,
+  detail panel, settings sheet).
+- `src/lib/` — pure helpers: formatting and the performance-mode profiles
+  shared by the Zig bake and the GPU viewer.
+- `src/styles.css` — the design tokens (color ramp, type scale, radii) and all
+  component styles; rules never hardcode grays.
+
+Rust host layout: `lib.rs` holds the Tauri commands and state, `assets.rs` the
+loopback tile endpoint (responses stream from disk), `sidecar.rs` the
+line-delimited protocol parsing.
+
 ## Desktop rendering
 
 New desktop renders keep full cave geometry by default, so the GPU viewer can

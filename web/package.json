@@ -1,6 +1,6 @@
 {
   "name": "@thoughts-on-things/vantage-mc",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Render a Minecraft (Java) world as a fast, beautiful 3D web map. The web frontend for the Vantage generator.",
   "type": "module",
   "license": "MIT",

@@ -40,6 +40,19 @@ just verify        # Zig + renderer + desktop + Rust checks
 just package       # production Windows installers
 ```
 
+To develop or verify the multiplayer server-to-viewer path, use the supervised
+root command instead of manually coordinating terminals and credentials:
+
+```sh
+just server-dev                              # bundled world + authenticated viewer
+just server-dev "/path/to/server/world"      # exercise a real Java server save
+just server-smoke                            # auth/CORS/manifest/lazy-bake preflight
+```
+
+`just server-dev-help` lists port, cache, scan, browser, and build
+overrides. The command installs missing viewer dependencies, prefixes both
+services' logs, and owns their shutdown.
+
 To render something you need assets extracted from a Minecraft client jar
 (`just extract <client.jar>`, any 1.18+ version) and a world save. See the
 [README](./README.md#quick-start).

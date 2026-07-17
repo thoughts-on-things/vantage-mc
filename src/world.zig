@@ -21,6 +21,10 @@ pub const LoadedRegion = struct {
     /// window, so memory stays flat no matter how many regions a world has.
     table: []const u8,
     path: []const u8,
+    /// Changes whenever the region's location table or file metadata changes.
+    /// Live-server tile revisions fold the overlapping region revisions into a
+    /// stable cache key without hashing multi-megabyte chunk payloads.
+    revision: u64,
 };
 
 pub const ChunkBounds = struct {
@@ -77,18 +81,150 @@ pub fn loadRegions(arena: std.mem.Allocator, io: std.Io, region_dir: []const u8)
         if (e.kind != .file) continue;
         const xz = parseRegionName(e.name) orelse continue;
         const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ region_dir, e.name });
-        const table = readLocationTable(arena, io, path) catch continue;
-        try out.append(arena, .{ .x = xz[0], .z = xz[1], .table = table, .path = path });
+        const snapshot = readStableLocationTable(arena, io, path) catch |err| switch (err) {
+            // An unstable file is expected during a Minecraft save, but it must
+            // fail the whole candidate epoch. Publishing a catalog with that
+            // region silently missing would create a transient map deletion.
+            error.RegionChangedDuringRead => return err,
+            else => continue,
+        };
+        try out.append(arena, .{ .x = xz[0], .z = xz[1], .table = snapshot.table, .path = path, .revision = snapshot.revision });
     }
+    std.mem.sort(LoadedRegion, out.items, {}, struct {
+        fn lessThan(_: void, lhs: LoadedRegion, rhs: LoadedRegion) bool {
+            return lhs.z < rhs.z or (lhs.z == rhs.z and lhs.x < rhs.x);
+        }
+    }.lessThan);
     return out.toOwnedSlice(arena);
 }
 
-fn readLocationTable(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+/// Aggregate identity of a region catalog. Because `loadRegions` sorts by
+/// coordinate, the result is independent of directory enumeration order.
+pub fn catalogRevision(regions: []const LoadedRegion) u64 {
+    var hasher = std.hash.Wyhash.init(0x5641_4e54_4147_4531); // "VANTAGE1"
+    for (regions) |r| {
+        hasher.update(std.mem.asBytes(&r.x));
+        hasher.update(std.mem.asBytes(&r.z));
+        hasher.update(std.mem.asBytes(&r.revision));
+    }
+    return hasher.final();
+}
+
+/// Cheap change gate for a long-running server scan: filenames, sizes and
+/// mtimes only. Location tables are re-read only when this value advances.
+pub fn catalogMetadataRevision(arena: std.mem.Allocator, io: std.Io, region_dir: []const u8) !u64 {
+    // mtime widens to i128: @sizeOf(i96) is 16 but only 12 bytes are defined
+    // on store, so hashing an i96's bytes would fold undefined padding into
+    // the fingerprint and could spuriously "change" the catalog every scan.
+    const Metadata = struct { x: i32, z: i32, size: u64, mtime: i128 };
+    var entries: std.ArrayList(Metadata) = .empty;
+    var dir = try std.Io.Dir.cwd().openDir(io, region_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        const xz = parseRegionName(entry.name) orelse continue;
+        const stat = dir.statFile(io, entry.name, .{}) catch continue;
+        try entries.append(arena, .{ .x = xz[0], .z = xz[1], .size = stat.size, .mtime = stat.mtime.nanoseconds });
+    }
+    std.mem.sort(Metadata, entries.items, {}, struct {
+        fn lessThan(_: void, lhs: Metadata, rhs: Metadata) bool {
+            return lhs.z < rhs.z or (lhs.z == rhs.z and lhs.x < rhs.x);
+        }
+    }.lessThan);
+    var hasher = std.hash.Wyhash.init(0x5641_4e54_4d45_5441); // "VANTMETA"
+    for (entries.items) |entry| {
+        // Hash fields individually: hashing the struct itself would include
+        // padding bytes whose contents are not part of the metadata identity.
+        hasher.update(std.mem.asBytes(&entry.x));
+        hasher.update(std.mem.asBytes(&entry.z));
+        hasher.update(std.mem.asBytes(&entry.size));
+        hasher.update(std.mem.asBytes(&entry.mtime));
+    }
+    return hasher.final();
+}
+
+pub const RegionRevisionIndex = std.AutoHashMap(u64, u64);
+
+pub fn indexRegionRevisions(arena: std.mem.Allocator, regions: []const LoadedRegion) !RegionRevisionIndex {
+    var index = RegionRevisionIndex.init(arena);
+    for (regions) |r| try index.put(packChunk(r.x, r.z), r.revision);
+    return index;
+}
+
+/// Revision of one Vantage tile, including its one-chunk seam apron. Only
+/// region files whose chunk extents intersect the bake window participate, so
+/// a save elsewhere in a huge world does not invalidate the player's view.
+pub fn tileRevision(regions: []const LoadedRegion, tx: i32, tz: i32, tile_chunks: i32) u64 {
+    const cx0 = tx * tile_chunks - 1;
+    const cz0 = tz * tile_chunks - 1;
+    const cx1 = (tx + 1) * tile_chunks;
+    const cz1 = (tz + 1) * tile_chunks;
+    var hasher = std.hash.Wyhash.init(packChunk(tx, tz));
+    for (regions) |r| {
+        const rcx0 = r.x * 32;
+        const rcz0 = r.z * 32;
+        if (rcx0 + 31 < cx0 or rcx0 > cx1 or rcz0 + 31 < cz0 or rcz0 > cz1) continue;
+        hasher.update(std.mem.asBytes(&r.x));
+        hasher.update(std.mem.asBytes(&r.z));
+        hasher.update(std.mem.asBytes(&r.revision));
+    }
+    // Zero is reserved for non-revising local live sessions.
+    return hasher.final() | 1;
+}
+
+/// Indexed form used while building a live server epoch. A tile window touches
+/// only a handful of 32×32-chunk regions, so this is O(overlap) rather than
+/// O(total world regions).
+pub fn tileRevisionIndexed(index: *const RegionRevisionIndex, tx: i32, tz: i32, tile_chunks: i32) u64 {
+    const cx0 = tx * tile_chunks - 1;
+    const cz0 = tz * tile_chunks - 1;
+    const cx1 = (tx + 1) * tile_chunks;
+    const cz1 = (tz + 1) * tile_chunks;
+    var hasher = std.hash.Wyhash.init(packChunk(tx, tz));
+    var rz = @divFloor(cz0, 32);
+    while (rz <= @divFloor(cz1, 32)) : (rz += 1) {
+        var rx = @divFloor(cx0, 32);
+        while (rx <= @divFloor(cx1, 32)) : (rx += 1) {
+            const revision = index.get(packChunk(rx, rz)) orelse continue;
+            hasher.update(std.mem.asBytes(&rx));
+            hasher.update(std.mem.asBytes(&rz));
+            hasher.update(std.mem.asBytes(&revision));
+        }
+    }
+    return hasher.final() | 1;
+}
+
+fn readLocationTable(io: std.Io, path: []const u8, buf: *[region.SECTOR]u8) ![]const u8 {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
-    const buf = try arena.alloc(u8, region.SECTOR);
     const n = try file.readPositionalAll(io, buf, 0);
     return buf[0..n];
+}
+
+const LocationSnapshot = struct { table: []const u8, revision: u64 };
+
+/// Minecraft may be appending sectors while Vantage scans. Read metadata on
+/// both sides of the 4 KiB table and retry (with a short backoff, so a burst
+/// of writes to this file can finish) if it moved underneath us; after the
+/// last attempt the whole candidate epoch fails rather than publishing torn
+/// state — a later server scan retries, a one-shot render reports the error.
+/// Reads land in a stack buffer; the arena only holds the one stable copy, so
+/// retries during a noisy save can't leak dead tables into a snapshot arena.
+fn readStableLocationTable(arena: std.mem.Allocator, io: std.Io, path: []const u8) !LocationSnapshot {
+    var buf: [region.SECTOR]u8 = undefined;
+    var attempt: usize = 0;
+    while (attempt < 4) : (attempt += 1) {
+        if (attempt > 0) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(15), .awake) catch {};
+        const before = try std.Io.Dir.cwd().statFile(io, path, .{});
+        const table = try readLocationTable(io, path, &buf);
+        const after = try std.Io.Dir.cwd().statFile(io, path, .{});
+        if (before.size != after.size or before.mtime.nanoseconds != after.mtime.nanoseconds) continue;
+        const timestamp_bits: u96 = @bitCast(after.mtime.nanoseconds);
+        const seed = after.size ^ @as(u64, @truncate(timestamp_bits));
+        return .{ .table = try arena.dupe(u8, table), .revision = std.hash.Wyhash.hash(seed, table) };
+    }
+    return error.RegionChangedDuringRead;
 }
 
 /// "r.-2.1.mca" -> {-2, 1}.
@@ -278,4 +414,35 @@ test "parseRegionName" {
     try std.testing.expect(parseRegionName("r.0.mca") == null);
     try std.testing.expect(parseRegionName("level.dat") == null);
     try std.testing.expect(parseRegionName("r.0.0.mcc") == null);
+}
+
+test "tileRevision invalidates only overlapping region aprons" {
+    const table = [_]u8{0} ** region.SECTOR;
+    const base = [_]LoadedRegion{
+        .{ .x = 0, .z = 0, .table = &table, .path = "r.0.0.mca", .revision = 10 },
+        .{ .x = 1, .z = 0, .table = &table, .path = "r.1.0.mca", .revision = 20 },
+    };
+    var changed = base;
+    changed[1].revision = 21;
+
+    // Tile 0 spans chunks 0..7 (+ apron -1..8), nowhere near region x=1.
+    try std.testing.expectEqual(tileRevision(&base, 0, 0, 8), tileRevision(&changed, 0, 0, 8));
+    // Tile 4 spans chunks 32..39 (+ apron 31..40), touching both regions.
+    try std.testing.expect(tileRevision(&base, 4, 0, 8) != tileRevision(&changed, 4, 0, 8));
+}
+
+test "indexed tile revisions match catalog scans" {
+    const table = [_]u8{0} ** region.SECTOR;
+    const regions = [_]LoadedRegion{
+        .{ .x = -1, .z = 0, .table = &table, .path = "r.-1.0.mca", .revision = 3 },
+        .{ .x = 0, .z = 0, .table = &table, .path = "r.0.0.mca", .revision = 5 },
+        .{ .x = 1, .z = 1, .table = &table, .path = "r.1.1.mca", .revision = 7 },
+    };
+    var index = try indexRegionRevisions(std.testing.allocator, &regions);
+    defer index.deinit();
+    for ([_]i32{ -4, -1, 0, 3, 4, 7 }) |tx| {
+        for ([_]i32{ -1, 0, 3, 4, 8 }) |tz| {
+            try std.testing.expectEqual(tileRevision(&regions, tx, tz, 8), tileRevisionIndexed(&index, tx, tz, 8));
+        }
+    }
 }

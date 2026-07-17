@@ -9,6 +9,15 @@
  *  fires mid-read. */
 export type WorldFetch = (path: string, signal?: AbortSignal) => Promise<ArrayBuffer>;
 
+/** Conditionally fetch a file: present the validator from the previous read
+ *  and resolve `'unchanged'` when the source still has that exact content
+ *  (an HTTP 304). Resolves the bytes plus their new validator otherwise. */
+export type WorldConditionalFetch = (
+  path: string,
+  etag: string | undefined,
+  signal?: AbortSignal,
+) => Promise<{ buffer: ArrayBuffer; etag?: string } | 'unchanged'>;
+
 /** A tiled world render, wherever it lives. Pass one to the viewer's `world`
  *  option (or build one with {@link worldFromUrl}, {@link worldFromDirectory},
  *  or {@link worldFromFiles}). */
@@ -19,6 +28,32 @@ export interface WorldSource {
   label: string;
   /** Fetch a file by manifest-relative path. */
   fetch: WorldFetch;
+  /** Optional validator-aware fetch. The viewer's manifest poll uses it when
+   *  present so an unchanged continuous manifest costs a 304, not a body. */
+  fetchConditional?: WorldConditionalFetch;
+}
+
+/** Fetch implementation used by authenticated/native HTTP sources. Tauri and
+ *  Electron hosts can pass their CORS-exempt fetch without coupling Vantage to
+ *  a particular desktop runtime. */
+export type WorldHttpFetch = (input: string, init?: RequestInit) => Promise<Response>;
+
+export interface HttpWorldOptions {
+  /** Resolve a relative manifest URL outside a browser document. */
+  base?: string;
+  /** Bearer credential sent in the Authorization header, never in the URL. */
+  accessToken?: string;
+  /** Additional headers applied to the manifest and every artifact request. */
+  headers?: Readonly<Record<string, string>>;
+  /** Alternate fetch implementation (for example `@tauri-apps/plugin-http`). */
+  fetch?: WorldHttpFetch;
+  /** Safe human-facing source name. Defaults to the manifest URL. */
+  label?: string;
+}
+
+export interface VantageServerOptions extends Omit<HttpWorldOptions, 'base'> {
+  /** Opaque server world id. The v1 sidecar exposes `default`. */
+  worldId?: string;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -30,24 +65,106 @@ function normalizePath(path: string): string {
   return path.startsWith('./') ? path.slice(2) : path;
 }
 
+/** Server manifests are authenticated input: never let an artifact path move
+ *  a bearer credential to another origin or outside the manifest directory. */
+function safeRemotePath(path: string): string {
+  const normalized = normalizePath(path);
+  if (normalized.length === 0 || normalized.length > 512 || !/^[A-Za-z0-9._/-]+$/.test(normalized)) {
+    throw new Error(`vantage: unsafe remote artifact path ${path}`);
+  }
+  const segments = normalized.split('/');
+  if (segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')) {
+    throw new Error(`vantage: unsafe remote artifact path ${path}`);
+  }
+  return normalized;
+}
+
 /** A world served over HTTP: fetches `manifest.json` at `url` and resolves
  *  tile paths relative to it. This is what a plain string `world` option
  *  turns into. */
 export async function worldFromUrl(url: string, base?: string): Promise<WorldSource> {
-  const abs = new URL(url, base ?? (typeof document !== 'undefined' ? document.baseURI : undefined)).toString();
-  const res = await fetch(abs);
+  return worldFromHttp(url, { base });
+}
+
+/** An HTTP world with optional bearer auth and a pluggable fetch transport.
+ *  Manifest-owned paths are confined to the manifest directory before any
+ *  credential is attached. */
+export async function worldFromHttp(url: string, options: HttpWorldOptions = {}): Promise<WorldSource> {
+  const abs = new URL(
+    url,
+    options.base ?? (typeof document !== 'undefined' ? document.baseURI : undefined),
+  ).toString();
+  const manifestUrl = new URL(abs);
+  if (manifestUrl.protocol !== 'http:' && manifestUrl.protocol !== 'https:') {
+    throw new Error(`vantage: HTTP world requires an http(s) manifest URL`);
+  }
+  if (manifestUrl.username || manifestUrl.password) {
+    throw new Error(`vantage: HTTP world credentials belong in headers, not the manifest URL`);
+  }
+  const root = new URL('.', manifestUrl);
+  const http = options.fetch ?? ((input: string, init?: RequestInit) => fetch(input, init));
+  // Header names are case-insensitive but plain-object keys are not: lowercase
+  // everything so `accessToken` replaces a caller-cased `Authorization` instead
+  // of duplicating it (the server rejects duplicate security headers).
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(options.headers ?? {})) headers[name.toLowerCase()] = value;
+  if (options.accessToken) headers['authorization'] = `Bearer ${options.accessToken}`;
+  const request = (target: string, signal?: AbortSignal, extra?: Record<string, string>) =>
+    http(target, {
+      ...(Object.keys(headers).length > 0 || extra ? { headers: { ...headers, ...extra } } : {}),
+      ...(signal ? { signal } : {}),
+    });
+  const resolveTarget = (path: string): string => {
+    const targetUrl = new URL(safeRemotePath(path), root);
+    if (targetUrl.origin !== root.origin || !targetUrl.pathname.startsWith(root.pathname)) {
+      throw new Error(`vantage: unsafe remote artifact path ${path}`);
+    }
+    return targetUrl.toString();
+  };
+
+  const res = await request(abs);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${abs}`);
   const manifest: unknown = await res.json();
   return {
     manifest,
-    label: abs,
+    label: options.label ?? abs,
     fetch: async (path, signal) => {
-      const target = new URL(normalizePath(path), abs).toString();
-      const r = await fetch(target, signal ? { signal } : undefined);
+      const target = resolveTarget(path);
+      const r = await request(target, signal);
       if (!r.ok) throw new Error(`${r.status} ${r.statusText} for ${target}`);
       return r.arrayBuffer();
     },
+    fetchConditional: async (path, etag, signal) => {
+      const target = resolveTarget(path);
+      const r = await request(target, signal, etag ? { 'if-none-match': etag } : undefined);
+      if (r.status === 304) return 'unchanged';
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText} for ${target}`);
+      // Cross-origin, the validator is only readable when the server exposes
+      // it (Access-Control-Expose-Headers) — absent means plain polls resume.
+      const next = r.headers.get('etag');
+      return { buffer: await r.arrayBuffer(), ...(next ? { etag: next } : {}) };
+    },
   };
+}
+
+/** Connect to the Vantage server protocol v1. This is the direct-server path
+ *  for launchers; a host with its own player sessions can use
+ *  {@link worldFromHttp} with a session-gated manifest URL instead. */
+export function worldFromVantageServer(endpoint: string, options: VantageServerOptions = {}): Promise<WorldSource> {
+  const worldId = options.worldId ?? 'default';
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(worldId)) throw new Error(`vantage: invalid server world id`);
+  const base = new URL(endpoint);
+  if (base.protocol !== 'http:' && base.protocol !== 'https:') {
+    throw new Error(`vantage: server endpoint must use http(s)`);
+  }
+  if (base.username || base.password) {
+    throw new Error(`vantage: server credentials belong in headers, not the endpoint URL`);
+  }
+  base.pathname = base.pathname.endsWith('/') ? base.pathname : `${base.pathname}/`;
+  base.search = '';
+  base.hash = '';
+  const manifest = new URL(`v1/worlds/${encodeURIComponent(worldId)}/manifest.json`, base).toString();
+  return worldFromHttp(manifest, options);
 }
 
 /** A world in a local directory picked with the File System Access API

@@ -60,6 +60,17 @@ npm install @thoughts-on-things/vantage-mc three
 
 See the **[viewer package guide](./web/README.md)** for framework and engine APIs.
 
+### Multiplayer servers and launchers
+
+`vantage server` runs beside a Minecraft Java server and turns its persisted
+world into a continuously updating, on-demand tile stream. It is designed to
+sit behind an authenticating host: the launcher backend or reverse proxy keeps
+ownership of player identity and access, while Vantage remains a read-only,
+bounded rendering data plane. Launchers can also connect directly through the
+versioned bearer-authenticated protocol.
+
+See the **[multiplayer architecture and host integration guide](./docs/server.md)**.
+
 ![Vantage — textured 3D terrain streaming in the browser](./docs/render-hero.jpg)
 
 ## How it works
@@ -206,6 +217,58 @@ as a partial `render` you can `serve` later. It takes the same world flags as
 `vantage render` is still the way to produce a self-contained static map to
 deploy; `live` is for exploring one on your own machine without the wait.
 
+### Render a multiplayer server — `vantage server`
+
+From a checkout, the complete authenticated path is one command:
+
+```sh
+just server-dev
+```
+
+That builds Vantage, starts the sidecar against the bundled Java demo world,
+generates a fresh 256-bit local bearer, starts the Vite viewer with the right
+endpoint and credential, waits for both services, and opens the map. Tile
+bakes and request logs remain visible in one terminal; `Ctrl+C` stops both
+processes. To use a real server save:
+
+```sh
+just server-dev "C:\minecraft-server\world"
+# macOS/Linux: just server-dev /srv/minecraft/world
+```
+
+Run `just server-dev-help` for ports, cache, scan interval, browser,
+and build controls. CI and integration work can exercise the same stack without
+a browser:
+
+```sh
+just server-smoke
+```
+
+The smoke run verifies protocol discovery, bearer rejection, exact-origin
+CORS, continuous tile revisions, and one real lazy tile bake, then shuts down
+cleanly. The generated development credential is loopback-only and ephemeral;
+it is deliberately injected into the local viewer and must never be reused in
+a deployed browser build.
+
+Run the hardened, continuously updating form of the live renderer beside the
+Minecraft server:
+
+```sh
+vantage server /srv/minecraft/world \
+  --assets /srv/vantage/assets/minecraft \
+  --out /var/cache/vantage/world
+```
+
+It binds to loopback by default for a session-authenticating reverse proxy. A
+non-loopback bind requires a long bearer secret from an environment variable;
+public deployments terminate TLS and enforce player/session policy at the
+reverse proxy. Only tiles listed by the world manifest can trigger work,
+concurrent bakes and connections are bounded, duplicate requests coalesce, and
+changed region files invalidate only their overlapping map tiles.
+
+The protocol, deployment examples, threat model, and host integration path are
+in **[docs/server.md](./docs/server.md)**.
+
 ### 3. Deploy anywhere
 
 The output is a static file tree (`manifest.json` + `tiles/` + one texture
@@ -237,6 +300,7 @@ stream tiles into your own three.js scene.
 ```sh
 vantage render  <save> [flags]                       # world → tiles + manifest + LOD pyramid
 vantage live    <save> [flags]                       # explore now: tiles baked on demand as you look
+vantage server  <save> [flags]                       # secure continuous data plane for multiplayer launchers
 vantage serve   [render-dir] [--port n] [--host addr] [--open]   # host a render + the embedded viewer
 vantage extract [client.jar]                         # populate the asset cache (auto-discovers the jar)
 vantage meshtex <region.mca> <out.vtile> <assets> [cx0 cz0 cx1 cz1]

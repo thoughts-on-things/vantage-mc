@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import mapTop from './assets/render-world.jpg';
-import mapPersp from './assets/render-hero.jpg';
-import mapBiomes from './assets/render-biomes.jpg';
+import mapTop from './assets/render-world-v2.png';
+import mapPersp from './assets/render-hero-v2.png';
+import mapBiomes from './assets/render-biomes-v2.png';
 
 const GITHUB = 'https://github.com/thoughts-on-things/vantage-mc';
 const RELEASES = `${GITHUB}/releases`;

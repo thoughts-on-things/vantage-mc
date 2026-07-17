@@ -64,6 +64,36 @@ pasting a new hash into the address bar pans there live. Pass
 `urlState={false}` if your page owns its hash (e.g. a router); the plain
 engine keeps it opt-in (`new VantageViewer(el, { urlState: true })`).
 
+### Authenticated multiplayer servers
+
+To exercise this integration from a repository checkout, run
+`just server-dev` at the repository root. It launches an authenticated
+loopback sidecar and this demo together, with a fresh credential and coordinated
+shutdown. `just server-smoke` performs a headless protocol and lazy-bake
+preflight. These credentials are for the local walkthrough only.
+
+Use a `WorldSource` when a launcher needs to attach its existing session to
+the manifest and every streamed artifact. `worldFromHttp` supports a custom
+native fetch transport and confines manifest paths to the same origin and
+directory before attaching credentials:
+
+```ts
+import { worldFromHttp } from '@thoughts-on-things/vantage-mc/core';
+import { VantageViewer } from '@thoughts-on-things/vantage-mc/three';
+
+const world = await worldFromHttp(
+  'https://host.example/map-app/world/manifest.json',
+  { accessToken: sessionToken, fetch: nativeHttpFetch },
+);
+const viewer = await VantageViewer.mount('#app', { world });
+```
+
+For a direct connection to protocol v1, use
+`worldFromVantageServer('https://map.example/', { accessToken })`. Hosts with
+their own player sessions should prefer an existing session-gated same-origin
+proxy. See the [multiplayer server guide](../docs/server.md) for the trust
+boundary and deployment contract.
+
 The viewer **renders on demand**: a frame draws only when something changed —
 camera motion, tiles streaming in, a setting — plus a gentle 10 fps tick while
 animated textures (water, lava) are on screen, so an idle map costs ~0 GPU/CPU
@@ -180,9 +210,11 @@ returns only the fields a given version carries (`textured`, `hasBiome`, `fluid`
 
 **`@thoughts-on-things/vantage-mc/core`** — `parseTile`, `parseTextureArray`, `parseManifest`,
 `parseLowresTile`, `maybeInflate`, `isGzip`, `tileKey`, `summarizeBiomes`,
-`biomePalette`, `stripNamespace`, `ByteReader`; types `DecodedTile`,
+`biomePalette`, `stripNamespace`, `ByteReader`, `worldFromUrl`,
+`worldFromHttp`, `worldFromVantageServer`; types `DecodedTile`,
 `MeshSection`, `SurfaceMap`, `DecodedTextureArray`, `WorldManifest`,
-`ManifestTile`, `LowresTile`, `BiomeEntry`, `Rgb`.
+`ManifestTile`, `LowresTile`, `BiomeEntry`, `Rgb`, `WorldSource`,
+`WorldConditionalFetch`, `HttpWorldOptions`, `VantageServerOptions`.
 
 **`@thoughts-on-things/vantage-mc/three`** — `buildTerrain`, `buildTileMeshes`,
 `buildQuantizedTileMeshes`, `buildLowresMesh`, `TileManager`,

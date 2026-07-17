@@ -118,6 +118,22 @@ serve:
     @echo "→ http://127.0.0.1:{{port}}/   (press B for the biome layer)"
     cd web && npm run dev
 
+# One-command authenticated Vantage Server walkthrough. Builds the native
+# sidecar, starts it against a real Java save, launches the live viewer, and
+# stops both children on Ctrl-C. Override the world or pass any advanced flag:
+#   just server-dev "C:/minecraft/server/world" --no-open
+server-dev world='site/demo-world' *args:
+    node scripts/server-dev.mjs --world "{{world}}" {{args}}
+
+# Boot the same stack, prove the protected protocol and one lazy bake, then exit.
+# An optional world path exercises a real persisted multiplayer save.
+server-smoke world='site/demo-world' *args:
+    node scripts/server-dev.mjs --world "{{world}}" --smoke {{args}}
+
+# Show every server-development override without starting either service.
+server-dev-help:
+    node scripts/server-dev.mjs --help
+
 # Full loop: mesh the demo area, then serve the viewer.
 demo: mesh serve
 

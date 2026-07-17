@@ -1,0 +1,293 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Vantage Server Protocol",
+    "version": "1.0.0",
+    "summary": "Read-only world-rendering data plane for Minecraft launchers and server hosts.",
+    "description": "Protocol v1 exposes discovery, health, world metadata, and immutable render artifacts. A Vantage process currently serves one world with the id `default`. Player identity and authorization remain the responsibility of an upstream authenticating host.\n\nEvery endpoint (including the public discovery ones) additionally enforces a request policy that can answer before the documented responses: `403` when a browser `Origin` header is present but not on the configured allowlist, `400` when a security-relevant header (`Origin`, `Authorization`, `Access-Control-Request-Method`) appears more than once, `405` for methods other than GET/HEAD/OPTIONS, and `414` for request targets over 1024 bytes."
+  },
+  "servers": [
+    { "url": "/", "description": "The discovered Vantage server origin" }
+  ],
+  "tags": [
+    { "name": "Discovery" },
+    { "name": "Worlds" },
+    { "name": "Artifacts" }
+  ],
+  "paths": {
+    "/.well-known/vantage": {
+      "get": {
+        "operationId": "discoverVantage",
+        "tags": ["Discovery"],
+        "summary": "Discover the protocol and authentication mode",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Server capabilities",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Discovery" },
+                "examples": {
+                  "bearer": { "value": { "protocol": 1, "api": "/v1", "openapi": "/v1/openapi.json", "auth": "bearer" } },
+                  "proxy": { "value": { "protocol": 1, "api": "/v1", "openapi": "/v1/openapi.json", "auth": "proxy" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "operationId": "getHealth",
+        "tags": ["Discovery"],
+        "summary": "Check process liveness",
+        "description": "A successful response means the HTTP process is alive. It does not grant world access or guarantee that a particular tile can be rendered.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Process is alive",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" } } }
+          }
+        }
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "tags": ["Discovery"],
+        "summary": "Read this OpenAPI document",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/v1/worlds": {
+      "get": {
+        "operationId": "listWorlds",
+        "tags": ["Worlds"],
+        "summary": "List worlds exposed to this connection",
+        "responses": {
+          "200": {
+            "description": "World descriptors",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorldList" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/worlds/{worldId}/manifest.json": {
+      "parameters": [
+        { "$ref": "#/components/parameters/WorldId" }
+      ],
+      "get": {
+        "operationId": "getWorldManifest",
+        "tags": ["Artifacts"],
+        "summary": "Read the current world manifest",
+        "description": "Continuous manifests set `dynamic` and `rendering` to true and attach an opaque `revision` string to each tile. Clients poll the manifest and replace only coordinates whose revision changed. Every response carries a strong `ETag` over the exact body; polling with `If-None-Match` answers `304` while the catalog is unchanged. `ETag` is exposed to cross-origin scripts via `Access-Control-Expose-Headers`.",
+        "parameters": [
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Entity-tag list from a previous manifest response. A match short-circuits to `304 Not Modified` with no body.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Vantage world manifest",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } },
+              "ETag": { "description": "Strong validator over the exact manifest body.", "schema": { "type": "string" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorldManifest" } } }
+          },
+          "304": {
+            "description": "The manifest is byte-identical to the presented validator; no body.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } },
+              "ETag": { "description": "The (still-current) strong validator.", "schema": { "type": "string" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "head": {
+        "operationId": "headWorldManifest",
+        "tags": ["Artifacts"],
+        "summary": "Probe the manifest path without producing it",
+        "description": "HEAD never reaches the dynamic producer, and the live manifest is never persisted to the cache directory, so this always answers 404. Use GET to read the manifest.",
+        "responses": {
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/worlds/{worldId}/terrain.vtexarr": {
+      "parameters": [
+        { "$ref": "#/components/parameters/WorldId" }
+      ],
+      "get": {
+        "operationId": "getWorldTextures",
+        "tags": ["Artifacts"],
+        "summary": "Read the current shared texture array",
+        "responses": {
+          "200": {
+            "description": "Gzip-wrapped Vantage texture array",
+            "content": { "application/octet-stream": { "schema": { "type": "string", "contentEncoding": "binary" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/worlds/{worldId}/tiles/{tile}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/WorldId" },
+        {
+          "name": "tile",
+          "in": "path",
+          "required": true,
+          "description": "Tile filename in the form `t.<signed-x>.<signed-z>.vtile`, with coordinates in canonical decimal form (no leading zeros, no `+`, no `-0`). Only coordinates advertised by the manifest can start a bake.",
+          "schema": { "type": "string", "pattern": "^t\\.(0|-?[1-9][0-9]*)\\.(0|-?[1-9][0-9]*)\\.vtile$" },
+          "example": "t.-3.12.vtile"
+        }
+      ],
+      "get": {
+        "operationId": "getWorldTile",
+        "tags": ["Artifacts"],
+        "summary": "Read or render one advertised geometry tile",
+        "description": "A cache hit is returned directly. A miss is rendered under Vantage's memory and concurrency admission limits. Concurrent requests for the same tile share one in-flight bake.",
+        "responses": {
+          "200": {
+            "description": "Gzip-wrapped Vantage tile. A zero-byte response represents an advertised tile that meshed to empty terrain.",
+            "content": { "application/octet-stream": { "schema": { "type": "string", "contentEncoding": "binary" } } }
+          },
+          "400": { "description": "Malformed or non-artifact path" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "head": {
+        "operationId": "headWorldTile",
+        "tags": ["Artifacts"],
+        "summary": "Inspect an existing cache entry without starting a bake",
+        "responses": {
+          "200": { "description": "The tile cache entry exists; Content-Length is derived from file metadata" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Direct deployments send the server-specific secret in `Authorization: Bearer`. In proxy mode the trusted host authenticates the player and protects the private Vantage hop."
+      }
+    },
+    "parameters": {
+      "WorldId": {
+        "name": "worldId",
+        "in": "path",
+        "required": true,
+        "description": "Protocol v1 currently exposes one world named `default`.",
+        "schema": { "type": "string", "enum": ["default"] }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or invalid bearer credential",
+        "headers": { "WWW-Authenticate": { "schema": { "type": "string", "example": "Bearer realm=\"vantage\"" } } },
+        "content": { "text/plain": { "schema": { "type": "string", "const": "unauthorized\n" } } }
+      },
+      "NotFound": {
+        "description": "World or cache entry not found",
+        "content": { "text/plain": { "schema": { "type": "string" } } }
+      }
+    },
+    "schemas": {
+      "Discovery": {
+        "type": "object",
+        "required": ["protocol", "api", "openapi", "auth"],
+        "properties": {
+          "protocol": { "type": "integer", "const": 1 },
+          "api": { "type": "string", "const": "/v1" },
+          "openapi": { "type": "string", "const": "/v1/openapi.json" },
+          "auth": { "type": "string", "enum": ["bearer", "proxy"] }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "required": ["status", "protocol"],
+        "properties": {
+          "status": { "type": "string", "const": "ok" },
+          "protocol": { "type": "integer", "const": 1 }
+        }
+      },
+      "WorldList": {
+        "type": "object",
+        "required": ["worlds"],
+        "properties": {
+          "worlds": { "type": "array", "items": { "$ref": "#/components/schemas/WorldDescriptor" } }
+        }
+      },
+      "WorldDescriptor": {
+        "type": "object",
+        "required": ["id", "manifest"],
+        "properties": {
+          "id": { "type": "string", "const": "default" },
+          "manifest": { "type": "string", "const": "/v1/worlds/default/manifest.json" }
+        }
+      },
+      "WorldManifest": {
+        "type": "object",
+        "description": "The Vantage manifest format is shared with static renders. Server manifests add continuous-render fields and tile revisions.",
+        "required": ["format", "tileChunks", "tileBlocks", "textures", "biomes", "tiles"],
+        "properties": {
+          "format": { "type": "integer", "minimum": 1 },
+          "tileChunks": { "type": "integer", "minimum": 1 },
+          "tileBlocks": { "type": "integer", "minimum": 16 },
+          "textures": { "type": "string", "const": "terrain.vtexarr" },
+          "biomes": { "type": "array", "items": { "type": "string" } },
+          "rendering": { "type": "boolean", "const": true },
+          "dynamic": { "type": "boolean", "const": true },
+          "progress": { "$ref": "#/components/schemas/Progress" },
+          "textureLayers": { "type": "integer", "minimum": 0 },
+          "tiles": { "type": "array", "items": { "$ref": "#/components/schemas/ManifestTile" } }
+        },
+        "additionalProperties": true
+      },
+      "Progress": {
+        "type": "object",
+        "required": ["done", "total"],
+        "properties": {
+          "done": { "type": "integer", "minimum": 0 },
+          "total": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "ManifestTile": {
+        "type": "object",
+        "required": ["x", "z", "path", "bytes", "revision"],
+        "properties": {
+          "x": { "type": "integer" },
+          "z": { "type": "integer" },
+          "path": { "type": "string", "pattern": "^tiles/t\\.(0|-?[1-9][0-9]*)\\.(0|-?[1-9][0-9]*)\\.vtile$" },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "revision": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Opaque source revision; compare for equality only." }
+        }
+      }
+    }
+  },
+  "security": [
+    { "bearerAuth": [] }
+  ]
+}

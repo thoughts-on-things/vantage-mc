@@ -162,8 +162,8 @@ interface ViewerEvents extends Record<string, unknown> {
   mode: { fly: boolean };
   /** The depth slice (cave view) moved or toggled. `null` = off. */
   slice: { y: number | null };
-  /** Progressive render progress, while a live bake streams in. `done` reaches
-   *  `total` and `rendering` flips false on the final manifest. */
+  /** Progressive/live render progress. Finished batch renders flip false;
+   *  continuous multiplayer sources keep rendering true for change polling. */
   progress: { done: number; total: number; rendering: boolean };
 }
 
@@ -269,6 +269,8 @@ export class VantageViewer {
   // world reloads (the poll checks its manager is still current).
   private progressiveManager: TileManager | null = null;
   private lastTextureLayers = 0;
+  /** Last progress payload emitted, for deduplication across identical polls. */
+  private lastProgress: { done: number; total: number; rendering: boolean } | null = null;
   /** An in-flight atlas re-fetch, so the tile-insert gate and the progressive
    *  poll coalesce onto one request instead of racing separate fetches. */
   private atlasRefresh: Promise<void> | null = null;
@@ -512,50 +514,86 @@ export class VantageViewer {
     // Progressive render: poll the manifest and stream tiles in as they bake.
     if (manifest.rendering) {
       this.progressiveManager = this.tiles;
+      this.lastProgress = null; // a fresh world always reports its first state
       this.emitProgress(manifest);
       void this.pollProgressive(source, this.tiles);
     }
   }
 
   /** Emit a `progress` event from a manifest (falling back to the tile count
-   *  when the generator didn't include a `progress` block). */
-  private emitProgress(m: WorldManifest): void {
-    this.emitter.emit('progress', {
+   *  when the generator didn't include a `progress` block). Deduplicated: a
+   *  continuous server reports the same numbers poll after poll, and repeating
+   *  them would tick every listener (React state, HUDs) for nothing. Returns
+   *  whether anything actually changed (and was emitted). */
+  private emitProgress(m: WorldManifest): boolean {
+    const progress = {
       done: m.progress?.done ?? m.tiles.length,
       total: m.progress?.total ?? m.tiles.length,
       rendering: m.rendering ?? false,
-    });
+    };
+    const last = this.lastProgress;
+    if (last && last.done === progress.done && last.total === progress.total && last.rendering === progress.rendering) return false;
+    this.lastProgress = progress;
+    this.emitter.emit('progress', progress);
+    return true;
   }
 
   /** Follow a live (`rendering: true`) render: re-fetch the manifest on an
-   *  interval, stream newly-baked tiles in, widen the texture array when the
-   *  atlas grows, and install the lowres pyramid once the bake completes. Runs
-   *  until the render finishes or the world is replaced. */
+   *  interval, stream new/revised tiles in, widen the texture array when the
+   *  atlas grows, and install the lowres pyramid once a batch bake completes.
+   *  Continuous sources run until the world is replaced. */
   private async pollProgressive(source: WorldSource, manager: TileManager): Promise<void> {
     const dec = new TextDecoder();
+    // A batch bake publishes new tiles continuously, so it polls briskly. A
+    // warm continuous server mostly answers "nothing changed" — quiet polls
+    // stretch the cadence toward POLL_MAX_MS, and any observed change (tiles,
+    // atlas) snaps it back, so an idle multiplayer map costs a fraction of
+    // the bandwidth while world edits still appear within a poll or two.
+    let delay = VantageViewer.POLL_MS;
+    // Validator from the last manifest this loop successfully applied. With a
+    // conditional source, an unchanged catalog costs a 304 instead of a body.
+    let manifestEtag: string | undefined;
     for (;;) {
-      await new Promise((r) => setTimeout(r, 1200));
+      await new Promise((r) => setTimeout(r, delay));
       // Bail if the world was replaced/disposed while we waited.
       if (this.tiles !== manager || this.progressiveManager !== manager) return;
 
       let m: WorldManifest;
       try {
-        m = parseManifest(JSON.parse(dec.decode(await source.fetch('manifest.json'))));
+        if (source.fetchConditional) {
+          const res = await source.fetchConditional('manifest.json', manifestEtag);
+          if (res === 'unchanged') {
+            delay = Math.min(delay * 2, VantageViewer.POLL_MAX_MS);
+            continue;
+          }
+          m = parseManifest(JSON.parse(dec.decode(res.buffer)));
+          // Only after a successful parse: a stored validator for a manifest
+          // we failed to apply would 304 us out of ever seeing it again.
+          manifestEtag = res.etag;
+        } else {
+          m = parseManifest(JSON.parse(dec.decode(await source.fetch('manifest.json'))));
+        }
       } catch {
-        continue; // a torn read mid-rewrite (or a transient fetch error) — retry
+        // A torn read mid-rewrite or a transient fetch error — retry, easing
+        // off so an unreachable server isn't hammered at full cadence.
+        delay = Math.min(delay * 2, VantageViewer.POLL_MAX_MS);
+        continue;
       }
 
       // Atlas grew (new block textures discovered): re-fetch and widen the
       // array. Layers are append-only, so resident tiles stay valid. Shares the
       // coalesced refetch with the on-demand tile-insert gate.
-      if ((m.textureLayers ?? 0) > this.lastTextureLayers) {
+      const atlasGrew = (m.textureLayers ?? 0) > this.lastTextureLayers;
+      if (atlasGrew) {
         await this.ensureAtlasLayers(source, m.textureLayers ?? 0);
         if (this.tiles !== manager) return;
       }
 
-      // Stream in whatever tiles are new since the last poll.
-      manager.addTiles(m.tiles);
-      this.emitProgress(m);
+      // Stream in new tiles. Continuous on-demand servers also revise and
+      // remove existing coordinates as the multiplayer world is saved.
+      const changed = m.dynamic ? manager.syncTiles(m.tiles) : manager.addTiles(m.tiles);
+      const progressed = this.emitProgress(m);
+      delay = !m.dynamic || changed || atlasGrew || progressed ? VantageViewer.POLL_MS : Math.min(delay * 2, VantageViewer.POLL_MAX_MS);
 
       if (!m.rendering) {
         // Final manifest: install the lowres pyramid and open the zoom range to
@@ -1329,6 +1367,13 @@ export class VantageViewer {
   /** Idle animation cadence (ms). Water/lava bake at a 2-tick frametime
    *  (100 ms), so a 10 fps tick steps them at exactly their authored rate. */
   private static readonly ANIM_TICK_MS = 100;
+
+  /** Manifest poll cadence (ms) while a render is streaming in. */
+  private static readonly POLL_MS = 1200;
+
+  /** Ceiling the poll cadence relaxes to while a continuous server reports no
+   *  changes — a saved world edit still shows up within ~one ceiling. */
+  private static readonly POLL_MAX_MS = 5000;
 
   private frame(): void {
     const now = performance.now();

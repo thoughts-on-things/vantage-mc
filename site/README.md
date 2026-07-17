@@ -1,8 +1,8 @@
 # vantage.beacon-mc.io
 
-The marketing + demo site for Vantage. Fully static: a landing page and the
-real viewer (`vantage-mc`, linked from [`../web`](../web)) streaming a demo
-world. Deployed to GitHub Pages by
+The marketing + demo site for Vantage. Fully static: a landing page, a
+dedicated `/server/` product and integration reference, and the real viewer
+(`vantage-mc`, linked from [`../web`](../web)) streaming a demo world. Deployed to GitHub Pages by
 [`.github/workflows/pages.yml`](../.github/workflows/pages.yml) on every push
 to `main`.
 

@@ -23,6 +23,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addOptions("build_options", options);
+    // Embed the public protocol contract from docs/ into the binary so
+    // `GET /v1/openapi.json`, repository docs, and launcher generation all use
+    // one exact source of truth.
+    exe.root_module.addAnonymousImport("server_openapi", .{ .root_source_file = serverOpenApi(b) });
     // Embed the standalone viewer app (web/dist-viewer, from `npm run
     // build:viewer`) so `vantage serve` is a complete map server in one file.
     // Building without it still works — serve hosts the world data and the
@@ -73,6 +77,12 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_tests.step);
+}
+
+fn serverOpenApi(b: *std.Build) std.Build.LazyPath {
+    const wf = b.addWriteFiles();
+    _ = wf.addCopyFile(b.path("docs/server-openapi.json"), "server-openapi.json");
+    return wf.add("server_openapi.zig", "pub const json = @embedFile(\"server-openapi.json\");\n");
 }
 
 /// Generate the `viewer_assets` module for `vantage serve`: every file under

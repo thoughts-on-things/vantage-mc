@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.6.0...v0.7.0) (2026-07-17)
+
+
+### Features
+
+* **desktop:** redesign world studio UI and refactor app architecture ([#49](https://github.com/thoughts-on-things/vantage-mc/issues/49)) ([5c62a2c](https://github.com/thoughts-on-things/vantage-mc/commit/5c62a2c62a5dd982104f0a60145b60714f8b4c3f))
+* **server:** add multiplayer world streaming ([#48](https://github.com/thoughts-on-things/vantage-mc/issues/48)) ([832f29d](https://github.com/thoughts-on-things/vantage-mc/commit/832f29d56c354317b01052fa334eee9f14f224aa))
+
 ## [0.6.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.5.0...v0.6.0) (2026-07-16)
 
 

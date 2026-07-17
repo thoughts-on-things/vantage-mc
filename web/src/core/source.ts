@@ -9,6 +9,15 @@
  *  fires mid-read. */
 export type WorldFetch = (path: string, signal?: AbortSignal) => Promise<ArrayBuffer>;
 
+/** Conditionally fetch a file: present the validator from the previous read
+ *  and resolve `'unchanged'` when the source still has that exact content
+ *  (an HTTP 304). Resolves the bytes plus their new validator otherwise. */
+export type WorldConditionalFetch = (
+  path: string,
+  etag: string | undefined,
+  signal?: AbortSignal,
+) => Promise<{ buffer: ArrayBuffer; etag?: string } | 'unchanged'>;
+
 /** A tiled world render, wherever it lives. Pass one to the viewer's `world`
  *  option (or build one with {@link worldFromUrl}, {@link worldFromDirectory},
  *  or {@link worldFromFiles}). */
@@ -19,6 +28,9 @@ export interface WorldSource {
   label: string;
   /** Fetch a file by manifest-relative path. */
   fetch: WorldFetch;
+  /** Optional validator-aware fetch. The viewer's manifest poll uses it when
+   *  present so an unchanged continuous manifest costs a 304, not a body. */
+  fetchConditional?: WorldConditionalFetch;
 }
 
 /** Fetch implementation used by authenticated/native HTTP sources. Tauri and
@@ -93,11 +105,18 @@ export async function worldFromHttp(url: string, options: HttpWorldOptions = {})
   const http = options.fetch ?? ((input: string, init?: RequestInit) => fetch(input, init));
   const headers: Record<string, string> = { ...options.headers };
   if (options.accessToken) headers['Authorization'] = `Bearer ${options.accessToken}`;
-  const request = (target: string, signal?: AbortSignal) =>
+  const request = (target: string, signal?: AbortSignal, extra?: Record<string, string>) =>
     http(target, {
-      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      ...(Object.keys(headers).length > 0 || extra ? { headers: { ...headers, ...extra } } : {}),
       ...(signal ? { signal } : {}),
     });
+  const resolveTarget = (path: string): string => {
+    const targetUrl = new URL(safeRemotePath(path), root);
+    if (targetUrl.origin !== root.origin || !targetUrl.pathname.startsWith(root.pathname)) {
+      throw new Error(`vantage: unsafe remote artifact path ${path}`);
+    }
+    return targetUrl.toString();
+  };
 
   const res = await request(abs);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${abs}`);
@@ -106,14 +125,20 @@ export async function worldFromHttp(url: string, options: HttpWorldOptions = {})
     manifest,
     label: options.label ?? abs,
     fetch: async (path, signal) => {
-      const targetUrl = new URL(safeRemotePath(path), root);
-      if (targetUrl.origin !== root.origin || !targetUrl.pathname.startsWith(root.pathname)) {
-        throw new Error(`vantage: unsafe remote artifact path ${path}`);
-      }
-      const target = targetUrl.toString();
+      const target = resolveTarget(path);
       const r = await request(target, signal);
       if (!r.ok) throw new Error(`${r.status} ${r.statusText} for ${target}`);
       return r.arrayBuffer();
+    },
+    fetchConditional: async (path, etag, signal) => {
+      const target = resolveTarget(path);
+      const r = await request(target, signal, etag ? { 'If-None-Match': etag } : undefined);
+      if (r.status === 304) return 'unchanged';
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText} for ${target}`);
+      // Cross-origin, the validator is only readable when the server exposes
+      // it (Access-Control-Expose-Headers) — absent means plain polls resume.
+      const next = r.headers.get('etag');
+      return { buffer: await r.arrayBuffer(), ...(next ? { etag: next } : {}) };
     },
   };
 }

@@ -189,6 +189,13 @@ Manifest tiles from a continuous server carry an opaque `revision` string. A
 client that polls the dynamic manifest keeps unchanged GPU tiles resident,
 unloads only removed or changed revisions, and fetches replacements on demand.
 
+The manifest response also carries a strong `ETag` over its exact body
+(exposed to cross-origin scripts). A poll that presents it via
+`If-None-Match` answers `304 Not Modified` with no body while the catalog is
+unchanged, so an idle map costs a status line per poll instead of the full
+tile list. The bundled viewer does this automatically; clients that never
+send `If-None-Match` see identical protocol v1 behavior.
+
 ## Host integration
 
 A server host that already authenticates its players has the right trust
@@ -279,6 +286,7 @@ The resulting costs are:
 | Tile bake | One tile plus seam apron; bounded concurrent working sets. |
 | Repeated tile fetch | Disk cache read; no rebake. |
 | Duplicate in-flight fetch | Waits for and shares the leader's result. |
+| Unchanged manifest poll | `304 Not Modified`; headers only, no body. |
 
 Chunk payloads are positional reads into a per-tile arena; they are not kept in
 the long-lived world catalog. World size therefore affects compact indexes and

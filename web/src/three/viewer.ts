@@ -550,6 +550,9 @@ export class VantageViewer {
     // atlas) snaps it back, so an idle multiplayer map costs a fraction of
     // the bandwidth while world edits still appear within a poll or two.
     let delay = VantageViewer.POLL_MS;
+    // Validator from the last manifest this loop successfully applied. With a
+    // conditional source, an unchanged catalog costs a 304 instead of a body.
+    let manifestEtag: string | undefined;
     for (;;) {
       await new Promise((r) => setTimeout(r, delay));
       // Bail if the world was replaced/disposed while we waited.
@@ -557,7 +560,19 @@ export class VantageViewer {
 
       let m: WorldManifest;
       try {
-        m = parseManifest(JSON.parse(dec.decode(await source.fetch('manifest.json'))));
+        if (source.fetchConditional) {
+          const res = await source.fetchConditional('manifest.json', manifestEtag);
+          if (res === 'unchanged') {
+            delay = Math.min(delay * 2, VantageViewer.POLL_MAX_MS);
+            continue;
+          }
+          m = parseManifest(JSON.parse(dec.decode(res.buffer)));
+          // Only after a successful parse: a stored validator for a manifest
+          // we failed to apply would 304 us out of ever seeing it again.
+          manifestEtag = res.etag;
+        } else {
+          m = parseManifest(JSON.parse(dec.decode(await source.fetch('manifest.json'))));
+        }
       } catch {
         // A torn read mid-rewrite or a transient fetch error — retry, easing
         // off so an unreachable server isn't hammered at full cadence.

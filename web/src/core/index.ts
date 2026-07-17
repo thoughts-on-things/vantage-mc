@@ -24,6 +24,7 @@ export {
   worldFromFiles,
   type WorldSource,
   type WorldFetch,
+  type WorldConditionalFetch,
   type WorldHttpFetch,
   type HttpWorldOptions,
   type VantageServerOptions,

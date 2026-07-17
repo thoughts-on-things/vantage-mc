@@ -238,6 +238,23 @@ async function smokeCheck(serverUrl, viewerOrigin, token) {
   const unauthorized = await request('/v1/worlds');
   assertResponse(unauthorized.status === 401, `unauthenticated request returned HTTP ${unauthorized.status}`);
 
+  // A browser preflights the conditional poll (If-None-Match is not a CORS
+  // safelisted header); node's fetch never preflights, so check explicitly.
+  const preflight = await request('/v1/worlds/default/manifest.json', {
+    method: 'OPTIONS',
+    headers: {
+      Origin: viewerOrigin,
+      'Access-Control-Request-Method': 'GET',
+      'Access-Control-Request-Headers': 'authorization, if-none-match',
+    },
+  });
+  assertResponse(preflight.status === 204, `preflight returned HTTP ${preflight.status}`);
+  const allowedHeaders = (preflight.headers.get('access-control-allow-headers') ?? '').toLowerCase();
+  assertResponse(
+    allowedHeaders.includes('authorization') && allowedHeaders.includes('if-none-match'),
+    'preflight must allow the authorization and if-none-match request headers',
+  );
+
   const authHeaders = { Authorization: `Bearer ${token}`, Origin: viewerOrigin };
   const manifestUrl = new URL('/v1/worlds/default/manifest.json', serverUrl);
   const manifestResponse = await fetch(manifestUrl, {
@@ -256,6 +273,22 @@ async function smokeCheck(serverUrl, viewerOrigin, token) {
     manifest.tiles.every((tile) => typeof tile.revision === 'string' && tile.revision.length > 0),
     'manifest tile revisions are missing',
   );
+
+  const manifestEtag = manifestResponse.headers.get('etag');
+  assertResponse(!!manifestEtag, 'manifest is missing its strong ETag validator');
+  assertResponse(
+    (manifestResponse.headers.get('access-control-expose-headers') ?? '').toLowerCase().includes('etag'),
+    'manifest ETag is not exposed to cross-origin scripts',
+  );
+  // Nothing baked between these two reads, so the body is byte-identical and
+  // the conditional poll must short-circuit to an empty 304.
+  const conditionalResponse = await fetch(manifestUrl, {
+    headers: { ...authHeaders, 'If-None-Match': manifestEtag },
+    signal: AbortSignal.timeout(30_000),
+  });
+  assertResponse(conditionalResponse.status === 304, `conditional manifest returned HTTP ${conditionalResponse.status}`);
+  assertResponse(conditionalResponse.headers.get('etag') === manifestEtag, 'the 304 must re-state the current validator');
+  assertResponse((await conditionalResponse.arrayBuffer()).byteLength === 0, 'a 304 must not carry a body');
 
   const tileUrl = new URL(manifest.tiles[0].path, manifestUrl);
   const tileResponse = await fetch(tileUrl, {

@@ -18,6 +18,11 @@ const openapi_spec = @import("server_openapi").json;
 pub const Produced = struct {
     body: []const u8,
     content_type: []const u8,
+    /// Strong entity tag for this exact body, already quoted (`"1a2b…"`).
+    /// When present, a request whose If-None-Match names it answers
+    /// `304 Not Modified` with no body — the continuous manifest sets this so
+    /// idle pollers stop re-downloading an unchanged catalog.
+    etag: ?[]const u8 = null,
 };
 
 /// An on-demand content source (the `vantage live` server): given a
@@ -203,6 +208,8 @@ fn serveRequest(
         var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena_inst.deinit();
         if (try p.produce(io, arena_inst.allocator(), target[1..])) |resp| {
+            if (resp.etag) |etag|
+                return respondConditional(req, resp.content_type, resp.body, "no-cache", null, etag);
             return req.respond(resp.body, .{ .extra_headers = &.{
                 .{ .name = "content-type", .value = resp.content_type },
                 .{ .name = "cache-control", .value = "no-cache" },
@@ -322,8 +329,11 @@ fn serveApiRequest(
     if (req.head.method != .HEAD) if (producer) |p| {
         var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena_inst.deinit();
-        if (try p.produce(io, arena_inst.allocator(), rel)) |resp|
+        if (try p.produce(io, arena_inst.allocator(), rel)) |resp| {
+            if (resp.etag) |etag|
+                return respondConditional(req, resp.content_type, resp.body, "private, no-store", origin, etag);
             return apiRespond(req, .ok, resp.content_type, resp.body, "private, no-store", origin);
+        }
     };
 
     var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -353,7 +363,9 @@ fn servePreflight(req: *std.http.Server.Request, origin: ?[]const u8) !void {
     var headers: HeaderBuffer = .{};
     addCorsHeaders(&headers, allowed);
     headers.add("access-control-allow-methods", "GET, HEAD, OPTIONS");
-    headers.add("access-control-allow-headers", "authorization");
+    // If-None-Match is not CORS-safelisted: without listing it here the
+    // browser rejects the viewer's conditional manifest polls at preflight.
+    headers.add("access-control-allow-headers", "authorization, if-none-match");
     headers.add("access-control-max-age", "600");
     headers.add(security_headers[0].name, security_headers[0].value);
     headers.add(security_headers[1].name, security_headers[1].value);
@@ -391,6 +403,51 @@ fn apiUnauthorized(req: *std.http.Server.Request, origin: ?[]const u8) !void {
 fn addCorsHeaders(headers: *HeaderBuffer, origin: []const u8) void {
     headers.add("access-control-allow-origin", origin);
     headers.add("vary", "Origin");
+}
+
+/// 200 carrying a strong validator, or 304 with no body when the request's
+/// If-None-Match already names it. A duplicate If-None-Match is ambiguous, so
+/// the precondition is ignored and the full body answers.
+fn respondConditional(
+    req: *std.http.Server.Request,
+    content_type: []const u8,
+    body: []const u8,
+    cache_control: []const u8,
+    origin: ?[]const u8,
+    etag: []const u8,
+) !void {
+    const inm = requestHeader(req, "if-none-match");
+    const unchanged = !inm.duplicate and inm.value != null and etagMatches(inm.value.?, etag);
+    var headers: HeaderBuffer = .{};
+    // A 304 carries only cache metadata, not representation headers.
+    if (!unchanged) headers.add("content-type", content_type);
+    headers.add("cache-control", cache_control);
+    headers.add("etag", etag);
+    headers.add(security_headers[0].name, security_headers[0].value);
+    headers.add(security_headers[1].name, security_headers[1].value);
+    if (origin) |value| {
+        addCorsHeaders(&headers, value);
+        // Cross-origin scripts only see safelisted response headers; the
+        // viewer must read the validator to poll conditionally.
+        headers.add("access-control-expose-headers", "ETag");
+    }
+    return req.respond(if (unchanged) "" else body, .{
+        .status = if (unchanged) .not_modified else .ok,
+        .extra_headers = headers.slice(),
+    });
+}
+
+/// RFC 9110 If-None-Match: `*`, or a comma-separated entity-tag list compared
+/// weakly (a `W/` prefix on a presented tag still matches our strong tag).
+fn etagMatches(header: []const u8, etag: []const u8) bool {
+    if (std.mem.eql(u8, std.mem.trim(u8, header, " \t"), "*")) return true;
+    var it = std.mem.splitScalar(u8, header, ',');
+    while (it.next()) |raw| {
+        var candidate = std.mem.trim(u8, raw, " \t");
+        if (std.mem.startsWith(u8, candidate, "W/")) candidate = candidate[2..];
+        if (std.mem.eql(u8, candidate, etag)) return true;
+    }
+    return false;
 }
 
 /// Answer a static HEAD from metadata only. `respond` already elides bodies,
@@ -584,6 +641,15 @@ test "origin allowlist is exact" {
     try std.testing.expect(originAllowed(&allowed, "https://maps.example"));
     try std.testing.expect(!originAllowed(&allowed, "https://maps.example.evil"));
     try std.testing.expect(!originAllowed(&allowed, "https://maps.example/"));
+}
+
+test "if-none-match validators match strong etags" {
+    try std.testing.expect(etagMatches("\"1a2b\"", "\"1a2b\""));
+    try std.testing.expect(etagMatches("W/\"1a2b\"", "\"1a2b\""));
+    try std.testing.expect(etagMatches("\"stale\", \"1a2b\"", "\"1a2b\""));
+    try std.testing.expect(etagMatches(" * ", "\"1a2b\""));
+    try std.testing.expect(!etagMatches("\"1a2b3\"", "\"1a2b\""));
+    try std.testing.expect(!etagMatches("1a2b", "\"1a2b\"")); // unquoted is not an entity-tag
 }
 
 test "bearer values are parsed and verified without prefix ambiguity" {

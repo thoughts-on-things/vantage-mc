@@ -88,12 +88,31 @@
         "operationId": "getWorldManifest",
         "tags": ["Artifacts"],
         "summary": "Read the current world manifest",
-        "description": "Continuous manifests set `dynamic` and `rendering` to true and attach an opaque `revision` string to each tile. Clients poll the manifest and replace only coordinates whose revision changed.",
+        "description": "Continuous manifests set `dynamic` and `rendering` to true and attach an opaque `revision` string to each tile. Clients poll the manifest and replace only coordinates whose revision changed. Every response carries a strong `ETag` over the exact body; polling with `If-None-Match` answers `304` while the catalog is unchanged. `ETag` is exposed to cross-origin scripts via `Access-Control-Expose-Headers`.",
+        "parameters": [
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Entity-tag list from a previous manifest response. A match short-circuits to `304 Not Modified` with no body.",
+            "schema": { "type": "string" }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Vantage world manifest",
-            "headers": { "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } } },
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } },
+              "ETag": { "description": "Strong validator over the exact manifest body.", "schema": { "type": "string" } }
+            },
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorldManifest" } } }
+          },
+          "304": {
+            "description": "The manifest is byte-identical to the presented validator; no body.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } },
+              "ETag": { "description": "The (still-current) strong validator.", "schema": { "type": "string" } }
+            }
           },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" }

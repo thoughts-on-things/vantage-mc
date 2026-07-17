@@ -148,6 +148,31 @@ describe('authenticated HTTP worlds', () => {
     ]);
   });
 
+  it('polls conditionally: presents the validator, maps 304 to unchanged, confines paths', async () => {
+    const calls: { url: string; inm: string | null; auth: string | null }[] = [];
+    const http = (input: string, init?: RequestInit) => {
+      const h = new Headers(init?.headers);
+      calls.push({ url: input, inm: h.get('if-none-match'), auth: h.get('authorization') });
+      if (h.get('if-none-match') === '"abc"') return Promise.resolve(new Response(null, { status: 304, headers: { etag: '"abc"' } }));
+      return Promise.resolve(new Response(JSON.stringify(MANIFEST), { headers: { etag: '"abc"' } }));
+    };
+    const src = await worldFromHttp('https://maps.example.test/world/manifest.json', {
+      accessToken: 'secret-token',
+      fetch: http,
+    });
+    const first = await src.fetchConditional!('manifest.json', undefined);
+    expect(first).not.toBe('unchanged');
+    expect((first as { etag?: string }).etag).toBe('"abc"');
+    expect(await src.fetchConditional!('manifest.json', '"abc"')).toBe('unchanged');
+    expect(calls[1]?.inm).toBeNull(); // no validator yet — an unconditional read
+    expect(calls[2]).toEqual({
+      url: 'https://maps.example.test/world/manifest.json',
+      inm: '"abc"',
+      auth: 'Bearer secret-token',
+    });
+    await expect(src.fetchConditional!('https://evil.test/tile', undefined)).rejects.toThrow(/unsafe remote artifact path/);
+  });
+
   it('rejects manifest paths that could exfiltrate credentials', async () => {
     const http = (input: string) => Promise.resolve(
       input.endsWith('manifest.json')

@@ -2241,8 +2241,18 @@ const LiveServer = struct {
 fn produce(ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, path: []const u8) !?serve.Produced {
     _ = io;
     const self: *LiveServer = @ptrCast(@alignCast(ctx));
-    if (std.mem.eql(u8, path, "manifest.json"))
-        return .{ .body = try liveManifest(self, arena), .content_type = "application/json" };
+    if (std.mem.eql(u8, path, "manifest.json")) {
+        // A strong validator over the exact bytes lets idle pollers trade the
+        // full catalog for a 304: identical body ⇒ identical tag, and any
+        // revision/progress/atlas movement changes the body.
+        const body = try liveManifest(self, arena);
+        const digest = std.hash.Wyhash.hash(0x5641_4e54_4554_4147, body); // "VANTETAG"
+        return .{
+            .body = body,
+            .content_type = "application/json",
+            .etag = try std.fmt.allocPrint(arena, "\"{x}\"", .{digest}),
+        };
+    }
     if (std.mem.eql(u8, path, "terrain.vtexarr"))
         return .{ .body = try liveAtlas(self, arena), .content_type = "application/octet-stream" };
     if (parseTilePath(path)) |xz|

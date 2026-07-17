@@ -214,7 +214,7 @@ returns only the fields a given version carries (`textured`, `hasBiome`, `fluid`
 `worldFromHttp`, `worldFromVantageServer`; types `DecodedTile`,
 `MeshSection`, `SurfaceMap`, `DecodedTextureArray`, `WorldManifest`,
 `ManifestTile`, `LowresTile`, `BiomeEntry`, `Rgb`, `WorldSource`,
-`HttpWorldOptions`, `VantageServerOptions`.
+`WorldConditionalFetch`, `HttpWorldOptions`, `VantageServerOptions`.
 
 **`@thoughts-on-things/vantage-mc/three`** — `buildTerrain`, `buildTileMeshes`,
 `buildQuantizedTileMeshes`, `buildLowresMesh`, `TileManager`,

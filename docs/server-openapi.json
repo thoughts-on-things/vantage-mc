@@ -4,7 +4,7 @@
     "title": "Vantage Server Protocol",
     "version": "1.0.0",
     "summary": "Read-only world-rendering data plane for Minecraft launchers and server hosts.",
-    "description": "Protocol v1 exposes discovery, health, world metadata, and immutable render artifacts. A Vantage process currently serves one world with the id `default`. Player identity and authorization remain the responsibility of an upstream host such as Beacon."
+    "description": "Protocol v1 exposes discovery, health, world metadata, and immutable render artifacts. A Vantage process currently serves one world with the id `default`. Player identity and authorization remain the responsibility of an upstream host such as Beacon.\n\nEvery endpoint (including the public discovery ones) additionally enforces a request policy that can answer before the documented responses: `403` when a browser `Origin` header is present but not on the configured allowlist, `400` when a security-relevant header (`Origin`, `Authorization`, `Access-Control-Request-Method`) appears more than once, `405` for methods other than GET/HEAD/OPTIONS, and `414` for request targets over 1024 bytes."
   },
   "servers": [
     { "url": "/", "description": "The discovered Vantage server origin" }
@@ -102,9 +102,9 @@
       "head": {
         "operationId": "headWorldManifest",
         "tags": ["Artifacts"],
-        "summary": "Inspect an existing cached manifest without producing it",
+        "summary": "Probe the manifest path without producing it",
+        "description": "HEAD never reaches the dynamic producer, and the live manifest is never persisted to the cache directory, so this always answers 404. Use GET to read the manifest.",
         "responses": {
-          "200": { "description": "A static cache entry exists" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" }
         }
@@ -135,8 +135,8 @@
           "name": "tile",
           "in": "path",
           "required": true,
-          "description": "Tile filename in the form `t.<signed-x>.<signed-z>.vtile`. Only coordinates advertised by the manifest can start a bake.",
-          "schema": { "type": "string", "pattern": "^t\\.-?[0-9]+\\.-?[0-9]+\\.vtile$" },
+          "description": "Tile filename in the form `t.<signed-x>.<signed-z>.vtile`, with coordinates in canonical decimal form (no leading zeros, no `+`, no `-0`). Only coordinates advertised by the manifest can start a bake.",
+          "schema": { "type": "string", "pattern": "^t\\.(0|-?[1-9][0-9]*)\\.(0|-?[1-9][0-9]*)\\.vtile$" },
           "example": "t.-3.12.vtile"
         }
       ],
@@ -261,7 +261,7 @@
         "properties": {
           "x": { "type": "integer" },
           "z": { "type": "integer" },
-          "path": { "type": "string", "pattern": "^tiles/t\\.-?[0-9]+\\.-?[0-9]+\\.vtile$" },
+          "path": { "type": "string", "pattern": "^tiles/t\\.(0|-?[1-9][0-9]*)\\.(0|-?[1-9][0-9]*)\\.vtile$" },
           "bytes": { "type": "integer", "minimum": 0 },
           "revision": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Opaque source revision; compare for equality only." }
         }

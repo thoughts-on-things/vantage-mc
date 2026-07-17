@@ -276,46 +276,46 @@ fn serveApiRequest(
     policy: ApiOptions,
 ) !void {
     var target = req.head.target;
-    if (target.len == 0 or target.len > 1024) return apiRespond(req, policy, .uri_too_long, "text/plain; charset=utf-8", "bad target\n", "no-store", null);
+    if (target.len == 0 or target.len > 1024) return apiRespond(req, .uri_too_long, "text/plain; charset=utf-8", "bad target\n", "no-store", null);
     if (std.mem.indexOfScalar(u8, target, '?')) |q| target = target[0..q];
 
     const origin_header = requestHeader(req, "origin");
     if (origin_header.duplicate)
-        return apiRespond(req, policy, .bad_request, "text/plain; charset=utf-8", "duplicate origin\n", "no-store", null);
+        return apiRespond(req, .bad_request, "text/plain; charset=utf-8", "duplicate origin\n", "no-store", null);
     const origin = origin_header.value;
     if (origin) |value| {
         if (!originAllowed(policy.allowed_origins, value))
-            return apiRespond(req, policy, .forbidden, "text/plain; charset=utf-8", "origin not allowed\n", "no-store", null);
+            return apiRespond(req, .forbidden, "text/plain; charset=utf-8", "origin not allowed\n", "no-store", null);
     }
 
     if (req.head.method == .OPTIONS)
-        return servePreflight(req, policy, origin);
+        return servePreflight(req, origin);
     if (req.head.method != .GET and req.head.method != .HEAD)
-        return apiRespond(req, policy, .method_not_allowed, "text/plain; charset=utf-8", "method not allowed\n", "no-store", origin);
+        return apiRespond(req, .method_not_allowed, "text/plain; charset=utf-8", "method not allowed\n", "no-store", origin);
 
     if (std.mem.eql(u8, target, "/v1/health"))
-        return apiRespond(req, policy, .ok, "application/json", "{\"status\":\"ok\",\"protocol\":1}\n", "no-store", origin);
+        return apiRespond(req, .ok, "application/json", "{\"status\":\"ok\",\"protocol\":1}\n", "no-store", origin);
     if (std.mem.eql(u8, target, "/.well-known/vantage")) {
         const body = if (policy.bearer_sha256 == null)
             "{\"protocol\":1,\"api\":\"/v1\",\"openapi\":\"/v1/openapi.json\",\"auth\":\"proxy\"}\n"
         else
             "{\"protocol\":1,\"api\":\"/v1\",\"openapi\":\"/v1/openapi.json\",\"auth\":\"bearer\"}\n";
-        return apiRespond(req, policy, .ok, "application/json", body, "public, max-age=300", origin);
+        return apiRespond(req, .ok, "application/json", body, "public, max-age=300", origin);
     }
     if (std.mem.eql(u8, target, "/v1/openapi.json"))
-        return apiRespond(req, policy, .ok, "application/json", openapi_spec, "public, max-age=3600", origin);
+        return apiRespond(req, .ok, "application/json", openapi_spec, "public, max-age=3600", origin);
 
     if (!authorized(req, policy.bearer_sha256))
-        return apiUnauthorized(req, policy, origin);
+        return apiUnauthorized(req, origin);
 
     if (std.mem.eql(u8, target, "/v1/worlds"))
-        return apiRespond(req, policy, .ok, "application/json", "{\"worlds\":[{\"id\":\"default\",\"manifest\":\"/v1/worlds/default/manifest.json\"}]}\n", "private, no-store", origin);
+        return apiRespond(req, .ok, "application/json", "{\"worlds\":[{\"id\":\"default\",\"manifest\":\"/v1/worlds/default/manifest.json\"}]}\n", "private, no-store", origin);
 
     if (!std.mem.startsWith(u8, target, policy.world_prefix))
-        return apiRespond(req, policy, .not_found, "text/plain; charset=utf-8", "not found\n", "no-store", origin);
+        return apiRespond(req, .not_found, "text/plain; charset=utf-8", "not found\n", "no-store", origin);
     const rel = target[policy.world_prefix.len..];
     if (!safeArtifactPath(rel))
-        return apiRespond(req, policy, .bad_request, "text/plain; charset=utf-8", "bad path\n", "no-store", origin);
+        return apiRespond(req, .bad_request, "text/plain; charset=utf-8", "bad path\n", "no-store", origin);
 
     // Avoid expensive or attacker-amplified work for metadata probes. A cached
     // file may answer HEAD, but a miss never reaches the dynamic producer.
@@ -323,7 +323,7 @@ fn serveApiRequest(
         var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena_inst.deinit();
         if (try p.produce(io, arena_inst.allocator(), rel)) |resp|
-            return apiRespond(req, policy, .ok, resp.content_type, resp.body, "private, no-store", origin);
+            return apiRespond(req, .ok, resp.content_type, resp.body, "private, no-store", origin);
     };
 
     var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -332,23 +332,23 @@ fn serveApiRequest(
     const full = std.fs.path.join(a, &.{ dir, rel }) catch return error.WriteFailed;
     if (req.head.method == .HEAD) {
         const stat = std.Io.Dir.cwd().statFile(io, full, .{}) catch
-            return apiRespond(req, policy, .not_found, "text/plain; charset=utf-8", "not found\n", "no-store", origin);
+            return apiRespond(req, .not_found, "text/plain; charset=utf-8", "not found\n", "no-store", origin);
         return headFileResponse(req, .ok, mimeType(rel), "private, no-store", origin, stat.size);
     }
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, a, .unlimited) catch
-        return apiRespond(req, policy, .not_found, "text/plain; charset=utf-8", "not found\n", "no-store", origin);
-    return apiRespond(req, policy, .ok, mimeType(rel), bytes, "private, no-store", origin);
+        return apiRespond(req, .not_found, "text/plain; charset=utf-8", "not found\n", "no-store", origin);
+    return apiRespond(req, .ok, mimeType(rel), bytes, "private, no-store", origin);
 }
 
-fn servePreflight(req: *std.http.Server.Request, policy: ApiOptions, origin: ?[]const u8) !void {
+fn servePreflight(req: *std.http.Server.Request, origin: ?[]const u8) !void {
     const allowed = origin orelse
-        return apiRespond(req, policy, .bad_request, "text/plain; charset=utf-8", "missing origin\n", "no-store", null);
+        return apiRespond(req, .bad_request, "text/plain; charset=utf-8", "missing origin\n", "no-store", null);
     const requested_header = requestHeader(req, "access-control-request-method");
     if (requested_header.duplicate)
-        return apiRespond(req, policy, .bad_request, "text/plain; charset=utf-8", "duplicate requested method\n", "no-store", allowed);
+        return apiRespond(req, .bad_request, "text/plain; charset=utf-8", "duplicate requested method\n", "no-store", allowed);
     const requested = requested_header.value orelse "";
     if (!std.ascii.eqlIgnoreCase(requested, "GET") and !std.ascii.eqlIgnoreCase(requested, "HEAD"))
-        return apiRespond(req, policy, .forbidden, "text/plain; charset=utf-8", "method not allowed\n", "no-store", allowed);
+        return apiRespond(req, .forbidden, "text/plain; charset=utf-8", "method not allowed\n", "no-store", allowed);
 
     var headers: HeaderBuffer = .{};
     addCorsHeaders(&headers, allowed);
@@ -362,14 +362,12 @@ fn servePreflight(req: *std.http.Server.Request, policy: ApiOptions, origin: ?[]
 
 fn apiRespond(
     req: *std.http.Server.Request,
-    policy: ApiOptions,
     status: std.http.Status,
     content_type: []const u8,
     body: []const u8,
     cache_control: []const u8,
     origin: ?[]const u8,
 ) !void {
-    _ = policy;
     var headers: HeaderBuffer = .{};
     headers.add("content-type", content_type);
     headers.add("cache-control", cache_control);
@@ -379,7 +377,7 @@ fn apiRespond(
     return req.respond(body, .{ .status = status, .extra_headers = headers.slice() });
 }
 
-fn apiUnauthorized(req: *std.http.Server.Request, policy: ApiOptions, origin: ?[]const u8) !void {
+fn apiUnauthorized(req: *std.http.Server.Request, origin: ?[]const u8) !void {
     var headers: HeaderBuffer = .{};
     headers.add("content-type", "text/plain; charset=utf-8");
     headers.add("cache-control", "no-store");
@@ -387,7 +385,6 @@ fn apiUnauthorized(req: *std.http.Server.Request, policy: ApiOptions, origin: ?[
     headers.add(security_headers[0].name, security_headers[0].value);
     headers.add(security_headers[1].name, security_headers[1].value);
     if (origin) |value| addCorsHeaders(&headers, value);
-    _ = policy;
     return req.respond("unauthorized\n", .{ .status = .unauthorized, .extra_headers = headers.slice() });
 }
 
@@ -484,16 +481,23 @@ fn safePath(rel: []const u8) bool {
 /// The public data plane is narrower than the cache directory. Even a file
 /// with a traversal-safe name is private unless it is part of protocol v1;
 /// operators can therefore keep bookkeeping beside the cache without making
-/// it remotely readable.
+/// it remotely readable. Tile coordinates must be in canonical decimal form —
+/// one URL per tile, so aliases ("+1", "007") can't dodge caches or logs.
 fn safeArtifactPath(rel: []const u8) bool {
     if (!safePath(rel)) return false;
     if (std.mem.eql(u8, rel, "manifest.json") or std.mem.eql(u8, rel, "terrain.vtexarr")) return true;
     if (!std.mem.startsWith(u8, rel, "tiles/t.") or !std.mem.endsWith(u8, rel, ".vtile")) return false;
     const mid = rel["tiles/t.".len .. rel.len - ".vtile".len];
     const dot = std.mem.indexOfScalar(u8, mid, '.') orelse return false;
-    _ = std.fmt.parseInt(i32, mid[0..dot], 10) catch return false;
-    _ = std.fmt.parseInt(i32, mid[dot + 1 ..], 10) catch return false;
-    return true;
+    return canonicalTileCoord(mid[0..dot]) and canonicalTileCoord(mid[dot + 1 ..]);
+}
+
+/// Exactly what `{d}` formats for an i32: an optional '-', no leading zeros.
+fn canonicalTileCoord(text: []const u8) bool {
+    const value = std.fmt.parseInt(i32, text, 10) catch return false;
+    var canonical: [12]u8 = undefined;
+    const formatted = std.fmt.bufPrint(&canonical, "{d}", .{value}) catch unreachable;
+    return std.mem.eql(u8, formatted, text);
 }
 
 fn mimeType(path: []const u8) []const u8 {
@@ -561,6 +565,11 @@ test "server artifacts expose only protocol files" {
     try std.testing.expect(!safeArtifactPath("operator-notes.txt"));
     try std.testing.expect(!safeArtifactPath("tiles/not-a-tile.vtile"));
     try std.testing.expect(!safeArtifactPath("tiles/t.1.2.vtile.tmp"));
+    // One canonical URL per tile: alias spellings of the same coordinate 400.
+    try std.testing.expect(!safeArtifactPath("tiles/t.+1.2.vtile"));
+    try std.testing.expect(!safeArtifactPath("tiles/t.01.2.vtile"));
+    try std.testing.expect(!safeArtifactPath("tiles/t.1.-0.vtile"));
+    try std.testing.expect(safeArtifactPath("tiles/t.0.0.vtile"));
 }
 
 test "mimeType maps the served extensions" {

@@ -231,8 +231,8 @@ async function smokeCheck(serverUrl, viewerOrigin, token) {
     signal: AbortSignal.timeout(30_000),
   });
   const discoveryResponse = await request('/.well-known/vantage');
-  const discovery = await discoveryResponse.json();
   assertResponse(discoveryResponse.ok, `discovery returned HTTP ${discoveryResponse.status}`);
+  const discovery = await discoveryResponse.json();
   assertResponse(discovery.protocol === 1 && discovery.auth === 'bearer', 'unexpected discovery contract');
 
   const unauthorized = await request('/v1/worlds');

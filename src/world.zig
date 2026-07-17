@@ -113,7 +113,10 @@ pub fn catalogRevision(regions: []const LoadedRegion) u64 {
 /// Cheap change gate for a long-running server scan: filenames, sizes and
 /// mtimes only. Location tables are re-read only when this value advances.
 pub fn catalogMetadataRevision(arena: std.mem.Allocator, io: std.Io, region_dir: []const u8) !u64 {
-    const Metadata = struct { x: i32, z: i32, size: u64, mtime: i96 };
+    // mtime widens to i128: @sizeOf(i96) is 16 but only 12 bytes are defined
+    // on store, so hashing an i96's bytes would fold undefined padding into
+    // the fingerprint and could spuriously "change" the catalog every scan.
+    const Metadata = struct { x: i32, z: i32, size: u64, mtime: i128 };
     var entries: std.ArrayList(Metadata) = .empty;
     var dir = try std.Io.Dir.cwd().openDir(io, region_dir, .{ .iterate = true });
     defer dir.close(io);
@@ -203,11 +206,14 @@ fn readLocationTable(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![]
 const LocationSnapshot = struct { table: []const u8, revision: u64 };
 
 /// Minecraft may be appending sectors while Vantage scans. Read metadata on
-/// both sides of the 4 KiB table and retry once if the file moved underneath
-/// us; a later server scan retries again rather than publishing a torn epoch.
+/// both sides of the 4 KiB table and retry (with a short backoff, so a burst
+/// of writes to this file can finish) if it moved underneath us; after the
+/// last attempt the whole candidate epoch fails rather than publishing torn
+/// state — a later server scan retries, a one-shot render reports the error.
 fn readStableLocationTable(arena: std.mem.Allocator, io: std.Io, path: []const u8) !LocationSnapshot {
     var attempt: usize = 0;
-    while (attempt < 2) : (attempt += 1) {
+    while (attempt < 4) : (attempt += 1) {
+        if (attempt > 0) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(15), .awake) catch {};
         const before = try std.Io.Dir.cwd().statFile(io, path, .{});
         const table = try readLocationTable(arena, io, path);
         const after = try std.Io.Dir.cwd().statFile(io, path, .{});

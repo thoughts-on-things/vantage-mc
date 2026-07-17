@@ -37,6 +37,8 @@ Arguments:
                           (default: site/demo-world)
 
 Options:
+  --world <path>          Minecraft Java world directory; equivalent to the
+                          positional argument the just recipes pass
   --cache <path>          Persistent on-demand tile cache
                           (default: .vantage-dev/server-cache)
   --viewer-port <port>    Viewer port (default: 8753)

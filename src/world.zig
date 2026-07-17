@@ -195,10 +195,9 @@ pub fn tileRevisionIndexed(index: *const RegionRevisionIndex, tx: i32, tz: i32, 
     return hasher.final() | 1;
 }
 
-fn readLocationTable(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+fn readLocationTable(io: std.Io, path: []const u8, buf: *[region.SECTOR]u8) ![]const u8 {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
-    const buf = try arena.alloc(u8, region.SECTOR);
     const n = try file.readPositionalAll(io, buf, 0);
     return buf[0..n];
 }
@@ -210,17 +209,20 @@ const LocationSnapshot = struct { table: []const u8, revision: u64 };
 /// of writes to this file can finish) if it moved underneath us; after the
 /// last attempt the whole candidate epoch fails rather than publishing torn
 /// state — a later server scan retries, a one-shot render reports the error.
+/// Reads land in a stack buffer; the arena only holds the one stable copy, so
+/// retries during a noisy save can't leak dead tables into a snapshot arena.
 fn readStableLocationTable(arena: std.mem.Allocator, io: std.Io, path: []const u8) !LocationSnapshot {
+    var buf: [region.SECTOR]u8 = undefined;
     var attempt: usize = 0;
     while (attempt < 4) : (attempt += 1) {
         if (attempt > 0) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(15), .awake) catch {};
         const before = try std.Io.Dir.cwd().statFile(io, path, .{});
-        const table = try readLocationTable(arena, io, path);
+        const table = try readLocationTable(io, path, &buf);
         const after = try std.Io.Dir.cwd().statFile(io, path, .{});
         if (before.size != after.size or before.mtime.nanoseconds != after.mtime.nanoseconds) continue;
         const timestamp_bits: u96 = @bitCast(after.mtime.nanoseconds);
         const seed = after.size ^ @as(u64, @truncate(timestamp_bits));
-        return .{ .table = table, .revision = std.hash.Wyhash.hash(seed, table) };
+        return .{ .table = try arena.dupe(u8, table), .revision = std.hash.Wyhash.hash(seed, table) };
     }
     return error.RegionChangedDuringRead;
 }

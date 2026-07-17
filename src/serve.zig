@@ -125,7 +125,9 @@ pub fn run(io: std.Io, arena: std.mem.Allocator, opts: Options) !void {
     };
 
     while (true) {
-        connection_slots.waitUncancelable(io);
+        // Cancelable: a saturated server (all permits held by connections)
+        // must still observe shutdown here, not only inside accept.
+        connection_slots.wait(io) catch return;
         const stream = server.accept(io) catch |e| switch (e) {
             error.Canceled => {
                 connection_slots.post(io);
@@ -220,7 +222,7 @@ fn serveRequest(
     };
 
     const rel = target[1..];
-    if (!safePath(rel)) return req.respond("bad path\n", .{ .status = .bad_request });
+    if (!safePath(rel)) return req.respond("bad path\n", .{ .status = .bad_request, .extra_headers = security_headers[0..] });
 
     var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_inst.deinit();
@@ -230,7 +232,7 @@ fn serveRequest(
         const stat = std.Io.Dir.cwd().statFile(io, full, .{}) catch {
             if (viewer.files.len == 0 and std.mem.eql(u8, rel, "index.html"))
                 return headFileResponse(req, .ok, "text/html; charset=utf-8", "no-cache", null, fallback_html.len);
-            return req.respond("not found\n", .{ .status = .not_found });
+            return req.respond("not found\n", .{ .status = .not_found, .extra_headers = security_headers[0..] });
         };
         return headFileResponse(req, .ok, mimeType(rel), "no-cache", null, stat.size);
     }
@@ -243,7 +245,7 @@ fn serveRequest(
                 security_headers[0],
                 security_headers[1],
             } });
-        return req.respond("not found\n", .{ .status = .not_found });
+        return req.respond("not found\n", .{ .status = .not_found, .extra_headers = security_headers[0..] });
     };
     try req.respond(bytes, .{ .extra_headers = &.{
         .{ .name = "content-type", .value = mimeType(rel) },

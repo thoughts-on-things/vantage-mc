@@ -173,6 +173,21 @@ describe('authenticated HTTP worlds', () => {
     await expect(src.fetchConditional!('https://evil.test/tile', undefined)).rejects.toThrow(/unsafe remote artifact path/);
   });
 
+  it('replaces a caller-cased Authorization header instead of duplicating it', async () => {
+    const captured: Record<string, string>[] = [];
+    const http = (input: string, init?: RequestInit) => {
+      captured.push({ ...(init?.headers as Record<string, string>) });
+      return Promise.resolve(new Response(JSON.stringify(MANIFEST)));
+    };
+    await worldFromHttp('https://maps.example.test/world/manifest.json', {
+      accessToken: 'wins',
+      headers: { Authorization: 'Bearer stale', 'X-Extra': 'kept' },
+      fetch: http,
+    });
+    // One lowercase key per header — the token replaced the caller's value.
+    expect(captured[0]).toEqual({ authorization: 'Bearer wins', 'x-extra': 'kept' });
+  });
+
   it('rejects manifest paths that could exfiltrate credentials', async () => {
     const http = (input: string) => Promise.resolve(
       input.endsWith('manifest.json')

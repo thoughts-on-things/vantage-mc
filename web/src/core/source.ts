@@ -103,8 +103,12 @@ export async function worldFromHttp(url: string, options: HttpWorldOptions = {})
   }
   const root = new URL('.', manifestUrl);
   const http = options.fetch ?? ((input: string, init?: RequestInit) => fetch(input, init));
-  const headers: Record<string, string> = { ...options.headers };
-  if (options.accessToken) headers['Authorization'] = `Bearer ${options.accessToken}`;
+  // Header names are case-insensitive but plain-object keys are not: lowercase
+  // everything so `accessToken` replaces a caller-cased `Authorization` instead
+  // of duplicating it (the server rejects duplicate security headers).
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(options.headers ?? {})) headers[name.toLowerCase()] = value;
+  if (options.accessToken) headers['authorization'] = `Bearer ${options.accessToken}`;
   const request = (target: string, signal?: AbortSignal, extra?: Record<string, string>) =>
     http(target, {
       ...(Object.keys(headers).length > 0 || extra ? { headers: { ...headers, ...extra } } : {}),
@@ -132,7 +136,7 @@ export async function worldFromHttp(url: string, options: HttpWorldOptions = {})
     },
     fetchConditional: async (path, etag, signal) => {
       const target = resolveTarget(path);
-      const r = await request(target, signal, etag ? { 'If-None-Match': etag } : undefined);
+      const r = await request(target, signal, etag ? { 'if-none-match': etag } : undefined);
       if (r.status === 304) return 'unchanged';
       if (!r.ok) throw new Error(`${r.status} ${r.statusText} for ${target}`);
       // Cross-origin, the validator is only readable when the server exposes

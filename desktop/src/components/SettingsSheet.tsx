@@ -1,7 +1,14 @@
 import { Cpu, Gauge, Layers3, Moon, Sparkles, X, Zap } from 'lucide-react';
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react';
-import type { SystemProfile } from './bridge.js';
-import type { DesktopSettings, PerformanceMode } from './settings.js';
+import type { SystemProfile } from '../bridge.js';
+import { renderThreadCount } from '../lib/renderProfile.js';
+import type { DesktopSettings, PerformanceMode } from '../settings.js';
+
+const MODE_LABELS: Record<PerformanceMode, [string, string]> = {
+  efficient: ['Efficient', 'Cool & quiet'],
+  balanced: ['Balanced', 'Smart limits'],
+  maximum: ['Maximum', 'Full CPU'],
+};
 
 export function SettingsSheet({ settings, system, onChange, onClose }: {
   settings: DesktopSettings;
@@ -13,6 +20,7 @@ export function SettingsSheet({ settings, system, onChange, onClose }: {
   const closeRef = useRef<HTMLButtonElement>(null);
   const update = (next: Partial<DesktopSettings>) => onChange({ ...settings, ...next });
   useEffect(() => closeRef.current?.focus(), []);
+
   const keepFocusInside = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== 'Tab') return;
     const controls = sheetRef.current?.querySelectorAll<HTMLElement>('button, input:not([disabled]), [tabindex]:not([tabindex="-1"])');
@@ -22,6 +30,7 @@ export function SettingsSheet({ settings, system, onChange, onClose }: {
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   };
+
   return (
     <div className="settings-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section ref={sheetRef} className="settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title" onKeyDown={keepFocusInside}>
@@ -34,9 +43,18 @@ export function SettingsSheet({ settings, system, onChange, onClose }: {
           <section className="settings-group">
             <div className="settings-group-title"><Gauge size={16} /><div><h3>Performance</h3><p>Choose how much of this PC Vantage can use.</p></div></div>
             <div className="mode-picker" role="radiogroup" aria-label="Performance mode">
-              <ModeButton mode="efficient" active={settings.performanceMode === 'efficient'} onClick={() => update({ performanceMode: 'efficient' })} />
-              <ModeButton mode="balanced" active={settings.performanceMode === 'balanced'} onClick={() => update({ performanceMode: 'balanced' })} />
-              <ModeButton mode="maximum" active={settings.performanceMode === 'maximum'} onClick={() => update({ performanceMode: 'maximum' })} />
+              {(Object.keys(MODE_LABELS) as PerformanceMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  role="radio"
+                  aria-checked={settings.performanceMode === mode}
+                  className={settings.performanceMode === mode ? 'active' : ''}
+                  onClick={() => update({ performanceMode: mode })}
+                >
+                  <b>{MODE_LABELS[mode][0]}</b><small>{MODE_LABELS[mode][1]}</small>
+                </button>
+              ))}
             </div>
             <div className="host-card">
               <span className="host-icon"><Cpu size={18} /></span>
@@ -77,15 +95,6 @@ export function SettingsSheet({ settings, system, onChange, onClose }: {
   );
 }
 
-function ModeButton({ mode, active, onClick }: { mode: PerformanceMode; active: boolean; onClick: () => void }) {
-  const labels: Record<PerformanceMode, [string, string]> = {
-    efficient: ['Efficient', 'Cool & quiet'],
-    balanced: ['Balanced', 'Smart limits'],
-    maximum: ['Maximum', 'Full CPU'],
-  };
-  return <button type="button" role="radio" aria-checked={active} className={active ? 'active' : ''} onClick={onClick}><b>{labels[mode][0]}</b><small>{labels[mode][1]}</small></button>;
-}
-
 function SettingToggle({ icon, title, copy, checked, onChange }: {
   icon: ReactNode; title: string; copy: string; checked: boolean; onChange: (checked: boolean) => void;
 }) {
@@ -100,7 +109,7 @@ function SettingToggle({ icon, title, copy, checked, onChange }: {
 }
 
 function performanceCopy(mode: PerformanceMode, cores: number): string {
-  if (mode === 'efficient') return `Renders with up to ${Math.max(1, Math.ceil(cores / 2))} threads.`;
+  if (mode === 'efficient') return `Renders with up to ${renderThreadCount('efficient', cores)} threads.`;
   if (mode === 'maximum') return `Requests all ${cores} threads; RAM safety still applies.`;
   return 'The native memory planner chooses the fastest safe thread count.';
 }

@@ -9,18 +9,11 @@ import {
   SettingsPanel,
   useVantage,
   VantageViewer,
-  type DisplaySettings,
-  type StreamingSettings,
 } from 'vantage-mc/react';
 import { saveWorldThumbnail, type SystemProfile, type WorldInfo } from './bridge.js';
-import type { DesktopSettings, PerformanceMode } from './settings.js';
-
-interface RenderProfile {
-  name: 'efficient' | 'balanced' | 'high';
-  maxPixelRatio: number;
-  streaming: Required<StreamingSettings>;
-  display: DisplaySettings;
-}
+import { compactNumber, sourceLabel } from './lib/format.js';
+import { selectRenderProfile, type RenderProfile } from './lib/renderProfile.js';
+import type { DesktopSettings } from './settings.js';
 
 export default function ViewerScreen({ world, manifestUrl, settings, system, hasThumbnail, onThumbnail, onBack }: {
   world: WorldInfo;
@@ -177,43 +170,4 @@ function ViewerTelemetry({ profile }: { profile: RenderProfile }) {
       <span className="control-hint">drag pan · right-drag orbit · C caves · scroll zoom</span>
     </div>
   );
-}
-
-function selectRenderProfile(mode: PerformanceMode, nativeCores: number): RenderProfile {
-  const MiB = 1024 * 1024;
-  const cores = Math.max(nativeCores, navigator.hardwareConcurrency || 4);
-  const dpr = window.devicePixelRatio || 1;
-  const display: DisplaySettings = { sharpness: 0.08, ao: 1.05, saturation: 1.03, contrast: 1.02, fog: 0.92, renderScale: 1 };
-
-  if (mode === 'efficient') {
-    return {
-      name: 'efficient',
-      maxPixelRatio: Math.min(1.35, dpr),
-      streaming: { viewDistance: 640, maxTiles: 84, concurrency: Math.max(2, Math.min(4, cores - 1)), maxBytes: 320 * MiB },
-      display,
-    };
-  }
-  if (mode === 'maximum') {
-    return {
-      name: 'high',
-      maxPixelRatio: Math.min(2.5, dpr),
-      streaming: { viewDistance: 1408, maxTiles: 400, concurrency: Math.min(12, Math.max(6, Math.floor(cores * 0.75))), maxBytes: 1024 * MiB },
-      display: { ...display, renderScale: dpr < 1.5 ? 1.15 : 1 },
-    };
-  }
-  return {
-    name: 'balanced',
-    maxPixelRatio: Math.min(1.75, dpr),
-    streaming: { viewDistance: 768, maxTiles: 120, concurrency: Math.min(6, Math.max(3, Math.floor(cores / 2))), maxBytes: 512 * MiB },
-    display,
-  };
-}
-
-const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
-function compactNumber(value: number): string {
-  return compact.format(value);
-}
-
-function sourceLabel(source: string): string {
-  return ({ vanilla: 'Minecraft', prism: 'Prism', multimc: 'MultiMC', curseforge: 'CurseForge', modrinth: 'Modrinth', gdlauncher: 'GDLauncher', beacon: 'Beacon' } as Record<string, string>)[source] ?? source;
 }

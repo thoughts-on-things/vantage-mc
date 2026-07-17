@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import heroShot from './assets/render-hero.jpg';
-import worldShot from './assets/render-world.jpg';
-import biomesShot from './assets/render-biomes.jpg';
+import heroShot from './assets/render-hero-v2.png';
+import worldShot from './assets/render-world-v2.png';
+import biomesShot from './assets/render-biomes-v2.png';
 import { DEMO_MANIFEST } from './App.js';
 import { RaceReplay } from './RaceReplay.js';
 import { CaveReveal } from './CaveReveal.js';
@@ -11,6 +11,7 @@ const GITHUB = 'https://github.com/thoughts-on-things/vantage-mc';
 const RELEASES = `${GITHUB}/releases`;
 const BEACON = 'https://beacon-mc.io';
 const STUDIO = 'https://thoughtsonthingsllc.com';
+const SERVER = './server/';
 
 /** Scroll-reveal: adds .in once an element enters the viewport. */
 function useReveal<T extends HTMLElement>() {
@@ -106,6 +107,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
         </a>
         <div className="nav-links">
           <a href="#desktop">download</a>
+          <a href={SERVER}>multiplayer</a>
           <a href="#numbers">numbers</a>
           <a href="#caves">cave view</a>
           <a href="#how">how it works</a>
@@ -132,8 +134,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
           as a <em>living map</em>.
         </h1>
         <p className="hero-sub reveal">
-          Point it at a Java save, get a 3D map in your browser a few seconds later. No server, nothing to
-          install.
+          Point it at a Java save, get a 3D map in your browser a few seconds later. No upload, no mods,
+          no gameplay plugin.
         </p>
 
         <div className="hero-ctas reveal">
@@ -170,8 +172,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
             <dt>than raw geometry</dt>
           </div>
           <div>
-            <dd>0 setup</dd>
-            <dt>servers or plugins</dt>
+            <dd>0 uploads</dd>
+            <dt>your save stays yours</dt>
           </div>
         </dl>
       </header>
@@ -200,6 +202,30 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
       </figure>
 
       <DesktopShowcase />
+
+      <section className="server-home" id="multiplayer">
+        <div className="server-home-copy reveal">
+          <p className="kicker">now for multiplayer</p>
+          <h2>The world doesn&apos;t have to live on your PC</h2>
+          <p className="lede">
+            <code>vantage server</code> runs beside a Java server and streams its persisted world to authorized
+            players. Beacon keeps the session; Vantage stays a read-only, bounded rendering sidecar.
+          </p>
+          <div className="server-home-actions">
+            <a className="cta cta-primary" href={SERVER}>
+              Explore Vantage Server <span className="cta-arrow" aria-hidden="true">→</span>
+            </a>
+            <a href={`${GITHUB}/blob/main/docs/server.md`} rel="noreferrer">technical guide ↗</a>
+          </div>
+        </div>
+        <div className="server-home-flow reveal" aria-label="Multiplayer rendering flow">
+          <div><small>01 · SOURCE</small><strong>Minecraft save</strong><span>authoritative region files</span></div>
+          <b aria-hidden="true">→</b>
+          <div className="server-home-active"><small>02 · DATA PLANE</small><strong>Vantage sidecar</strong><span>render + bounded cache</span></div>
+          <b aria-hidden="true">→</b>
+          <div><small>03 · ACCESS</small><strong>Beacon launcher</strong><span>existing player session</span></div>
+        </div>
+      </section>
 
       <section className="numbers" id="numbers">
         <p className="kicker reveal">the numbers</p>
@@ -372,6 +398,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
           <div className="footer-links">
             <a href={GITHUB} rel="noreferrer">GitHub</a>
             <a href={`${GITHUB}#quick-start`} rel="noreferrer">Quick start</a>
+            <a href={SERVER}>Multiplayer servers</a>
             <a href={`${GITHUB}/issues`} rel="noreferrer">Issues &amp; support</a>
             <a href={BEACON} rel="noreferrer">Beacon</a>
           </div>

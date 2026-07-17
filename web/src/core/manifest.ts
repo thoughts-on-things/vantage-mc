@@ -10,6 +10,9 @@ export interface ManifestTile {
   path: string;
   /** File size in bytes (gzip-wrapped on disk), for progress UI / budgeting. */
   bytes: number;
+  /** Opaque source revision. Continuous servers change this only when the
+   *  region files that feed this tile (including its seam apron) change. */
+  revision?: string;
 }
 
 /** One lowres LOD level: the whole world at 1/2^level detail, in tiles of
@@ -49,9 +52,9 @@ export interface WorldManifest {
   /** Biome display names indexed by the per-vertex biome id (0 = no data).
    *  Globally consistent across every tile of the render. */
   biomes: string[];
-  /** True while a progressive render is still baking: the manifest grows and
-   *  the viewer polls it, streaming new tiles in as they land. Absent/false in
-   *  a finished render. */
+  /** True while the viewer should poll this manifest. A progressive batch
+   *  flips false when finished; a continuous server keeps it true so saved
+   *  terrain can revise tiles in place. */
   rendering?: boolean;
   /** True for an on-demand live server (`vantage live`): every populated tile
    *  is listed up front but baked lazily on first fetch. Implies `rendering`;
@@ -112,7 +115,17 @@ export function parseManifest(data: unknown): WorldManifest {
       ) {
         throw new Error(`vantage: manifest ${what} ${i} is malformed`);
       }
-      return { x: o['x'], z: o['z'], path: o['path'], bytes: o['bytes'] };
+      const revision = o['revision'];
+      if (revision !== undefined && (typeof revision !== 'string' || revision.length === 0 || revision.length > 128)) {
+        throw new Error(`vantage: manifest ${what} ${i} has an invalid revision`);
+      }
+      return {
+        x: o['x'],
+        z: o['z'],
+        path: o['path'],
+        bytes: o['bytes'],
+        ...(typeof revision === 'string' ? { revision } : {}),
+      };
     });
   const parsedTiles = parseTiles(tiles, 'tile');
 

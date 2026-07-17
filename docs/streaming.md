@@ -36,6 +36,15 @@ The live server applies the same bake semaphore. A keyed in-flight set also
 coalesces concurrent requests for the same tile: one request bakes while the
 others wait for the cached result.
 
+The multiplayer server adds immutable world epochs. Its frequent change gate
+stats region filenames, sizes, and mtimes; only an advancing fingerprint
+causes 4 KiB location tables and populated-chunk metadata to be re-read. A
+region-coordinate index gives each advertised tile an opaque revision derived
+from the few regions intersecting its bake window and seam apron. In-flight
+bakes retain their epoch, epoch swaps take a short mutex, cache writes are
+atomic, and the viewer replaces only tiles whose revisions changed. See the
+[multiplayer server design](./server.md).
+
 ## Viewer
 
 The viewer plans from the coordinate grid around the camera, so a replan is

@@ -91,6 +91,16 @@ describe('parseManifest', () => {
     expect(parseManifest({ ...good, dynamic: 'yes' }).dynamic).toBeUndefined();
   });
 
+  it('carries opaque continuous-server tile revisions', () => {
+    const m = parseManifest({
+      ...good,
+      tiles: [{ ...good.tiles[0], revision: '7f00a1' }],
+    });
+    expect(m.tiles[0]?.revision).toBe('7f00a1');
+    expect(() => parseManifest({ ...good, tiles: [{ ...good.tiles[0], revision: '' }] })).toThrow(/revision/);
+    expect(() => parseManifest({ ...good, tiles: [{ ...good.tiles[0], revision: 12 }] })).toThrow(/revision/);
+  });
+
   it('rejects wrong format versions and malformed shapes', () => {
     expect(() => parseManifest(null)).toThrow(/not an object/);
     expect(() => parseManifest({ ...good, format: 6 })).toThrow(/format/);

@@ -16,7 +16,18 @@ export {
 } from './tile.js';
 export { parseTextureArray, type DecodedTextureArray, type TextureAnimation } from './texture.js';
 export { parseManifest, tileKey, type WorldManifest, type ManifestTile, type LowresLevel } from './manifest.js';
-export { worldFromUrl, worldFromDirectory, worldFromFiles, type WorldSource, type WorldFetch } from './source.js';
+export {
+  worldFromUrl,
+  worldFromHttp,
+  worldFromVantageServer,
+  worldFromDirectory,
+  worldFromFiles,
+  type WorldSource,
+  type WorldFetch,
+  type WorldHttpFetch,
+  type HttpWorldOptions,
+  type VantageServerOptions,
+} from './source.js';
 export { parseLowresTile, LOWRES_EMPTY, LOWRES_MAGIC, type LowresTile } from './lowres.js';
 export { isGzip, maybeInflate } from './gzip.js';
 export {

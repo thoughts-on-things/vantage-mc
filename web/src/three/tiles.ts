@@ -384,6 +384,9 @@ export class TileManager {
     // uploaded, pinning hundreds of megabytes of typed arrays.
     while (this.inFlight < this.opts.concurrency && this.inFlight + this.pendingBuilt < this.opts.concurrency && this.queue.length > 0) {
       const { ref, level } = this.queue.pop()!;
+      // A continuous manifest can replace/remove a tile while an older plan is
+      // still queued. Never start that stale request after reconciliation.
+      if (level === 0 && this.index.get(tileKey(ref.x, ref.z)) !== ref) continue;
       if (level === 0) void this.loadTile(ref);
       else void this.loadLowres(ref, level);
     }
@@ -496,12 +499,45 @@ export class TileManager {
    *  update(); already-known tiles are ignored. Returns whether anything was
    *  added. */
   addTiles(tiles: ManifestTile[]): boolean {
+    return this.reconcileTiles(tiles, false);
+  }
+
+  /** Reconcile the complete hires index from a continuous server manifest.
+   *  Revision changes evict only affected resident tiles; removed coordinates
+   *  disappear. Unchanged terrain remains on the GPU without a network fetch. */
+  syncTiles(tiles: ManifestTile[]): boolean {
+    return this.reconcileTiles(tiles, true);
+  }
+
+  private reconcileTiles(tiles: ManifestTile[], prune: boolean): boolean {
     let added = false;
+    const incoming = prune ? new Set(tiles.map((tile) => tileKey(tile.x, tile.z))) : null;
+    if (incoming) {
+      for (const [key] of this.index) {
+        if (incoming.has(key)) continue;
+        this.index.delete(key);
+        const rec = this.records.get(key);
+        if (rec) this.unload(key, rec);
+        added = true;
+      }
+    }
     for (const t of tiles) {
       const k = tileKey(t.x, t.z);
-      if (!this.index.has(k)) {
+      const previous = this.index.get(k);
+      if (!previous) {
         this.index.set(k, t);
         added = true;
+      } else if (t.revision !== previous.revision) {
+        this.index.set(k, t);
+        const rec = this.records.get(k);
+        if (rec) this.unload(k, rec);
+        added = true;
+      } else {
+        // Same source generation: refresh size/path metadata in place so
+        // queued references remain current and live-bake byte estimates can
+        // advance from zero without evicting resident geometry.
+        previous.path = t.path;
+        previous.bytes = t.bytes;
       }
     }
     if (added) {
@@ -728,8 +764,12 @@ export class TileManager {
   }
 
   private unload(key: string, rec: Record_): void {
+    const priorState = rec.state;
+    // Async atlas/fetch continuations use this state check as their disposal
+    // fence. Abort alone cannot stop a promise that is already resolving.
+    rec.state = 'empty';
     rec.abort?.abort();
-    if (rec.state === 'built') this.pendingBuilt--;
+    if (priorState === 'built') this.pendingBuilt--;
     for (const mesh of [rec.terrain, rec.terrainLm, rec.water]) {
       if (!mesh) continue;
       this.opts.scene.remove(mesh);

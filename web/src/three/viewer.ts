@@ -162,8 +162,8 @@ interface ViewerEvents extends Record<string, unknown> {
   mode: { fly: boolean };
   /** The depth slice (cave view) moved or toggled. `null` = off. */
   slice: { y: number | null };
-  /** Progressive render progress, while a live bake streams in. `done` reaches
-   *  `total` and `rendering` flips false on the final manifest. */
+  /** Progressive/live render progress. Finished batch renders flip false;
+   *  continuous multiplayer sources keep rendering true for change polling. */
   progress: { done: number; total: number; rendering: boolean };
 }
 
@@ -528,9 +528,9 @@ export class VantageViewer {
   }
 
   /** Follow a live (`rendering: true`) render: re-fetch the manifest on an
-   *  interval, stream newly-baked tiles in, widen the texture array when the
-   *  atlas grows, and install the lowres pyramid once the bake completes. Runs
-   *  until the render finishes or the world is replaced. */
+   *  interval, stream new/revised tiles in, widen the texture array when the
+   *  atlas grows, and install the lowres pyramid once a batch bake completes.
+   *  Continuous sources run until the world is replaced. */
   private async pollProgressive(source: WorldSource, manager: TileManager): Promise<void> {
     const dec = new TextDecoder();
     for (;;) {
@@ -553,8 +553,10 @@ export class VantageViewer {
         if (this.tiles !== manager) return;
       }
 
-      // Stream in whatever tiles are new since the last poll.
-      manager.addTiles(m.tiles);
+      // Stream in new tiles. Continuous on-demand servers also revise and
+      // remove existing coordinates as the multiplayer world is saved.
+      if (m.dynamic) manager.syncTiles(m.tiles);
+      else manager.addTiles(m.tiles);
       this.emitProgress(m);
 
       if (!m.rendering) {

@@ -30,6 +30,7 @@ desktop/src-tauri/icons/StoreLogo.png
 
 # Local developer bootstrap markers
 **/node_modules/.vantage-lock
+.vantage-dev/
 
 # Tiled render output (regenerate with `vantage render`)
 web/public/manifest.json

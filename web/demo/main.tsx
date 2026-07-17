@@ -6,11 +6,15 @@
 
 import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { worldFromVantageServer } from '../src/core/index.js';
+import type { WorldSource } from '../src/core/index.js';
 import { BiomeLayer, DepthSlider, LightPanel, MapNav, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
 const biomeOpen = /biome/i.test(location.hash);
+const viteEnv = (import.meta as ImportMeta & { readonly env: Record<string, string | undefined> }).env;
+const serverEndpoint = viteEnv['VITE_VANTAGE_SERVER_ENDPOINT']?.trim();
 
 /** A small HUD overlay showing the loaded tile's stats + the control legend — a
  *  custom child that reads the shared engine state via useVantage(). */
@@ -45,6 +49,11 @@ function Hud() {
       <div style={{ fontWeight: 700, letterSpacing: '0.04em', color: '#eef4ff' }}>
         vantage <b style={{ color: '#5b9bff', font: `600 11px ${mono}`, marginLeft: 2 }}>{info.magic}</b>
       </div>
+      {serverEndpoint ? (
+        <div style={{ color: '#66e29a', marginTop: 4, font: `600 10px ${mono}`, letterSpacing: '0.06em' }}>
+          ● SERVER · PROTOCOL V1 · AUTHENTICATED
+        </div>
+      ) : null}
       <div style={{ color: '#93a9cc', marginTop: 4, font: `11px ${mono}`, fontVariantNumeric: 'tabular-nums' }}>
         {verts} verts · {tris} tris · {dims}
       </div>
@@ -67,14 +76,16 @@ function Hud() {
   );
 }
 
-function App({ streamed }: { streamed: boolean }) {
+function App({ streamed, serverWorld }: { streamed: boolean; serverWorld?: WorldSource }) {
   // Dev-only: expose the engine for manual poking in the console.
   const ref = (e: import('../src/three/index.js').VantageViewer | null) => {
     (window as unknown as { __vantage?: unknown }).__vantage = e;
   };
   // Streamed world (manifest.json from `vantage render`) when present; else the
   // classic single tile (`vantage meshtex`).
-  const source = streamed
+  const source = serverWorld
+    ? ({ world: serverWorld } as const)
+    : streamed
     ? ({ world: '/manifest.json' } as const)
     : ({ tile: '/terrain.vtile', textures: '/terrain.vtexarr' } as const);
   return (
@@ -90,19 +101,39 @@ function App({ streamed }: { streamed: boolean }) {
   );
 }
 
-function mount(streamed: boolean): void {
+function mount(streamed: boolean, serverWorld?: WorldSource): void {
   // Survive Vite HMR re-evaluation: reuse the root instead of re-creating it.
   const holder = window as unknown as { __vantageRoot?: ReturnType<typeof createRoot> };
   holder.__vantageRoot ??= createRoot(document.getElementById('root')!);
   holder.__vantageRoot.render(
     <StrictMode>
-      <App streamed={streamed} />
+      <App streamed={streamed} serverWorld={serverWorld} />
     </StrictMode>,
   );
 }
 
-// Prefer the streamed world when a manifest exists next to the demo.
-void fetch('/manifest.json', { method: 'HEAD' }).then(
-  (r) => mount(r.ok && (r.headers.get('content-type') ?? '').includes('json')),
-  () => mount(false),
-);
+if (serverEndpoint) {
+  const accessToken = viteEnv['VITE_VANTAGE_SERVER_TOKEN']?.trim();
+  if (!accessToken) {
+    throw new Error('VITE_VANTAGE_SERVER_TOKEN is required with VITE_VANTAGE_SERVER_ENDPOINT');
+  }
+  // Development walkthrough mode: the token is injected by the local Vite
+  // process, never placed in the URL. Production launchers should supply their
+  // existing session through a same-origin proxy or custom fetch transport.
+  void worldFromVantageServer(serverEndpoint, { accessToken }).then(
+    (world) => mount(true, world),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      const output = document.createElement('pre');
+      output.style.cssText = 'color:#ff8797;padding:24px;white-space:pre-wrap';
+      output.textContent = message;
+      document.getElementById('root')!.replaceChildren(output);
+    },
+  );
+} else {
+  // Prefer the streamed world when a manifest exists next to the demo.
+  void fetch('/manifest.json', { method: 'HEAD' }).then(
+    (r) => mount(r.ok && (r.headers.get('content-type') ?? '').includes('json')),
+    () => mount(false),
+  );
+}

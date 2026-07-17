@@ -53,6 +53,8 @@ pub fn main(init: std.process.Init) !void {
         return runServe(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "live")) {
         return runLive(init, a, args[2..]);
+    } else if (std.mem.eql(u8, args[1], "server")) {
+        return runServer(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "extract")) {
         return runExtract(init, a, args[2..]);
     } else if (std.mem.eql(u8, args[1], "mesh")) {
@@ -96,6 +98,13 @@ fn printUsage() void {
         \\      Open a world in the browser NOW — no full pre-render. Every tile is
         \\      listed up front and baked on demand as it scrolls into view, caching
         \\      into --out (default web/public) so panning back is instant.
+        \\  vantage server  <world-save-dir> [live render flags] [--port <n>] [--host <addr>]
+        \\                  [--token-env <name>] [--allow-origin <origin>] [--max-connections <n>]
+        \\                  [--scan-interval <seconds>]
+        \\      Run the hardened Vantage server data plane for launchers and web apps.
+        \\      Binds to 127.0.0.1 by default for an authenticating reverse proxy.
+        \\      Non-loopback binds require a >=32-byte bearer secret in the environment
+        \\      (VANTAGE_SERVER_TOKEN by default). TLS belongs at the reverse proxy.
         \\  vantage extract [client.jar]
         \\      Extract the assets a render needs into ~/.cache/vantage/assets/<version>.
         \\      With no argument, uses the newest jar in your .minecraft/versions.
@@ -1447,6 +1456,20 @@ fn renderOneTile(ctx: *RenderCtx, ta: std.mem.Allocator, idx: usize) !void {
 /// it; the live server, which builds no pyramid, passes false so nothing
 /// accumulates across a long session).
 fn bakeTile(sh: *Shared, ta: std.mem.Allocator, tx: i32, tz: i32, keep_cmap: bool, res: *TileResult) !void {
+    return bakeTileFromRegions(sh, ta, sh.loaded, tx, tz, keep_cmap, res);
+}
+
+/// Snapshot-aware bake used by the long-running server. Batch rendering and
+/// local live sessions call `bakeTile`, which supplies their immutable catalog.
+fn bakeTileFromRegions(
+    sh: *Shared,
+    ta: std.mem.Allocator,
+    regions: []const world.LoadedRegion,
+    tx: i32,
+    tz: i32,
+    keep_cmap: bool,
+    res: *TileResult,
+) !void {
     const io = sh.io;
     const tile_chunks = sh.tile_chunks;
 
@@ -1457,7 +1480,7 @@ fn bakeTile(sh: *Shared, ta: std.mem.Allocator, tx: i32, tz: i32, keep_cmap: boo
     const cz1 = (tz + 1) * tile_chunks;
 
     const t_r0 = std.Io.Timestamp.now(io, .awake);
-    const g = try world.assembleWindow(ta, io, sh.loaded, cx0, cz0, cx1, cz1, &res.stats, null);
+    const g = try world.assembleWindow(ta, io, regions, cx0, cz0, cx1, cz1, &res.stats, null);
     res.read_ms = t_r0.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
     if (g.ids.len == 0) return;
 
@@ -1528,8 +1551,9 @@ fn bakeTile(sh: *Shared, ta: std.mem.Allocator, tx: i32, tz: i32, keep_cmap: boo
     // them and the viewer inflates via native DecompressionStream.
     const t_w0 = std.Io.Timestamp.now(io, .awake);
     const zipped = try compress.gzipCompress(ta, geo, sh.gz_level);
-    const tile_path = try std.fmt.allocPrint(ta, "{s}/tiles/t.{d}.{d}.vtile", .{ sh.out_dir, tx, tz });
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tile_path, .data = zipped });
+    const tiles_dir = try std.fmt.allocPrint(ta, "{s}/tiles", .{sh.out_dir});
+    const tile_name = try std.fmt.allocPrint(ta, "t.{d}.{d}.vtile", .{ tx, tz });
+    try atomicWrite(io, ta, tiles_dir, tile_name, zipped);
     res.write_ms = t_w0.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
 
     res.entry = .{ .tx = tx, .tz = tz, .bytes = zipped.len };
@@ -1543,7 +1567,14 @@ fn bakeTile(sh: *Shared, ta: std.mem.Allocator, tx: i32, tz: i32, keep_cmap: boo
 }
 
 /// One rendered tile's manifest record.
-const TileEntry = struct { tx: i32, tz: i32, bytes: usize };
+const TileEntry = struct {
+    tx: i32,
+    tz: i32,
+    bytes: usize,
+    /// Per-tile source revision for continuous server sessions. Zero omits the
+    /// field from static/local manifests.
+    revision: u64 = 0,
+};
 
 /// One lowres tile / one pyramid level, for the manifest's `lowres` section.
 const LowresTileEntry = struct { x: i32, z: i32, bytes: usize };
@@ -1881,9 +1912,15 @@ fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     }
     try out.appendSlice(a, "  \"tiles\": [\n");
     for (m.tiles, 0..) |t, i| {
-        try out.print(a, "    {{ \"x\": {d}, \"z\": {d}, \"path\": \"tiles/t.{d}.{d}.vtile\", \"bytes\": {d} }}{s}\n", .{
-            t.tx, t.tz, t.tx, t.tz, t.bytes, if (i + 1 < m.tiles.len) "," else "",
-        });
+        if (t.revision == 0) {
+            try out.print(a, "    {{ \"x\": {d}, \"z\": {d}, \"path\": \"tiles/t.{d}.{d}.vtile\", \"bytes\": {d} }}{s}\n", .{
+                t.tx, t.tz, t.tx, t.tz, t.bytes, if (i + 1 < m.tiles.len) "," else "",
+            });
+        } else {
+            try out.print(a, "    {{ \"x\": {d}, \"z\": {d}, \"path\": \"tiles/t.{d}.{d}.vtile\", \"bytes\": {d}, \"revision\": \"{x}\" }}{s}\n", .{
+                t.tx, t.tz, t.tx, t.tz, t.bytes, t.revision, if (i + 1 < m.tiles.len) "," else "",
+            });
+        }
     }
     try out.appendSlice(a, "  ]\n}\n");
     return out.toOwnedSlice(a);
@@ -1974,6 +2011,82 @@ fn runServe(init: std.process.Init, a: std.mem.Allocator, args: []const []const 
 /// evaporates. The bake path and its shared caches (atlas, biome table) are the
 /// same thread-safe ones the batch render uses, so concurrent request-thread
 /// bakes are safe.
+const BakedTile = struct {
+    bytes: usize,
+    revision: u64,
+};
+
+/// Ref-counted, independently allocated view of the live region catalog. A
+/// refresh swaps the current pointer in O(1); in-flight bakes retain their old
+/// snapshot until completion, then its arena is reclaimed in one operation.
+/// This avoids both use-after-free and the unbounded arena growth that repeated
+/// table rescans would otherwise cause on a months-long server process.
+const RegionSnapshot = struct {
+    arena: std.heap.ArenaAllocator,
+    loaded: []const world.LoadedRegion,
+    tile_keys: []const u64,
+    /// Membership and revision in one O(1) lookup. The revision was computed
+    /// with a small region-coordinate index while this epoch was assembled.
+    tile_revisions: std.AutoHashMap(u64, u64),
+    metadata_revision: u64,
+    catalog_revision: u64,
+    refs: usize = 1, // the LiveServer's owner reference
+    retired: bool = false,
+
+    fn destroy(self: *RegionSnapshot) void {
+        self.arena.deinit();
+        std.heap.page_allocator.destroy(self);
+    }
+};
+
+fn createRegionSnapshot(
+    io: std.Io,
+    region_dir: []const u8,
+    radius: i32,
+    centre_cx: i32,
+    centre_cz: i32,
+    tile_chunks: i32,
+    known_metadata_revision: ?u64,
+) !*RegionSnapshot {
+    // Capture the cheap gate before loading tables. If Minecraft saves during
+    // construction, the next poll observes a different gate and retries; doing
+    // this afterward could label an older catalog with the newer fingerprint.
+    const metadata_revision = known_metadata_revision orelse blk: {
+        var metadata_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer metadata_arena.deinit();
+        break :blk try world.catalogMetadataRevision(metadata_arena.allocator(), io, region_dir);
+    };
+    const snapshot = try std.heap.page_allocator.create(RegionSnapshot);
+    errdefer std.heap.page_allocator.destroy(snapshot);
+    snapshot.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    errdefer snapshot.arena.deinit();
+    const a = snapshot.arena.allocator();
+    const loaded = try world.loadRegions(a, io, region_dir);
+    const bounds = world.populatedBounds(loaded);
+    const populated = if (bounds.count == 0)
+        std.AutoHashMap(u64, void).init(a)
+    else
+        try world.populatedChunks(a, loaded);
+    const tile_keys = try enumerateTilesSpawnOutward(a, populated, radius, centre_cx, centre_cz, tile_chunks);
+    var region_revisions = try world.indexRegionRevisions(a, loaded);
+    var tile_revisions = std.AutoHashMap(u64, u64).init(a);
+    for (tile_keys) |key| {
+        const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+        const tz: i32 = @bitCast(@as(u32, @truncate(key)));
+        try tile_revisions.put(key, world.tileRevisionIndexed(&region_revisions, tx, tz, tile_chunks));
+    }
+    region_revisions.deinit();
+    snapshot.* = .{
+        .arena = snapshot.arena,
+        .loaded = loaded,
+        .tile_keys = tile_keys,
+        .tile_revisions = tile_revisions,
+        .metadata_revision = metadata_revision,
+        .catalog_revision = world.catalogRevision(loaded),
+    };
+    return snapshot;
+}
+
 const LiveServer = struct {
     sh: *Shared,
     /// Every populated tile, spawn-outward — the manifest lists them all; each
@@ -1992,13 +2105,23 @@ const LiveServer = struct {
     /// only when it's here, so the cache always agrees with THIS session's
     /// atlas — a prior session's tiles, baked against a different atlas layer
     /// order, are simply re-baked on first fetch.
-    baked: std.AutoHashMap(u64, usize) = undefined,
+    baked: std.AutoHashMap(u64, BakedTile) = undefined,
     /// Keys currently being filled. Duplicate requests wait on `ready` and
     /// share the first result instead of stampeding the same expensive bake.
     baking: std.AutoHashMap(u64, void) = undefined,
     /// Admission control for the actual memory-heavy work. Connection threads
     /// may wait cheaply, but only this many tile arenas can exist at once.
     bake_slots: std.Io.Semaphore = .{},
+    /// `vantage server` continuously refreshes this catalog; local `live`
+    /// leaves it null and uses the immutable fields above.
+    region_dir: ?[]const u8 = null,
+    radius: i32 = 0,
+    centre_cx: i32 = 0,
+    centre_cz: i32 = 0,
+    snapshot: ?*RegionSnapshot = null,
+    scan_interval_ns: i96 = 5 * std.time.ns_per_s,
+    last_scan: std.Io.Timestamp = .zero,
+    scanning: bool = false,
     max_section_verts: u64 = 0,
     y_min: i32 = std.math.maxInt(i32),
     y_max: i32 = std.math.minInt(i32),
@@ -2010,21 +2133,105 @@ const LiveServer = struct {
     /// Record a finished bake in the session ledger (bytes, and the running
     /// max-section-verts / y-extent the live manifest reports). `res` is null
     /// for an empty or failed tile (recorded as 0 bytes so it isn't re-baked).
-    fn record(self: *LiveServer, key: u64, res: ?*const TileResult) void {
+    fn record(self: *LiveServer, key: u64, revision: u64, res: ?*const TileResult) void {
         self.mutex.lockUncancelable(self.sh.io);
         defer self.mutex.unlock(self.sh.io);
-        self.recordLocked(key, res);
+        self.recordLocked(key, revision, res);
         _ = self.baking.remove(key);
         self.ready.broadcast(self.sh.io);
     }
 
-    fn recordLocked(self: *LiveServer, key: u64, res: ?*const TileResult) void {
-        self.baked.put(key, if (res) |r| r.entry.bytes else 0) catch {};
+    fn recordLocked(self: *LiveServer, key: u64, revision: u64, res: ?*const TileResult) void {
+        self.baked.put(key, .{ .bytes = if (res) |r| r.entry.bytes else 0, .revision = revision }) catch {};
         if (res) |r| {
             self.max_section_verts = @max(self.max_section_verts, @max(r.solid_verts, r.fluid_verts));
             self.y_min = @min(self.y_min, r.y_min);
             self.y_max = @max(self.y_max, r.y_max);
         }
+    }
+
+    fn acquireSnapshot(self: *LiveServer) ?*RegionSnapshot {
+        self.mutex.lockUncancelable(self.sh.io);
+        defer self.mutex.unlock(self.sh.io);
+        const current = self.snapshot orelse return null;
+        current.refs += 1;
+        return current;
+    }
+
+    fn releaseSnapshot(self: *LiveServer, snapshot: *RegionSnapshot) void {
+        var destroy = false;
+        self.mutex.lockUncancelable(self.sh.io);
+        snapshot.refs -= 1;
+        destroy = snapshot.refs == 0 and snapshot.retired;
+        self.mutex.unlock(self.sh.io);
+        if (destroy) snapshot.destroy();
+    }
+
+    fn retireOwnerLocked(self: *LiveServer, snapshot: *RegionSnapshot) bool {
+        _ = self;
+        snapshot.retired = true;
+        snapshot.refs -= 1;
+        return snapshot.refs == 0;
+    }
+
+    /// Throttled world refresh. A cheap directory metadata fingerprint is the
+    /// common path; the 4 KiB location tables and tile catalog are rebuilt only
+    /// after that fingerprint advances. I/O happens outside the state mutex;
+    /// concurrent manifest polls keep using the prior consistent snapshot.
+    fn maybeRefresh(self: *LiveServer) void {
+        const region_dir = self.region_dir orelse return;
+        const io = self.sh.io;
+        const now = std.Io.Timestamp.now(io, .awake);
+        self.mutex.lockUncancelable(io);
+        if (self.scanning or (self.last_scan.nanoseconds != 0 and self.last_scan.durationTo(now).nanoseconds < self.scan_interval_ns)) {
+            self.mutex.unlock(io);
+            return;
+        }
+        self.scanning = true;
+        self.last_scan = now;
+        self.mutex.unlock(io);
+
+        var scan_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer scan_arena.deinit();
+        const metadata_revision = world.catalogMetadataRevision(scan_arena.allocator(), io, region_dir) catch |e| {
+            self.mutex.lockUncancelable(io);
+            self.scanning = false;
+            self.mutex.unlock(io);
+            std.debug.print("server: region metadata scan failed: {s}; retaining the previous snapshot\n", .{@errorName(e)});
+            return;
+        };
+
+        self.mutex.lockUncancelable(io);
+        const metadata_unchanged = if (self.snapshot) |current| current.metadata_revision == metadata_revision else false;
+        if (metadata_unchanged) self.scanning = false;
+        self.mutex.unlock(io);
+        if (metadata_unchanged) return;
+
+        const candidate = createRegionSnapshot(io, region_dir, self.radius, self.centre_cx, self.centre_cz, self.sh.tile_chunks, metadata_revision) catch |e| {
+            self.mutex.lockUncancelable(io);
+            self.scanning = false;
+            self.mutex.unlock(io);
+            std.debug.print("server: region catalog refresh failed: {s}; retaining the previous snapshot\n", .{@errorName(e)});
+            return;
+        };
+
+        var old_to_destroy: ?*RegionSnapshot = null;
+        var changed = false;
+        self.mutex.lockUncancelable(io);
+        const current = self.snapshot;
+        if (current == null or current.?.catalog_revision != candidate.catalog_revision) {
+            self.snapshot = candidate;
+            changed = true;
+            if (current) |old| {
+                if (self.retireOwnerLocked(old)) old_to_destroy = old;
+            }
+        }
+        self.scanning = false;
+        self.mutex.unlock(io);
+
+        if (!changed) candidate.destroy();
+        if (old_to_destroy) |old| old.destroy();
+        if (changed) std.debug.print("server: world snapshot advanced ({d} render tiles)\n", .{candidate.tile_keys.len});
     }
 };
 
@@ -2061,14 +2268,18 @@ fn parseTilePath(path: []const u8) ?[2]i32 {
 /// becomes a gap (an empty body the viewer marks empty), never a retry storm.
 fn liveTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32) ![]const u8 {
     const key = world.packChunk(tx, tz);
-    if (!self.known.contains(key)) return "";
+    const snapshot = self.acquireSnapshot();
+    defer if (snapshot) |current| self.releaseSnapshot(current);
+    const regions = if (snapshot) |current| current.loaded else self.sh.loaded;
+    const revision = if (snapshot) |current| current.tile_revisions.get(key) orelse return "" else 0;
+    if (snapshot == null and !self.known.contains(key)) return "";
 
     self.mutex.lockUncancelable(self.sh.io);
     while (true) {
-        if (self.baked.get(key)) |bytes| {
+        if (self.baked.get(key)) |cached| if (cached.revision == revision) {
             self.mutex.unlock(self.sh.io);
-            return if (bytes == 0) "" else readCachedTile(self, arena, tx, tz);
-        }
+            return if (cached.bytes == 0) "" else readCachedTile(self, arena, tx, tz);
+        };
         if (!self.baking.contains(key)) {
             self.baking.put(key, {}) catch |e| {
                 self.mutex.unlock(self.sh.io);
@@ -2084,12 +2295,12 @@ fn liveTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32) ![]co
     defer self.bake_slots.post(self.sh.io);
 
     var res: TileResult = .{};
-    bakeTile(self.sh, arena, tx, tz, false, &res) catch |e| {
+    bakeTileFromRegions(self.sh, arena, regions, tx, tz, false, &res) catch |e| {
         std.debug.print("live: tile ({d},{d}) failed: {s} — leaving a gap\n", .{ tx, tz, @errorName(e) });
-        self.record(key, null);
+        self.record(key, revision, null);
         return ""; // empty body → the viewer marks it empty, no retry
     };
-    self.record(key, if (res.written) &res else null);
+    self.record(key, revision, if (res.written) &res else null);
     if (!res.written) return ""; // meshed to nothing (all air / cave-culled)
     return readCachedTile(self, arena, tx, tz);
 }
@@ -2106,23 +2317,41 @@ fn readCachedTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32)
 /// `rendering: true` until every tile has been baked at least once.
 fn liveManifest(self: *LiveServer, arena: std.mem.Allocator) ![]const u8 {
     const io = self.sh.io;
+    self.maybeRefresh();
+    const snapshot = self.acquireSnapshot();
+    defer if (snapshot) |current| self.releaseSnapshot(current);
+    const tile_keys = if (snapshot) |current| current.tile_keys else self.tile_keys;
+
     self.mutex.lockUncancelable(io);
-    const tiles = try arena.alloc(TileEntry, self.tile_keys.len);
-    for (self.tile_keys, tiles) |key, *t| {
+    const tiles = arena.alloc(TileEntry, tile_keys.len) catch |e| {
+        self.mutex.unlock(io);
+        return e;
+    };
+    var done: usize = 0;
+    for (tile_keys, tiles) |key, *t| {
+        const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+        const tz: i32 = @bitCast(@as(u32, @truncate(key)));
+        const revision = if (snapshot) |current_snapshot| current_snapshot.tile_revisions.get(key).? else 0;
+        const cached = self.baked.get(key);
+        const current = if (cached) |entry| entry.revision == revision else false;
+        if (current) done += 1;
         t.* = .{
-            .tx = @bitCast(@as(u32, @truncate(key >> 32))),
-            .tz = @bitCast(@as(u32, @truncate(key))),
-            .bytes = self.baked.get(key) orelse 0,
+            .tx = tx,
+            .tz = tz,
+            .bytes = if (current) cached.?.bytes else 0,
+            .revision = revision,
         };
     }
-    const done = self.baked.count();
     const msv = self.max_section_verts;
     const ymin = self.y_min;
     const ymax = self.y_max;
     self.mutex.unlock(io);
 
     self.sh.world_mutex.lockUncancelable(io);
-    const biomes = try arena.dupe([]const u8, self.sh.world_display.items);
+    const biomes = arena.dupe([]const u8, self.sh.world_display.items) catch |e| {
+        self.sh.world_mutex.unlock(io);
+        return e;
+    };
     self.sh.world_mutex.unlock(io);
 
     return buildManifest(arena, .{
@@ -2133,9 +2362,11 @@ fn liveManifest(self: *LiveServer, arena: std.mem.Allocator) ![]const u8 {
         .max_section_verts = msv,
         .caves = self.sh.cave_y == null,
         .y_range = if (ymin < ymax) .{ ymin, ymax } else null,
-        .rendering = done < self.tile_keys.len,
+        // Continuous servers keep polling even after the current snapshot is
+        // warm so newly-saved terrain can advance tile revisions in place.
+        .rendering = snapshot != null or done < tile_keys.len,
         .dynamic = true,
-        .progress = .{ done, self.tile_keys.len },
+        .progress = .{ done, tile_keys.len },
         .texture_layers = self.sh.builder.layerCount(),
     });
 }
@@ -2159,16 +2390,32 @@ fn liveAtlas(self: *LiveServer, arena: std.mem.Allocator) ![]const u8 {
 /// hour-long pre-render. Tiles cache into `--out` (default web/public), so
 /// panning back is instant.
 fn runLive(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    return runLiveMode(init, a, args, false);
+}
+
+/// `vantage server` shares the live renderer but replaces its local embedded
+/// viewer with a versioned, authenticated data plane. Keeping one bake engine
+/// means both products retain the same memory admission and in-flight request
+/// coalescing guarantees.
+fn runServer(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
+    return runLiveMode(init, a, args, true);
+}
+
+fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8, server_mode: bool) !void {
     if (args.len < 1) return usage();
     const save = args[0];
     var assets_opt: ?[]const u8 = null;
-    var out_dir: []const u8 = "web/public"; // doubles as the on-demand tile cache
+    var out_dir: []const u8 = if (server_mode) "vantage-server-cache" else "web/public"; // doubles as the on-demand tile cache
     var tile_chunks: i32 = 8;
     var radius: i32 = 0;
     var gz_level: i32 = 6; // live favours bake-and-serve latency over the last few % of size
     var port: u16 = 8268;
     var host: []const u8 = "127.0.0.1";
     var open = false;
+    var token_env: []const u8 = "VANTAGE_SERVER_TOKEN";
+    var allowed_origins: std.ArrayList([]const u8) = .empty;
+    var max_connections: usize = 64;
+    var scan_interval_seconds: u32 = 5;
     const quality = try parseLightQuality(args);
     const blend_biomes = try parseBiomeBlend(args);
     const cave_y = try parseCaveY(args);
@@ -2199,12 +2446,54 @@ fn runLive(init: std.process.Init, a: std.mem.Allocator, args: []const []const u
             host = try flagValue(args, &argi);
         } else if (std.mem.eql(u8, arg, "--open")) {
             open = true;
+        } else if (server_mode and std.mem.eql(u8, arg, "--token-env")) {
+            token_env = try flagValue(args, &argi);
+        } else if (server_mode and std.mem.eql(u8, arg, "--allow-origin")) {
+            const origin = try flagValue(args, &argi);
+            if (!validCorsOrigin(origin)) return badValue("--allow-origin", origin, "an exact http(s) origin without a path");
+            try allowed_origins.append(a, origin);
+        } else if (server_mode and std.mem.eql(u8, arg, "--max-connections")) {
+            const v = try flagValue(args, &argi);
+            const n = std.fmt.parseInt(usize, v, 10) catch return badValue("--max-connections", v, "1..4096");
+            max_connections = std.math.clamp(n, 1, 4096);
+        } else if (server_mode and std.mem.eql(u8, arg, "--scan-interval")) {
+            const v = try flagValue(args, &argi);
+            const n = std.fmt.parseInt(u32, v, 10) catch return badValue("--scan-interval", v, "1..3600 seconds");
+            scan_interval_seconds = std.math.clamp(n, 1, 3600);
         } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
             std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "--memory"))
         {
             argi += 1; // value parsed by the dedicated scanners above
         } else if (std.mem.startsWith(u8, arg, "-")) {
             std.debug.print("unknown flag for live: {s} (see `vantage --help`)\n", .{arg});
+            return error.InvalidArgument;
+        }
+    }
+
+    if (server_mode and open) {
+        std.debug.print("--open is only available for `vantage live`; the server command exposes a data API, not a web page\n", .{});
+        return error.InvalidArgument;
+    }
+
+    var bearer_sha256: ?[32]u8 = null;
+    if (server_mode) {
+        if (token_env.len == 0) return badValue("--token-env", token_env, "a non-empty environment variable name");
+        if (init.environ_map.get(token_env)) |token| {
+            if (token.len < 32) {
+                std.debug.print("{s} must contain at least 32 bytes; generate a high-entropy secret and keep it out of command-line arguments\n", .{token_env});
+                return error.InvalidArgument;
+            }
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(token, &digest, .{});
+            bearer_sha256 = digest;
+        }
+        const loopback = std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1");
+        if (!loopback and bearer_sha256 == null) {
+            std.debug.print("refusing an unauthenticated non-loopback bind ({s}); set {s} or bind to 127.0.0.1 behind an authenticating proxy\n", .{ host, token_env });
+            return error.InvalidArgument;
+        }
+        if (allowed_origins.items.len > 0 and bearer_sha256 == null) {
+            std.debug.print("--allow-origin requires bearer authentication; set {s} so a browser origin cannot expose an unauthenticated world\n", .{token_env});
             return error.InvalidArgument;
         }
     }
@@ -2247,40 +2536,82 @@ fn runLive(init: std.process.Init, a: std.mem.Allocator, args: []const []const u
     const server = try a.create(LiveServer);
     var known = std.AutoHashMap(u64, void).init(sh.sa);
     for (tile_keys) |key| try known.put(key, {});
+    const region_snapshot = if (server_mode)
+        try createRegionSnapshot(init.io, wl.region_dir, radius, wl.centre_cx, wl.centre_cz, tile_chunks, null)
+    else
+        null;
     server.* = .{
         .sh = sh,
         .tile_keys = tile_keys,
         .spawn = wl.spawn,
         .known = known,
-        .baked = std.AutoHashMap(u64, usize).init(sh.sa),
+        .baked = std.AutoHashMap(u64, BakedTile).init(sh.sa),
         .baking = std.AutoHashMap(u64, void).init(sh.sa),
         .bake_slots = .{ .permits = bake_count },
+        .region_dir = if (server_mode) wl.region_dir else null,
+        .radius = radius,
+        .centre_cx = wl.centre_cx,
+        .centre_cz = wl.centre_cz,
+        .snapshot = region_snapshot,
+        .scan_interval_ns = @as(i96, scan_interval_seconds) * std.time.ns_per_s,
     };
 
     // Seed the nearest tile synchronously: fail fast if assets/pipeline are
     // broken (rather than per-request in the browser), and start the atlas +
     // maxSectionVerts non-empty so the very first manifest is well-sized.
-    if (tile_keys.len > 0) {
+    const seed_keys = if (region_snapshot) |snapshot| snapshot.tile_keys else tile_keys;
+    if (seed_keys.len > 0) {
         var seed = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer seed.deinit();
-        const tx: i32 = @bitCast(@as(u32, @truncate(tile_keys[0] >> 32)));
-        const tz: i32 = @bitCast(@as(u32, @truncate(tile_keys[0])));
+        const tx: i32 = @bitCast(@as(u32, @truncate(seed_keys[0] >> 32)));
+        const tz: i32 = @bitCast(@as(u32, @truncate(seed_keys[0])));
+        const regions = if (region_snapshot) |snapshot| snapshot.loaded else sh.loaded;
+        const revision = if (region_snapshot) |snapshot| snapshot.tile_revisions.get(seed_keys[0]).? else 0;
         var res: TileResult = .{};
-        bakeTile(sh, seed.allocator(), tx, tz, false, &res) catch |e| {
+        bakeTileFromRegions(sh, seed.allocator(), regions, tx, tz, false, &res) catch |e| {
             std.debug.print("live: initial bake failed ({s}) — check the world/assets\n", .{@errorName(e)});
             return e;
         };
-        server.record(world.packChunk(tx, tz), if (res.written) &res else null);
+        server.record(world.packChunk(tx, tz), revision, if (res.written) &res else null);
     }
 
     std.debug.print("live: rendering on demand — tiles bake as you explore (cache: {s}/tiles)\n", .{out_dir});
+    if (server_mode) {
+        std.debug.print("server: protocol v1 · auth {s} · endpoint http://{s}:{d}/v1/worlds/default/manifest.json\n", .{
+            if (bearer_sha256 == null) "proxy/loopback" else "bearer",
+            host,
+            port,
+        });
+    }
     return serve.run(init.io, a, .{
         .dir = out_dir,
         .port = port,
         .host = host,
         .open = open,
         .producer = server.producer(),
+        .api = if (server_mode) .{
+            .bearer_sha256 = bearer_sha256,
+            .allowed_origins = allowed_origins.items,
+            .max_connections = max_connections,
+        } else null,
     });
+}
+
+fn validCorsOrigin(value: []const u8) bool {
+    const uri = std.Uri.parse(value) catch return false;
+    if (!std.mem.eql(u8, uri.scheme, "http") and !std.mem.eql(u8, uri.scheme, "https")) return false;
+    if (uri.host == null or uri.user != null or uri.password != null) return false;
+    if (!uri.path.isEmpty() or uri.query != null or uri.fragment != null) return false;
+    return true;
+}
+
+test "CORS origins are absolute HTTP origins without paths or credentials" {
+    try std.testing.expect(validCorsOrigin("https://launcher.example"));
+    try std.testing.expect(validCorsOrigin("http://127.0.0.1:3000"));
+    try std.testing.expect(!validCorsOrigin("https://launcher.example/path"));
+    try std.testing.expect(!validCorsOrigin("https://user@launcher.example"));
+    try std.testing.expect(!validCorsOrigin("file:///tmp/launcher"));
+    try std.testing.expect(!validCorsOrigin("launcher.example"));
 }
 
 fn runExtract(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {

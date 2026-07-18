@@ -276,6 +276,24 @@ describe('parseTileQuantized', () => {
     expect(q!.biomeNames).toEqual(LEGEND);
   });
 
+  it('rejects lit sections whose header boundaries are out of range or unaligned', () => {
+    // Patch a valid VTLA buffer's header in place: V@8, lmStart@12,
+    // caveStart@16, caveLmStart@20 (little-endian u32s after magic+version).
+    const corrupt = (offset: number, value: number) => {
+      const buf = encodeVTLA();
+      new DataView(buf).setUint32(offset, value, true);
+      return buf;
+    };
+    // lmStart past the vertex count would size a negative lmuv view.
+    expect(() => parseTileQuantized(corrupt(12, 12))).toThrow(/corrupt lit section/);
+    // Cave boundaries must be quad-aligned and ordered within their segments.
+    expect(() => parseTileQuantized(corrupt(16, 8))).toThrow(/corrupt VTLA cave/); // caveStart > lmStart
+    expect(() => parseTileQuantized(corrupt(20, 7))).toThrow(/corrupt VTLA cave/); // unaligned
+    expect(() => parseTileQuantized(corrupt(20, 12))).toThrow(/corrupt VTLA cave/); // caveLmStart > V
+    // The classic expand path shares the reader, so it rejects them too.
+    expect(() => parseTile(corrupt(12, 12))).toThrow(/corrupt lit section/);
+  });
+
   it('parses the same VTL7 buffer twice without corruption (delta decode copies)', () => {
     const buf = encodeVTL7();
     const a = parseTileQuantized(buf)!;

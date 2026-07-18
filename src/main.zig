@@ -1879,7 +1879,8 @@ test "isTileFileName accepts render-owned tiles and nothing else" {
 /// Hand-rolled (the shape is tiny and fixed) to stay off the std.json churn.
 fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    // Format 5 = VTL9 tiles (losslessly packed RG8 lightmaps).
+    // Format 6 = VTLA tiles (VTL9's packed RG8 lightmaps + the cave partition
+    // boundaries in each section header).
     try out.print(a, "{{\n  \"format\": 6,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"maxSectionVerts\": {d},\n  \"textures\": \"terrain.vtexarr\",\n  \"textureLayers\": {d},\n", .{
         m.tile_chunks, m.tile_chunks * 16, m.max_section_verts, m.texture_layers,
     });

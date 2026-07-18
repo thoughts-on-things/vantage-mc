@@ -323,6 +323,21 @@ function readLitSectionRaw(r: ByteReader, withCave: boolean): QuantizedSection {
   const lmStart = r.u32();
   const caveStart = withCave ? r.u32() : undefined;
   const caveLmStart = withCave ? r.u32() : undefined;
+  // Validate the header before sizing any typed-array view off it — a
+  // truncated or hostile buffer must fail HERE with a clear error, not as
+  // negative view lengths or garbage draw ranges downstream. Every boundary
+  // is a quad-aligned vertex index; the writer asserts the same ordering
+  // (cave_start ≤ lm_start ≤ cave_lm_start ≤ V).
+  if (vertexCount % 4 !== 0 || lmStart % 4 !== 0 || lmStart > vertexCount) {
+    throw new Error(`vantage: corrupt lit section header (V=${vertexCount}, lmStart=${lmStart})`);
+  }
+  if (caveStart !== undefined && caveLmStart !== undefined) {
+    if (caveStart % 4 !== 0 || caveLmStart % 4 !== 0 || caveStart > lmStart || caveLmStart < lmStart || caveLmStart > vertexCount) {
+      throw new Error(
+        `vantage: corrupt VTLA cave boundaries (V=${vertexCount}, lmStart=${lmStart}, caveStart=${caveStart}, caveLmStart=${caveLmStart})`,
+      );
+    }
+  }
   const uv = r.i16a(2 * vertexCount);
   const colors = r.u8a(4 * vertexCount);
   const normals = r.i8a(4 * vertexCount);

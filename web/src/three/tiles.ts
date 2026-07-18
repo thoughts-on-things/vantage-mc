@@ -272,10 +272,17 @@ export class TileManager {
     this.renderer = renderer ?? null;
     const res = mapMemory ?? 64;
     if (renderer && res > 0 && !options.manifest.lowres) {
-      this.impostors = new ImpostorLayer(renderer, options.scene, options.material, this.tileBlocks, res);
+      this.impostors = new ImpostorLayer(renderer, options.scene, options.material, this.tileBlocks, res, this.readySurface);
       this.applyHazeFloor();
     }
   }
+
+  /** Surface map of a fully-streamed resident hires tile (the impostor layer
+   *  stitches remembered rims onto live terrain with it). */
+  private readonly readySurface = (key: string): SurfaceMap | undefined => {
+    const rec = this.records.get(key);
+    return rec?.level === 0 && rec.state === 'ready' ? rec.surface : undefined;
+  };
 
   /** Keep the impostor haze floor tracking the guaranteed-hires radius (the
    *  view distance, unless the tile budget's disc runs out first). */
@@ -459,6 +466,9 @@ export class TileManager {
       this.opts.scene.add(rec.terrain!);
       if (rec.terrainLm) this.opts.scene.add(rec.terrainLm);
       if (rec.water) this.opts.scene.add(rec.water);
+      // Remembered rims meet the live disc: snap adjacent impostor edges onto
+      // this tile's real surface heights so the fidelity boundary doesn't step.
+      if (rec.level === 0) this.impostors?.onHiresReady(rec.ref.x, rec.ref.z, rec.surface);
       this.coverageDirty = true;
       this.invalidate();
       this.emitter.emit('change', this.stats);
@@ -646,7 +656,7 @@ export class TileManager {
       this.impostors?.dispose();
       this.impostors = null;
       if (this.renderer && settings.mapMemory > 0 && this.lowLevels.length === 0) {
-        this.impostors = new ImpostorLayer(this.renderer, this.opts.scene, this.opts.material, this.tileBlocks, settings.mapMemory);
+        this.impostors = new ImpostorLayer(this.renderer, this.opts.scene, this.opts.material, this.tileBlocks, settings.mapMemory, this.readySurface);
       }
       this.invalidate();
     }

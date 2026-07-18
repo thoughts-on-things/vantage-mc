@@ -110,6 +110,12 @@ export class ImpostorLayer {
       glslVersion: THREE.GLSL3,
       uniforms: {
         uMap: { value: this.rt.texture },
+        uAtlasPx: { value: SLOTS * resolution },
+        // Never sample past this mip: deeper levels average across atlas
+        // slots, which smears grazing-angle views into one murky colour.
+        uMaxLod: { value: Math.log2(resolution) - 2 },
+        // The guaranteed-hires radius; aerial haze never intrudes inside it.
+        uHazeMin: { value: 768 },
         uFogColor: t['uFogColor']!,
         uFog: t['uFog']!,
         uFogCenter: t['uFogCenter']!,
@@ -125,11 +131,11 @@ export class ImpostorLayer {
         uniform float uFogRadial;
         out vec2 vUv;
         out float vFog;
-        out float vWorldY;
+        out vec3 vWorld;
         void main() {
           vUv = uv;
           vec4 wp = modelMatrix * vec4(position, 1.0);
-          vWorldY = wp.y;
+          vWorld = wp.xyz;
           vec4 mv = viewMatrix * wp;
           vFog = mix(-mv.z, distance(wp.xz, uFogCenter), uFogRadial);
           gl_Position = projectionMatrix * mv;
@@ -138,6 +144,9 @@ export class ImpostorLayer {
       fragmentShader: /* glsl */ `
         precision highp float;
         uniform sampler2D uMap;
+        uniform float uAtlasPx;
+        uniform float uMaxLod;
+        uniform float uHazeMin;
         uniform vec3 uFogColor;
         uniform vec2 uFog;
         uniform float uFogDensity;
@@ -147,7 +156,7 @@ export class ImpostorLayer {
         uniform float uClipY;
         in vec2 vUv;
         in float vFog;
-        in float vWorldY;
+        in vec3 vWorld;
         out vec4 frag;
         vec3 toLinear(vec3 c) {
           return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
@@ -157,8 +166,16 @@ export class ImpostorLayer {
           return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
         }
         void main() {
-          if (vWorldY > uClipY) discard;
-          vec4 t = texture(uMap, vUv);
+          if (vWorld.y > uClipY) discard;
+          // Explicit LOD, clamped: grazing views drive the derivative-based
+          // mip selection deep enough to blend unrelated atlas slots (the
+          // "distant blue wall" smear). Capped, a slot only ever mixes with
+          // itself.
+          vec2 px = vUv * uAtlasPx;
+          vec2 ddx = dFdx(px);
+          vec2 ddy = dFdy(px);
+          float lod = 0.5 * log2(max(dot(ddx, ddx), max(dot(ddy, ddy), 1.0)));
+          vec4 t = textureLod(uMap, vUv, min(lod, uMaxLod));
           if (t.a < 0.5) discard; // void columns captured as transparent
           // Snapshots are captured with a NEUTRAL grade, so the live display
           // settings apply here exactly like they do to hires terrain.
@@ -166,7 +183,17 @@ export class ImpostorLayer {
           float l = dot(c, vec3(0.299, 0.587, 0.114));
           c = mix(vec3(l), c, uSaturation);
           c = max((c - 0.5) * uContrast + 0.5, vec3(0.0));
-          float f = smoothstep(uFog.x, uFog.y, vFog) * uFogDensity;
+          // Aerial perspective for remembered terrain: a top-down snapshot
+          // can't hold up viewed edge-on, so haze it by HORIZONTAL distance
+          // from the eye, scaled by how high the eye sits — top-down map
+          // views stay crystal clear, while a ground-level camera sees
+          // remembered mountains fade into the horizon like real draw
+          // distance instead of standing raw against the sky.
+          float camXZ = distance(vWorld.xz, cameraPosition.xz);
+          float above = max(cameraPosition.y - vWorld.y, 0.0);
+          float hazeNear = max(uHazeMin, above * 2.0);
+          float haze = smoothstep(hazeNear, hazeNear * 2.2, camXZ);
+          float f = clamp(max(smoothstep(uFog.x, uFog.y, vFog), haze) * uFogDensity, 0.0, 1.0);
           frag = vec4(toSRGB(mix(c, toLinear(uFogColor), f)), 1.0);
         }
       `,
@@ -185,6 +212,12 @@ export class ImpostorLayer {
   /** Snapshot resolution in pixels per tile. */
   get resolutionPx(): number {
     return this.resolution;
+  }
+
+  /** The radius hires tiles are guaranteed resident to — the impostor shader
+   *  keeps its grazing-angle aerial haze outside this ring. */
+  setHazeFloor(radius: number): void {
+    this.material.uniforms['uHazeMin']!.value = Math.max(radius, 1);
   }
 
   /** How far remembered terrain reaches from (x,z), in blocks — the radius the
@@ -313,10 +346,27 @@ export class ImpostorLayer {
     const n = GRID + 1;
     const heights = new Int16Array(n * n);
     const surf = p.surface;
+    // Windowed mean around each grid vertex, not a point sample: surface
+    // heights track the topmost block (canopy, water surface), so one tall
+    // tree point-sampled onto a 16-block cell reads as a raised blob from the
+    // side. Averaging the neighbourhood keeps the impostor at believable
+    // ground-ish height and softens shoreline stair-steps.
     const sample = (i: number, j: number): number => {
-      const cx = Math.min(Math.max(Math.round((i * tb) / GRID + originX - surf.originX), 0), surf.width - 1);
-      const cz = Math.min(Math.max(Math.round((j * tb) / GRID + originZ - surf.originZ), 0), surf.depth - 1);
-      return surf.height[cz * surf.width + cx]!;
+      const bx = Math.round((i * tb) / GRID) + originX - surf.originX;
+      const bz = Math.round((j * tb) / GRID) + originZ - surf.originZ;
+      let sum = 0;
+      let count = 0;
+      for (let dz = -8; dz <= 8; dz += 4) {
+        for (let dx = -8; dx <= 8; dx += 4) {
+          const cx = Math.min(Math.max(bx + dx, 0), surf.width - 1);
+          const cz = Math.min(Math.max(bz + dz, 0), surf.depth - 1);
+          const h = surf.height[cz * surf.width + cx]!;
+          if (h < 1) continue; // empty-column sentinel
+          sum += h;
+          count++;
+        }
+      }
+      return count === 0 ? 0 : Math.round(sum / count);
     };
     for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) heights[j * n + i] = sample(i, j);
     const idx: number[] = [];

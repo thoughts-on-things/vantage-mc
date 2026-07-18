@@ -273,7 +273,14 @@ export class TileManager {
     const res = mapMemory ?? 64;
     if (renderer && res > 0 && !options.manifest.lowres) {
       this.impostors = new ImpostorLayer(renderer, options.scene, options.material, this.tileBlocks, res);
+      this.applyHazeFloor();
     }
+  }
+
+  /** Keep the impostor haze floor tracking the guaranteed-hires radius (the
+   *  view distance, unless the tile budget's disc runs out first). */
+  private applyHazeFloor(): void {
+    this.impostors?.setHazeFloor(Math.min(this.opts.viewDistance, this.tileBlocks * Math.sqrt(this.opts.maxTiles / Math.PI)));
   }
 
   /** Tile span in blocks at a pyramid level (0 = hires). */
@@ -643,6 +650,7 @@ export class TileManager {
       }
       this.invalidate();
     }
+    this.applyHazeFloor(); // the guaranteed-hires disc moved with the budgets
     this.lastFocusX = Infinity; // force a re-plan on the next update()
     this.lastFocusZ = Infinity;
   }

@@ -115,6 +115,12 @@ export interface QuantizedSection {
   /** VTL8+: the tail's lightmap UVs in half-texel units, `2 * (vertexCount -
    *  lmStart)` values (delta coding already undone). */
   lmuv?: Uint16Array;
+  /** VTLA+: first cave-dark vertex of the vertex-lit head `[0, lmStart)`.
+   *  Vertices from here to `lmStart` face only sky-light-0 (non-water) cells —
+   *  a renderer may skip them while the camera is above ground. */
+  caveStart?: number;
+  /** VTLA+: first cave-dark vertex of the atlas-lit tail `[lmStart, V)`. */
+  caveLmStart?: number;
 }
 
 /** A tile's baked light+AO atlas. VTL8 expands its planar payload to RGBA;
@@ -128,9 +134,9 @@ export interface Lightmap {
   pixels: Uint8Array<ArrayBuffer>;
 }
 
-/** A VTL6/7/8/9 tile decoded without dequantization (see {@link QuantizedSection}). */
+/** A VTL6/7/8/9/A tile decoded without dequantization (see {@link QuantizedSection}). */
 export interface QuantizedTile {
-  magic: 'VTL6' | 'VTL7' | 'VTL8' | 'VTL9';
+  magic: 'VTL6' | 'VTL7' | 'VTL8' | 'VTL9' | 'VTLA';
   version: number;
   solid: QuantizedSection;
   fluid: QuantizedSection;
@@ -310,10 +316,13 @@ function readCompactSectionRaw(r: ByteReader): QuantizedSection {
 }
 
 /** Read a VTL8+ lit section: a VTL7 compact section with `lmStart` after the
- *  vertex count and the atlas tail's delta-coded lmuv after the biome ids. */
-function readLitSectionRaw(r: ByteReader): QuantizedSection {
+ *  vertex count and the atlas tail's delta-coded lmuv after the biome ids.
+ *  VTLA adds the two cave-partition boundaries after `lmStart`. */
+function readLitSectionRaw(r: ByteReader, withCave: boolean): QuantizedSection {
   const vertexCount = r.u32();
   const lmStart = r.u32();
+  const caveStart = withCave ? r.u32() : undefined;
+  const caveLmStart = withCave ? r.u32() : undefined;
   const uv = r.i16a(2 * vertexCount);
   const colors = r.u8a(4 * vertexCount);
   const normals = r.i8a(4 * vertexCount);
@@ -333,6 +342,7 @@ function readLitSectionRaw(r: ByteReader): QuantizedSection {
     colors, normals, layer, biome,
     indices: null,
     lmStart, lmuv,
+    ...(caveStart !== undefined ? { caveStart, caveLmStart } : {}),
   };
 }
 
@@ -437,16 +447,20 @@ function bakeVertexLight(sec: MeshSection, lm: Lightmap): void {
 export function parseTileQuantized(buffer: ArrayBuffer): QuantizedTile | null {
   const r = new ByteReader(buffer);
   const magic = r.magic();
-  if (magic !== TILE_MAGIC.VTL6 && magic !== TILE_MAGIC.VTL7 && magic !== TILE_MAGIC.VTL8 && magic !== TILE_MAGIC.VTL9) return null;
+  if (
+    magic !== TILE_MAGIC.VTL6 && magic !== TILE_MAGIC.VTL7 && magic !== TILE_MAGIC.VTL8 &&
+    magic !== TILE_MAGIC.VTL9 && magic !== TILE_MAGIC.VTLA
+  ) return null;
   r.off = 4;
   const version = r.u32();
   const readSection =
-    magic === TILE_MAGIC.VTL8 || magic === TILE_MAGIC.VTL9 ? readLitSectionRaw
+    magic === TILE_MAGIC.VTL8 || magic === TILE_MAGIC.VTL9 || magic === TILE_MAGIC.VTLA
+      ? (reader: ByteReader) => readLitSectionRaw(reader, magic === TILE_MAGIC.VTLA)
     : magic === TILE_MAGIC.VTL7 ? readCompactSectionRaw
     : readQuantizedSectionRaw;
   const solid = readSection(r);
   const fluid = readSection(r);
-  const lightmap = magic === TILE_MAGIC.VTL9 ? readPackedLightmap(r)
+  const lightmap = magic === TILE_MAGIC.VTL9 || magic === TILE_MAGIC.VTLA ? readPackedLightmap(r)
     : magic === TILE_MAGIC.VTL8 ? readLightmap(r)
     : undefined;
   const surface = readSurface(r);
@@ -490,12 +504,15 @@ export function parseTile(buffer: ArrayBuffer): DecodedTile {
   r.off = 4;
   const version = r.u32();
 
-  // VTL8/9 = VTL7 + a per-tile lightmap atlas for the greedy vertex tail;
-  // VTL9 keeps the upload losslessly packed in compact RG8.
-  if (magic === TILE_MAGIC.VTL8 || magic === TILE_MAGIC.VTL9) {
-    const solid = expandSection(readLitSectionRaw(r));
-    const fluid = expandSection(readLitSectionRaw(r));
-    const lightmap = magic === TILE_MAGIC.VTL9 ? readPackedLightmap(r) : readLightmap(r);
+  // VTL8/9/A = VTL7 + a per-tile lightmap atlas for the greedy vertex tail;
+  // VTL9+ keeps the upload losslessly packed in compact RG8, VTLA adds the
+  // cave-partition boundaries (the classic expand path draws everything, so
+  // it only needs to skip past them).
+  if (magic === TILE_MAGIC.VTL8 || magic === TILE_MAGIC.VTL9 || magic === TILE_MAGIC.VTLA) {
+    const withCave = magic === TILE_MAGIC.VTLA;
+    const solid = expandSection(readLitSectionRaw(r, withCave));
+    const fluid = expandSection(readLitSectionRaw(r, withCave));
+    const lightmap = magic === TILE_MAGIC.VTL8 ? readLightmap(r) : readPackedLightmap(r);
     // The atlas-lit tail carries placeholder vertex light; bake the atlas'
     // CORNER texels back into per-vertex values so non-atlas renderers (the
     // classic buildTerrain path) still light this geometry. (The streaming
@@ -572,5 +589,5 @@ export function parseTile(buffer: ArrayBuffer): DecodedTile {
     };
   }
 
-  throw new Error(`vantage: unrecognized tile magic "${magic}" (expected VTL1–VTL7)`);
+  throw new Error(`vantage: unrecognized tile magic "${magic}" (expected VTL1–VTLA)`);
 }

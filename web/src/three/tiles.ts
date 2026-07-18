@@ -29,7 +29,7 @@ import {
   type WorldManifest,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
-import { buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, isSharedQuadIndex, sharedQuadIndex, type TileMeshes } from './terrain.js';
+import { applyCaveRange, buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, isSharedQuadIndex, sharedQuadIndex, type TileMeshes } from './terrain.js';
 import { admitTiles, nearbyTiles } from './streaming.js';
 
 export interface TileManagerOptions {
@@ -208,6 +208,10 @@ export class TileManager {
   /** Learned tile weights survive eviction and make future admission byte-aware. */
   private readonly sizeHints = new Map<string, number>();
   private averageHiresBytes = 12 * 1024 * 1024;
+  /** Whether resident tiles draw their cave-dark tails (VTLA). The viewer's
+   *  cave policy toggles this off while the camera is above ground with the
+   *  depth slice closed. */
+  private caveGeometry = true;
   private focusX = 0;
   private focusZ = 0;
 
@@ -563,6 +567,23 @@ export class TileManager {
     this.invalidate();
   }
 
+  /** Show or hide every resident tile's cave-dark geometry (VTLA tiles order
+   *  it as a contiguous tail per mesh, so hiding is a shorter draw range —
+   *  same draw calls, fewer vertices shaded). Tiles built while hidden come up
+   *  hidden. Tiles without a cave tail (older formats, all-surface tiles) are
+   *  untouched. Returns whether anything changed (the caller redraws). */
+  setCaveGeometry(visible: boolean): boolean {
+    if (this.caveGeometry === visible) return false;
+    this.caveGeometry = visible;
+    for (const rec of this.records.values()) {
+      if (rec.level !== 0) continue; // lowres heightfields carry no caves
+      applyCaveRange(rec.terrain, visible);
+      applyCaveRange(rec.terrainLm, visible);
+      applyCaveRange(rec.water, visible);
+    }
+    return true;
+  }
+
   /** Live-tune streaming (view distance, tile budget, fetch concurrency).
    *  Takes effect on the next update(): the plan is recomputed from scratch. */
   configure(settings: { viewDistance?: number; maxTiles?: number; concurrency?: number; maxBytes?: number }): void {
@@ -727,6 +748,13 @@ export class TileManager {
       releaseAfterUpload(meshes.terrain.geometry);
       if (meshes.terrainLm) releaseAfterUpload(meshes.terrainLm.geometry);
       if (meshes.water) releaseAfterUpload(meshes.water.geometry);
+      // Tiles built while cave geometry is hidden enter the scene hidden —
+      // the draw range must be surface-only BEFORE the first draw.
+      if (!this.caveGeometry) {
+        applyCaveRange(meshes.terrain, false);
+        applyCaveRange(meshes.terrainLm, false);
+        applyCaveRange(meshes.water, false);
+      }
       rec.terrain = meshes.terrain;
       rec.terrainLm = meshes.terrainLm;
       rec.lightmapTex = meshes.lightmapTex;

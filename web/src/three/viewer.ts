@@ -119,6 +119,13 @@ export interface VantageViewerOptions {
    *  frame it arrives. Default `true`; set `false` to render every frame
    *  (e.g. when driving external per-frame effects off the viewer's scene). */
   renderOnDemand?: boolean;
+  /** Cave-geometry draw policy for VTLA tiles (whose cave-dark quads sit in a
+   *  toggleable tail per mesh). `'auto'` skips them whenever the camera is
+   *  above ground with the depth slice closed — from up there they are hidden
+   *  behind terrain and cost pure vertex work — and brings them back the
+   *  moment the slice opens or the camera dips underground. `'always'` keeps
+   *  every quad drawn. Default `'auto'`. */
+  caveGeometry?: 'auto' | 'always';
 }
 
 /** A tile source: a URL to fetch, a raw buffer, or already-decoded data. */
@@ -294,6 +301,11 @@ export class VantageViewer {
   /** The dark "unexplored rock" floor under a sliced world. */
   private slicePlane: THREE.Mesh | null = null;
 
+  // Cave-geometry draw policy (VTLA tiles): whether cave-dark tails are in the
+  // draw ranges right now, re-evaluated each frame under 'auto'.
+  private caveMode: 'auto' | 'always' = 'auto';
+  private cavesShown = true;
+
   // Live lighting appearance (applied to the shader on load and on change).
   private light: Required<LightSettings> = { ...DEFAULT_LIGHT };
   // Live display fidelity (shader uniforms + render scale).
@@ -338,7 +350,9 @@ export class VantageViewer {
       streaming: options.streaming ?? {},
       urlState: options.urlState ?? false,
       renderOnDemand: options.renderOnDemand ?? true,
+      caveGeometry: options.caveGeometry ?? 'auto',
     };
+    this.caveMode = this.options.caveGeometry;
     if (options.light) this.light = { ...this.light, ...options.light };
     if (options.display) this.display = { ...this.display, ...options.display };
 
@@ -455,6 +469,7 @@ export class VantageViewer {
     this.hasAnims = texData.anims.length > 0;
     this.lastTextureLayers = manifest.textureLayers ?? texData.layers;
     this.tile = null;
+    this.cavesShown = true; // a fresh manager starts with full draw ranges
     this.tiles = new TileManager({
       manifest,
       fetch: source.fetch,
@@ -504,7 +519,7 @@ export class VantageViewer {
     this._biomes = [];
     this.emitter.emit('load', {
       // Streamed worlds: the tile format follows the manifest schema version.
-      magic: manifest.format >= 5 ? 'VTL9' : manifest.format >= 4 ? 'VTL8' : manifest.format >= 3 ? 'VTL7' : 'VTL6',
+      magic: manifest.format >= 6 ? 'VTLA' : manifest.format >= 5 ? 'VTL9' : manifest.format >= 4 ? 'VTL8' : manifest.format >= 3 ? 'VTL7' : 'VTL6',
       vertexCount: 0,
       triangleCount: 0,
       size,
@@ -1364,6 +1379,44 @@ export class VantageViewer {
     this.needsRender = true;
   }
 
+  /** Set the cave-geometry draw policy (see the option of the same name).
+   *  Takes effect on the next frame. */
+  setCaveGeometry(mode: 'auto' | 'always'): void {
+    this.caveMode = mode;
+    this.invalidate();
+  }
+
+  /** The current cave-geometry draw policy. */
+  get caveGeometry(): 'auto' | 'always' {
+    return this.caveMode;
+  }
+
+  /** Re-evaluate whether cave-dark tails belong in the draw ranges. Above
+   *  ground with the depth slice closed they are provably behind terrain from
+   *  the camera's side of the surface, so 'auto' trims every tile's draw range
+   *  to its surface prefix; opening the slice or descending underground brings
+   *  them straight back. The underground test rides the streamed surface maps
+   *  (the same data the terrain-following pivot uses) with a couple of blocks
+   *  of hysteresis so skimming the terrain doesn't flicker the ranges. */
+  private applyCavePolicy(): void {
+    if (!this.tiles) return;
+    let show = true;
+    if (this.caveMode === 'always' || this.sliceActive) {
+      show = true;
+    } else {
+      const cam = this.camera.position;
+      const ground = this.tiles.heightAt(cam.x, cam.z);
+      // Below the local surface = inside terrain (a cave, a ravine overhang).
+      // Unknown ground (nothing resident yet) counts as above ground.
+      const margin = this.cavesShown ? 2.5 : 0.5;
+      show = ground !== null && cam.y < ground + margin;
+    }
+    if (show !== this.cavesShown) {
+      this.cavesShown = show;
+      if (this.tiles.setCaveGeometry(show)) this.needsRender = true;
+    }
+  }
+
   /** Idle animation cadence (ms). Water/lava bake at a 2-tick frametime
    *  (100 ms), so a 10 fps tick steps them at exactly their authored rate. */
   private static readonly ANIM_TICK_MS = 100;
@@ -1425,6 +1478,7 @@ export class VantageViewer {
       }
     }
 
+    this.applyCavePolicy();
     this.pickHover();
 
     // Render on demand: skip the draw entirely when nothing changed. Animated

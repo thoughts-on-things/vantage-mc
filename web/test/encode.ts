@@ -285,14 +285,19 @@ export function encodeVTL7(): ArrayBuffer {
 }
 
 /** One VTL8 lit section: a compact section with lm_start + a delta-coded
- *  lmuv tail (mirrors the Zig writer). */
+ *  lmuv tail (mirrors the Zig writer). VTLA adds the two cave-partition
+ *  boundaries after lm_start. */
 export interface LSectionInput extends CSectionInput {
   lmStart: number;
   lmuv: number[]; // 2 * (V - lmStart), ABSOLUTE half-texel values
+  /** VTLA: first cave-dark vertex of the head / of the atlas tail. */
+  caveStart?: number;
+  caveLmStart?: number;
 }
 
 function writeLitSection(w: Writer, V: number, s: LSectionInput): void {
   w.u32(V).u32(s.lmStart);
+  if (s.caveStart !== undefined) w.u32(s.caveStart).u32(s.caveLmStart ?? V);
   w.i16a(s.uvQ).u8a(s.colors).i8a(s.normals);
   w.f32a([...s.min, ...s.scale]);
   const zz: number[] = [];
@@ -313,11 +318,14 @@ function writeLitSection(w: Writer, V: number, s: LSectionInput): void {
   while (w.off % 4 !== 0) w.u8a([0]); // tail pad to a 4-byte boundary
 }
 
-function encodeLightmappedTile(magic: 'VTL8' | 'VTL9', version: 8 | 9): ArrayBuffer {
+function encodeLightmappedTile(magic: 'VTL8' | 'VTL9' | 'VTLA', version: 8 | 9 | 10): ArrayBuffer {
   const w = new Writer();
   w.magic(magic).u32(version);
+  const withCave = magic === 'VTLA';
   // Two quads: a vertex-lit one, then an atlas-lit one whose 1×2-block rect
   // sits at atlas texels (1,0)..(2,1) — lmuv half-texel corners 3/5 and 1/3.
+  // VTLA marks the vertex-lit quad cave-dark (caveStart 0) and the atlas-lit
+  // quad surface (caveLmStart 8), exercising both boundaries non-trivially.
   const solid: LSectionInput = {
     uvQ: Array.from({ length: 16 }, (_, i) => (i % 2) * 128),
     colors: Array.from({ length: 32 }, () => 255),
@@ -329,10 +337,16 @@ function encodeLightmappedTile(magic: 'VTL8' | 'VTL9', version: 8 | 9): ArrayBuf
     biome: [1, 1, 1, 1, 2, 2, 2, 2],
     lmStart: 4,
     lmuv: [3, 1, 3, 3, 5, 3, 5, 1],
+    ...(withCave ? { caveStart: 0, caveLmStart: 8 } : {}),
   };
   writeLitSection(w, 8, solid);
-  writeLitSection(w, 0, { ...solid, uvQ: [], colors: [], normals: [], posQ: [], layer: [], biome: [], lmStart: 0, lmuv: [] });
-  // 4×2 atlas: sky ramps 0..7, block=2, AO=255.
+  writeLitSection(w, 0, {
+    ...solid,
+    uvQ: [], colors: [], normals: [], posQ: [], layer: [], biome: [], lmStart: 0, lmuv: [],
+    ...(withCave ? { caveStart: 0, caveLmStart: 0 } : {}),
+  });
+  // 4×2 atlas: sky ramps 0..7, block=2, AO=255. (VTL9 and VTLA share the
+  // packed RG8 planes.)
   w.u32(4).u32(2);
   if (magic === 'VTL8') {
     w.u8a([0, 17, 34, 51, 68, 85, 102, 119]); // sky plane
@@ -356,6 +370,10 @@ export function encodeVTL8(): ArrayBuffer {
 
 export function encodeVTL9(): ArrayBuffer {
   return encodeLightmappedTile('VTL9', 9);
+}
+
+export function encodeVTLA(): ArrayBuffer {
+  return encodeLightmappedTile('VTLA', 10);
 }
 
 export interface EncodedAnim {

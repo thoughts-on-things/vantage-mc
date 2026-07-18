@@ -206,6 +206,27 @@ export function isSharedQuadIndex(attr: THREE.BufferAttribute | null): boolean {
   return attr !== null && attr === sharedQuadIndexAttr;
 }
 
+/** Geometry userData key for a mesh's cave draw ranges (index counts). */
+const CAVE_RANGE = 'vantageCaveRange';
+
+/** Remember a mesh's two draw ranges: `full` covers every quad, `surface`
+ *  stops before the cave-dark tail (VTLA tiles order cave quads last). Only
+ *  tagged when the tail is non-empty, so untagged meshes are a no-op to
+ *  {@link applyCaveRange}. Index counts, for the shared-quad-index drawRange. */
+function tagCaveRange(mesh: THREE.Mesh, fullVerts: number, surfaceVerts: number): void {
+  if (surfaceVerts >= fullVerts) return; // no cave tail — nothing to toggle
+  mesh.geometry.userData[CAVE_RANGE] = { full: (fullVerts / 4) * 6, surface: (surfaceVerts / 4) * 6 };
+}
+
+/** Point a tagged mesh's draw range at its full geometry or its surface-only
+ *  prefix. Draw-range state only — no buffers move, no draw calls are added;
+ *  hiding a tile's cave tail just makes its one draw shorter. */
+export function applyCaveRange(mesh: THREE.Mesh | undefined, showCaves: boolean): void {
+  const range = mesh?.geometry.userData[CAVE_RANGE] as { full: number; surface: number } | undefined;
+  if (!range) return;
+  mesh!.geometry.setDrawRange(0, showCaves ? range.full : range.surface);
+}
+
 /** Build one mesh from a quantized section: every attribute is the on-disk
  *  typed-array view uploaded verbatim (u16 positions, i8 normals+light, u16
  *  layer/biome); the shared QUANTIZED shader dequantizes per vertex, fed the
@@ -284,6 +305,13 @@ export function buildQuantizedTileMeshes(
   const head = hasLm ? sliceSection(solid, 0, lmStart) : solid;
   const terrain = quantizedMesh(head, material);
   const bounds = terrain.geometry.boundingBox!.clone();
+  // VTLA cave partition: each mesh's cave-dark quads are a contiguous tail of
+  // its segment, so the surface-only view is a draw-range prefix. Only tag a
+  // mesh that maps onto exactly one segment (the degenerate no-lmMaterial
+  // path draws the whole solid section as one mesh and keeps the full range).
+  if (solid.caveStart !== undefined && head.vertexCount === lmStart) {
+    tagCaveRange(terrain, lmStart, solid.caveStart);
+  }
 
   let terrainLm: THREE.Mesh | undefined;
   let lightmapTex: THREE.DataTexture | undefined;
@@ -297,6 +325,9 @@ export function buildQuantizedTileMeshes(
       packed: lm.packed,
     });
     terrainLm.geometry.setAttribute('almuv', new THREE.BufferAttribute(solid.lmuv!, 2, false));
+    if (solid.caveLmStart !== undefined) {
+      tagCaveRange(terrainLm, solid.vertexCount - lmStart, solid.caveLmStart - lmStart);
+    }
   }
 
   let water: THREE.Mesh | undefined;
@@ -304,6 +335,9 @@ export function buildQuantizedTileMeshes(
     water = quantizedMesh(tile.fluid, waterMaterial);
     water.renderOrder = 1; // after opaque
     bounds.union(water.geometry.boundingBox!); // water can sit above the highest solid block
+    if (tile.fluid.caveStart !== undefined) {
+      tagCaveRange(water, tile.fluid.vertexCount, tile.fluid.caveStart);
+    }
   }
   return { terrain, terrainLm, lightmapTex, water, bounds };
 }

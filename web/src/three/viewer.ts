@@ -91,6 +91,13 @@ export interface StreamingSettings {
   concurrency?: number;
   /** Estimated CPU/GPU tile residency budget, in bytes. Default `512 MiB`. */
   maxBytes?: number;
+  /** Map memory for worlds WITHOUT a baked lowres pyramid (live bakes,
+   *  `vantage server`): tiles leaving the streaming ring are snapshotted
+   *  top-down and persist as cheap textured impostors, so everywhere the
+   *  camera has been stays on the map when zoomed out. The value is the
+   *  snapshot resolution in pixels per tile (`0` = off). Default `64`
+   *  (remembers 1024 tiles in a 2048² atlas ≈ 22 MiB of GPU memory). */
+  mapMemory?: number;
 }
 
 export interface VantageViewerOptions {
@@ -483,6 +490,9 @@ export class VantageViewer {
       // tile's insertion on the atlas covering its layers (a no-op once the
       // atlas is complete). Returns the layer count now loaded.
       ...(manifest.rendering ? { ensureAtlas: (n: number) => this.ensureAtlasLayers(source, n).then(() => this.lastTextureLayers) } : {}),
+      // Map memory: pyramid-less worlds snapshot evicted tiles so explored
+      // terrain persists on the zoomed-out map (see StreamingSettings).
+      renderer: this.renderer,
       ...this.options.streaming,
     });
 
@@ -491,6 +501,9 @@ export class VantageViewer {
     this.setHeightSampler(this.tiles.heightAt);
     this.tilesUnsub = this.tiles.on('change', (stats) => {
       this.needsRender = true; // tiles entered/left the scene (or coverage flipped)
+      // Map memory can extend the drawable frontier past the hires ring —
+      // keep the zoom range and fog wall tracking it as snapshots land.
+      if (!this.manifest?.lowres) this.applyViewLimits();
       this.emitter.emit('stats', stats);
       // The legend settles as tiles stream; throttle the churn, then always
       // emit the final state once the queue drains.
@@ -731,8 +744,11 @@ export class VantageViewer {
    *  fog retreats to the world edge — a faint horizon haze, never a wall. The
    *  hires→lowres seam needs no hiding: finer data simply overlays coarser.
    *
-   *  Without one (format 1), zoom and fog hug the hires ring so the map never
-   *  becomes a field of holes: solid haze right where tiles stop. */
+   *  Without one, zoom and fog hug the drawable frontier: the hires ring on a
+   *  fresh session (so the map never becomes a field of holes — solid haze
+   *  right where tiles stop), growing to the remembered map-memory extent as
+   *  the camera explores. Re-applied on tile 'change' events, so the fog wall
+   *  recedes as snapshots land. */
   private applyViewLimits(): void {
     if (!this.tiles || !this.shader) return;
     const viewDistance = this.tiles.viewDistance;
@@ -743,10 +759,11 @@ export class VantageViewer {
       this.camera.far = Math.min(Math.max(8000, span * 2.5), 250000);
       fog.set(span * 0.9, span * 1.8);
     } else {
-      const r = this.streamRadius();
-      this.controls.maxDistance = viewDistance * 2.2;
-      this.camera.far = Math.max(8000, viewDistance * 6);
-      fog.set(r * 0.72, r * 1.05);
+      const focus = this.controls.flyMode ? this.camera.position : this.controls.position;
+      const reach = Math.max(this.streamRadius(), this.tiles.mapMemoryExtent(focus.x, focus.z));
+      this.controls.maxDistance = Math.min(Math.max(reach * 2.2, viewDistance * 2.2), 60000);
+      this.camera.far = Math.max(8000, reach * 6);
+      fog.set(reach * 0.72, reach * 1.05);
     }
     this.camera.updateProjectionMatrix();
   }
@@ -1166,6 +1183,7 @@ export class VantageViewer {
       maxTiles: this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 120,
       concurrency: this.options.streaming.concurrency ?? 4,
       maxBytes: this.tiles?.maxBytes ?? this.options.streaming.maxBytes ?? 512 * 1024 * 1024,
+      mapMemory: this.options.streaming.mapMemory ?? 64,
     };
   }
 

@@ -748,7 +748,11 @@ export class VantageViewer {
    *  fresh session (so the map never becomes a field of holes — solid haze
    *  right where tiles stop), growing to the remembered map-memory extent as
    *  the camera explores. Re-applied on tile 'change' events, so the fog wall
-   *  recedes as snapshots land. */
+   *  recedes as snapshots land.
+   *
+   *  Both branches share hard sanity ceilings (60k zoom, 250k far plane):
+   *  beyond them depth precision and control feel degrade faster than any
+   *  real overview gains — a 60k-block eye already frames a 100k-block map. */
   private applyViewLimits(): void {
     if (!this.tiles || !this.shader) return;
     const viewDistance = this.tiles.viewDistance;
@@ -762,7 +766,7 @@ export class VantageViewer {
       const focus = this.controls.flyMode ? this.camera.position : this.controls.position;
       const reach = Math.max(this.streamRadius(), this.tiles.mapMemoryExtent(focus.x, focus.z));
       this.controls.maxDistance = Math.min(Math.max(reach * 2.2, viewDistance * 2.2), 60000);
-      this.camera.far = Math.max(8000, reach * 6);
+      this.camera.far = Math.min(Math.max(8000, reach * 6), 250000);
       fog.set(reach * 0.72, reach * 1.05);
     }
     this.camera.updateProjectionMatrix();

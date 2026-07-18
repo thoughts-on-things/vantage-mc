@@ -33,7 +33,7 @@ export function selectRenderProfile(mode: PerformanceMode, nativeCores: number):
     return {
       name: 'efficient',
       maxPixelRatio: Math.min(1.35, dpr),
-      streaming: { viewDistance: 640, maxTiles: 84, concurrency: Math.max(2, Math.min(4, cores - 1)), maxBytes: 320 * MiB },
+      streaming: { viewDistance: 640, maxTiles: 84, concurrency: Math.max(2, Math.min(4, cores - 1)), maxBytes: 320 * MiB, mapMemory: 32 },
       display: BASE_DISPLAY,
     };
   }
@@ -41,14 +41,14 @@ export function selectRenderProfile(mode: PerformanceMode, nativeCores: number):
     return {
       name: 'high',
       maxPixelRatio: Math.min(2.5, dpr),
-      streaming: { viewDistance: 1408, maxTiles: 400, concurrency: Math.min(12, Math.max(6, Math.floor(cores * 0.75))), maxBytes: 1024 * MiB },
+      streaming: { viewDistance: 1408, maxTiles: 400, concurrency: Math.min(12, Math.max(6, Math.floor(cores * 0.75))), maxBytes: 1024 * MiB, mapMemory: 128 },
       display: { ...BASE_DISPLAY, renderScale: dpr < 1.5 ? 1.15 : 1 },
     };
   }
   return {
     name: 'balanced',
     maxPixelRatio: Math.min(1.75, dpr),
-    streaming: { viewDistance: 768, maxTiles: 120, concurrency: Math.min(6, Math.max(3, Math.floor(cores / 2))), maxBytes: 512 * MiB },
+    streaming: { viewDistance: 768, maxTiles: 120, concurrency: Math.min(6, Math.max(3, Math.floor(cores / 2))), maxBytes: 512 * MiB, mapMemory: 64 },
     display: BASE_DISPLAY,
   };
 }

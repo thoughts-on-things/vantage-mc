@@ -360,7 +360,9 @@ export class TileManager {
 
     // Hires: sparse regular-grid lookup makes planning O(visible tiles), then a
     // weighted admission pass respects both count and actual geometry budgets.
-    let lowBytes = 0;
+    // The lowres records and the map-memory atlas spend the same budget the
+    // stats report, so admission can't overshoot maxBytes by their cost.
+    let lowBytes = this.impostors?.gpuBytes ?? 0;
     for (const rec of this.records.values()) if (rec.level > 0) lowBytes += rec.memoryBytes;
     const hiresBytes = Math.max(1, maxBytes - lowBytes);
     const desired = admitTiles(
@@ -919,7 +921,9 @@ export class TileManager {
    *  leave first; one nearest tile is always kept so an oversized outlier does
    *  not create an unload/refetch loop. Learned weights make the next plan fit. */
   private trimToMemoryBudget(): void {
-    let total = 0;
+    // The map-memory atlas is a fixed allocation inside the same budget the
+    // stats report — tiles trim around it, keeping enforcement consistent.
+    let total = this.impostors?.gpuBytes ?? 0;
     const hires: { key: string; rec: Record_; d: number }[] = [];
     for (const [key, rec] of this.records) {
       total += rec.memoryBytes;

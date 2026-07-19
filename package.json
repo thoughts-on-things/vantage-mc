@@ -1,7 +1,7 @@
 {
   "name": "vantage-mc-workspace",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Development entrypoint for Vantage Minecraft",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

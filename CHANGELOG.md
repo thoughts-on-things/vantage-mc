@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.7.0...v0.8.0) (2026-07-19)
+
+
+### Features
+
+* cave-partitioned draw ranges (VTLA) + client-side map memory for streamed worlds ([#51](https://github.com/thoughts-on-things/vantage-mc/issues/51)) ([4052443](https://github.com/thoughts-on-things/vantage-mc/commit/4052443cfc1a7913ac285b8275486317925ecbf9))
+
 ## [0.7.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.6.0...v0.7.0) (2026-07-17)
 
 

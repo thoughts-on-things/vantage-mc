@@ -30,6 +30,11 @@ export const TILE_MAGIC = {
   /** VTL8 geometry + a losslessly packed RG8 lightmap (sky/block nibbles,
    *  full-byte AO), stored as gzip-friendly planes. */
   VTL9: 'VTL9',
+  /** VTL9 + the cave partition: cave-dark quads (faces only sky-light-0,
+   *  non-water cells can see) sit at the END of each lighting segment, with
+   *  the boundaries in the section header — a viewer can draw a surface-only
+   *  prefix while the camera is above ground. ("A" = 10.) */
+  VTLA: 'VTLA',
 } as const;
 
 export type TileMagic = (typeof TILE_MAGIC)[keyof typeof TILE_MAGIC];

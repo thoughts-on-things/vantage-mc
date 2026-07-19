@@ -29,7 +29,8 @@ import {
   type WorldManifest,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
-import { buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, isSharedQuadIndex, sharedQuadIndex, type TileMeshes } from './terrain.js';
+import { ImpostorLayer } from './impostors.js';
+import { applyCaveRange, buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, isSharedQuadIndex, sharedQuadIndex, type TileMeshes } from './terrain.js';
 import { admitTiles, nearbyTiles } from './streaming.js';
 
 export interface TileManagerOptions {
@@ -68,6 +69,17 @@ export interface TileManagerOptions {
    *  atlas. Returns the atlas layer count now loaded. Omitted for a
    *  static/complete render, whose atlas never grows. */
   ensureAtlas?: (layers: number) => Promise<number>;
+  /** The renderer, enabling map memory for worlds WITHOUT a lowres pyramid
+   *  (live bakes, `vantage server`): evicted tiles are snapshotted into a
+   *  shared atlas and persist as cheap textured impostors, so everywhere the
+   *  camera has been stays visible when zoomed out. See `mapMemory`. */
+  renderer?: THREE.WebGLRenderer;
+  /** Map-memory impostor resolution in pixels per (128-block) tile — the
+   *  quality knob for remembered terrain. `0` disables. Default `64`
+   *  (a 2048² atlas remembering 1024 tiles ≈ 22 MB of GPU memory). Ignored
+   *  when the manifest ships a lowres pyramid (that covers the whole world
+   *  already) or without `renderer`. */
+  mapMemory?: number;
 }
 
 /** Live totals across resident tiles. */
@@ -80,6 +92,9 @@ export interface TileStats {
   total: number;
   /** Lowres LOD tiles resident. */
   lowres: number;
+  /** Tiles remembered as map-memory impostors (streamed worlds without a
+   *  lowres pyramid). */
+  remembered: number;
   vertexCount: number;
   triangleCount: number;
   /** Compressed bytes fetched and resident. */
@@ -168,9 +183,14 @@ function textureBytes(texture: THREE.DataTexture | undefined): number {
 }
 
 export class TileManager {
-  private readonly opts: Required<Omit<TileManagerOptions, 'lowresMaterial' | 'lmMaterial' | 'ensureAtlas'>>;
+  private readonly opts: Required<Omit<TileManagerOptions, 'lowresMaterial' | 'lmMaterial' | 'ensureAtlas' | 'renderer' | 'mapMemory'>>;
   private readonly lowresMaterial: THREE.ShaderMaterial | null;
   private readonly lmMaterial: THREE.ShaderMaterial | null;
+  /** Map memory (impostor snapshots of evicted tiles); null when the world
+   *  ships a lowres pyramid, when disabled, or without a renderer. */
+  private impostors: ImpostorLayer | null = null;
+  /** Kept for live map-memory reconfiguration (resolution changes). */
+  private readonly renderer: THREE.WebGLRenderer | null;
   /** Widens the shared atlas to cover a tile's layers before it's drawn (live
    *  renders only); null when the atlas is complete. */
   private readonly ensureAtlas: ((layers: number) => Promise<number>) | null;
@@ -208,6 +228,10 @@ export class TileManager {
   /** Learned tile weights survive eviction and make future admission byte-aware. */
   private readonly sizeHints = new Map<string, number>();
   private averageHiresBytes = 12 * 1024 * 1024;
+  /** Whether resident tiles draw their cave-dark tails (VTLA). The viewer's
+   *  cave policy toggles this off while the camera is above ground with the
+   *  depth slice closed. */
+  private caveGeometry = true;
   private focusX = 0;
   private focusZ = 0;
 
@@ -219,7 +243,7 @@ export class TileManager {
   private maxY = 320;
 
   constructor(options: TileManagerOptions) {
-    const { lowresMaterial, lmMaterial, ensureAtlas, ...rest } = options;
+    const { lowresMaterial, lmMaterial, ensureAtlas, renderer, mapMemory, ...rest } = options;
     this.opts = {
       viewDistance: 768,
       // Sized to fill the whole view-distance disc for 128-block tiles
@@ -243,6 +267,27 @@ export class TileManager {
     for (const lvl of this.lowLevels) {
       this.lowIndex.set(lvl.level, new Map(lvl.tiles.map((t) => [tileKey(t.x, t.z), t])));
     }
+    // Map memory: only worth spinning up when nothing else covers the world
+    // beyond the streaming ring (a baked lowres pyramid does that better).
+    this.renderer = renderer ?? null;
+    const res = mapMemory ?? 64;
+    if (renderer && res > 0 && !options.manifest.lowres) {
+      this.impostors = new ImpostorLayer(renderer, options.scene, options.material, this.tileBlocks, res, this.readySurface);
+      this.applyHazeFloor();
+    }
+  }
+
+  /** Surface map of a fully-streamed resident hires tile (the impostor layer
+   *  stitches remembered rims onto live terrain with it). */
+  private readonly readySurface = (key: string): SurfaceMap | undefined => {
+    const rec = this.records.get(key);
+    return rec?.level === 0 && rec.state === 'ready' ? rec.surface : undefined;
+  };
+
+  /** Keep the impostor haze floor tracking the guaranteed-hires radius (the
+   *  view distance, unless the tile budget's disc runs out first). */
+  private applyHazeFloor(): void {
+    this.impostors?.setHazeFloor(Math.min(this.opts.viewDistance, this.tileBlocks * Math.sqrt(this.opts.maxTiles / Math.PI)));
   }
 
   /** Tile span in blocks at a pyramid level (0 = hires). */
@@ -273,6 +318,12 @@ export class TileManager {
     this.focusZ = focusZ;
     this.flushOne();
     this.retrySweep();
+    // Drain one pending map-memory snapshot per frame (bounded GPU work).
+    if (this.impostors?.update(focusX, focusZ)) {
+      this.coverageDirty = true;
+      this.invalidate();
+      this.emitter.emit('change', this.stats);
+    }
     // Retire finished fades: the tile is now fully opaque, so the lowres
     // underlay below it can finally be hidden (coverage re-runs).
     if (this.fadingKeys.size > 0) {
@@ -309,7 +360,9 @@ export class TileManager {
 
     // Hires: sparse regular-grid lookup makes planning O(visible tiles), then a
     // weighted admission pass respects both count and actual geometry budgets.
-    let lowBytes = 0;
+    // The lowres records and the map-memory atlas spend the same budget the
+    // stats report, so admission can't overshoot maxBytes by their cost.
+    let lowBytes = this.impostors?.gpuBytes ?? 0;
     for (const rec of this.records.values()) if (rec.level > 0) lowBytes += rec.memoryBytes;
     const hiresBytes = Math.max(1, maxBytes - lowBytes);
     const desired = admitTiles(
@@ -415,6 +468,9 @@ export class TileManager {
       this.opts.scene.add(rec.terrain!);
       if (rec.terrainLm) this.opts.scene.add(rec.terrainLm);
       if (rec.water) this.opts.scene.add(rec.water);
+      // Remembered rims meet the live disc: snap adjacent impostor edges onto
+      // this tile's real surface heights so the fidelity boundary doesn't step.
+      if (rec.level === 0) this.impostors?.onHiresReady(rec.ref.x, rec.ref.z, rec.surface);
       this.coverageDirty = true;
       this.invalidate();
       this.emitter.emit('change', this.stats);
@@ -471,6 +527,9 @@ export class TileManager {
     for (const [key, rec] of this.records) {
       if (rec.level === 0 && rec.state === 'ready' && !this.fadingKeys.has(key)) shown.add(tileKey(rec.ref.x, rec.ref.z));
     }
+    // Map-memory impostors hide under exactly the hires tiles that cover them
+    // (and pop back the moment one unloads).
+    this.impostors?.applyCoverage(shown);
     let finerIndex: { has(key: string): boolean } = this.index;
     for (const lvl of this.lowLevels) {
       const shownHere = new Set<string>();
@@ -518,6 +577,8 @@ export class TileManager {
         this.index.delete(key);
         const rec = this.records.get(key);
         if (rec) this.unload(key, rec);
+        // Gone from the manifest = gone from the world; forget the snapshot too.
+        this.impostors?.remove(key);
         changed = true;
       }
     }
@@ -557,21 +618,65 @@ export class TileManager {
     const levels = [...lowres.levels].sort((a, b) => a.level - b.level);
     this.lowLevels.push(...levels);
     for (const lvl of levels) this.lowIndex.set(lvl.level, new Map(lvl.tiles.map((t) => [tileKey(t.x, t.z), t])));
+    // The baked pyramid covers the whole world at real fidelity — retire the
+    // provisional map memory in its favour.
+    this.impostors?.dispose();
+    this.impostors = null;
     this.lastFocusX = Infinity;
     this.lastFocusZ = Infinity;
     this.coverageDirty = true;
     this.invalidate();
   }
 
-  /** Live-tune streaming (view distance, tile budget, fetch concurrency).
-   *  Takes effect on the next update(): the plan is recomputed from scratch. */
-  configure(settings: { viewDistance?: number; maxTiles?: number; concurrency?: number; maxBytes?: number }): void {
+  /** Show or hide every resident tile's cave-dark geometry (VTLA tiles order
+   *  it as a contiguous tail per mesh, so hiding is a shorter draw range —
+   *  same draw calls, fewer vertices shaded). Tiles built while hidden come up
+   *  hidden. Tiles without a cave tail (older formats, all-surface tiles) are
+   *  untouched. Returns whether anything changed (the caller redraws). */
+  setCaveGeometry(visible: boolean): boolean {
+    if (this.caveGeometry === visible) return false;
+    this.caveGeometry = visible;
+    for (const rec of this.records.values()) {
+      if (rec.level !== 0) continue; // lowres heightfields carry no caves
+      applyCaveRange(rec.terrain, visible);
+      applyCaveRange(rec.terrainLm, visible);
+      applyCaveRange(rec.water, visible);
+    }
+    return true;
+  }
+
+  /** Live-tune streaming (view distance, tile budget, fetch concurrency,
+   *  map-memory resolution). Takes effect on the next update(): the plan is
+   *  recomputed from scratch. Changing `mapMemory` rebuilds the impostor
+   *  atlas, which forgets remembered terrain (it re-accumulates as you pan). */
+  configure(settings: { viewDistance?: number; maxTiles?: number; concurrency?: number; maxBytes?: number; mapMemory?: number }): void {
     if (settings.viewDistance !== undefined) this.opts.viewDistance = settings.viewDistance;
     if (settings.maxTiles !== undefined) this.opts.maxTiles = settings.maxTiles;
     if (settings.concurrency !== undefined) this.opts.concurrency = settings.concurrency;
     if (settings.maxBytes !== undefined) this.opts.maxBytes = settings.maxBytes;
+    if (settings.mapMemory !== undefined && settings.mapMemory !== this.mapMemoryResolution) {
+      this.impostors?.dispose();
+      this.impostors = null;
+      if (this.renderer && settings.mapMemory > 0 && this.lowLevels.length === 0) {
+        this.impostors = new ImpostorLayer(this.renderer, this.opts.scene, this.opts.material, this.tileBlocks, settings.mapMemory, this.readySurface);
+      }
+      this.invalidate();
+    }
+    this.applyHazeFloor(); // the guaranteed-hires disc moved with the budgets
     this.lastFocusX = Infinity; // force a re-plan on the next update()
     this.lastFocusZ = Infinity;
+  }
+
+  /** The active map-memory impostor resolution (0 = off/unavailable). */
+  get mapMemoryResolution(): number {
+    return this.impostors?.resolutionPx ?? 0;
+  }
+
+  /** How far remembered (impostor) terrain reaches from (x,z), in blocks —
+   *  0 without map memory. The viewer sizes zoom range and fog off this so
+   *  the remembered map is actually visible. */
+  mapMemoryExtent(x: number, z: number): number {
+    return this.impostors?.extentFrom(x, z) ?? 0;
   }
 
   /** The current stream-in radius, in blocks. */
@@ -727,6 +832,13 @@ export class TileManager {
       releaseAfterUpload(meshes.terrain.geometry);
       if (meshes.terrainLm) releaseAfterUpload(meshes.terrainLm.geometry);
       if (meshes.water) releaseAfterUpload(meshes.water.geometry);
+      // Tiles built while cave geometry is hidden enter the scene hidden —
+      // the draw range must be surface-only BEFORE the first draw.
+      if (!this.caveGeometry) {
+        applyCaveRange(meshes.terrain, false);
+        applyCaveRange(meshes.terrainLm, false);
+        applyCaveRange(meshes.water, false);
+      }
       rec.terrain = meshes.terrain;
       rec.terrainLm = meshes.terrainLm;
       rec.lightmapTex = meshes.lightmapTex;
@@ -770,15 +882,33 @@ export class TileManager {
     rec.state = 'empty';
     rec.abort?.abort();
     if (priorState === 'built') this.pendingBuilt--;
+    // Map memory: a fully-streamed hires tile leaving the ring hands its
+    // meshes to the impostor layer (which renders one snapshot, then disposes
+    // them) instead of vanishing. Anything not worth remembering — partial
+    // loads, lowres records — is disposed as before.
+    const remember = this.impostors !== null && rec.level === 0 && priorState === 'ready' && rec.terrain !== undefined && rec.surface !== undefined;
     for (const mesh of [rec.terrain, rec.terrainLm, rec.water]) {
       if (!mesh) continue;
       this.opts.scene.remove(mesh);
+      if (remember) continue; // ownership moves to the impostor layer below
       // Detach the shared quad index first: dispose() deletes the GPU buffers
       // of everything still attached, and the index is shared by every tile.
       if (isSharedQuadIndex(mesh.geometry.index)) mesh.geometry.setIndex(null);
       mesh.geometry.dispose();
     }
-    rec.lightmapTex?.dispose();
+    if (remember) {
+      rec.fadeStart = undefined; // capture at full opacity (uFade reads this)
+      this.impostors!.capture(
+        rec.ref.x,
+        rec.ref.z,
+        { terrain: rec.terrain, terrainLm: rec.terrainLm, water: rec.water, lightmapTex: rec.lightmapTex },
+        rec.surface!,
+        this.minY,
+        this.maxY,
+      );
+    } else {
+      rec.lightmapTex?.dispose();
+    }
     this.records.delete(key);
     this.failCounts.delete(key);
     this.fadingKeys.delete(key);
@@ -791,7 +921,9 @@ export class TileManager {
    *  leave first; one nearest tile is always kept so an oversized outlier does
    *  not create an unload/refetch loop. Learned weights make the next plan fit. */
   private trimToMemoryBudget(): void {
-    let total = 0;
+    // The map-memory atlas is a fixed allocation inside the same budget the
+    // stats report — tiles trim around it, keeping enforcement consistent.
+    let total = this.impostors?.gpuBytes ?? 0;
     const hires: { key: string; rec: Record_; d: number }[] = [];
     for (const [key, rec] of this.records) {
       total += rec.memoryBytes;
@@ -840,7 +972,9 @@ export class TileManager {
         bytes += rec.ref.bytes;
       } else if (rec.state === 'loading' || rec.state === 'built') loading++;
     }
-    this.statsCache = { loaded, loading, total: this.index.size, lowres, vertexCount, triangleCount, bytes, residentBytes };
+    const remembered = this.impostors?.count ?? 0;
+    if (this.impostors) residentBytes += this.impostors.gpuBytes;
+    this.statsCache = { loaded, loading, total: this.index.size, lowres, remembered, vertexCount, triangleCount, bytes, residentBytes };
     return this.statsCache;
   }
 
@@ -895,7 +1029,7 @@ export class TileManager {
       }
     }
     if (n > 0) return sum / n;
-    return this.lowresHeightAt(x, z);
+    return this.lowresHeightAt(x, z) ?? this.impostors?.heightAt(x, z) ?? null;
   };
 
   /** Height from the finest resident lowres level covering (x,z), or null. */
@@ -946,6 +1080,10 @@ export class TileManager {
     this.disposed = true;
     this.queue = [];
     this.pendingAdd = [];
+    // Kill map memory FIRST so unload() disposes outgoing meshes directly
+    // instead of queueing captures that would never drain.
+    this.impostors?.dispose();
+    this.impostors = null;
     for (const [key, rec] of [...this.records]) this.unload(key, rec);
     this.emitter.clear();
   }

@@ -91,6 +91,13 @@ export interface StreamingSettings {
   concurrency?: number;
   /** Estimated CPU/GPU tile residency budget, in bytes. Default `512 MiB`. */
   maxBytes?: number;
+  /** Map memory for worlds WITHOUT a baked lowres pyramid (live bakes,
+   *  `vantage server`): tiles leaving the streaming ring are snapshotted
+   *  top-down and persist as cheap textured impostors, so everywhere the
+   *  camera has been stays on the map when zoomed out. The value is the
+   *  snapshot resolution in pixels per tile (`0` = off). Default `64`
+   *  (remembers 1024 tiles in a 2048² atlas ≈ 22 MiB of GPU memory). */
+  mapMemory?: number;
 }
 
 export interface VantageViewerOptions {
@@ -119,6 +126,13 @@ export interface VantageViewerOptions {
    *  frame it arrives. Default `true`; set `false` to render every frame
    *  (e.g. when driving external per-frame effects off the viewer's scene). */
   renderOnDemand?: boolean;
+  /** Cave-geometry draw policy for VTLA tiles (whose cave-dark quads sit in a
+   *  toggleable tail per mesh). `'auto'` skips them whenever the camera is
+   *  above ground with the depth slice closed — from up there they are hidden
+   *  behind terrain and cost pure vertex work — and brings them back the
+   *  moment the slice opens or the camera dips underground. `'always'` keeps
+   *  every quad drawn. Default `'auto'`. */
+  caveGeometry?: 'auto' | 'always';
 }
 
 /** A tile source: a URL to fetch, a raw buffer, or already-decoded data. */
@@ -294,6 +308,11 @@ export class VantageViewer {
   /** The dark "unexplored rock" floor under a sliced world. */
   private slicePlane: THREE.Mesh | null = null;
 
+  // Cave-geometry draw policy (VTLA tiles): whether cave-dark tails are in the
+  // draw ranges right now, re-evaluated each frame under 'auto'.
+  private caveMode: 'auto' | 'always' = 'auto';
+  private cavesShown = true;
+
   // Live lighting appearance (applied to the shader on load and on change).
   private light: Required<LightSettings> = { ...DEFAULT_LIGHT };
   // Live display fidelity (shader uniforms + render scale).
@@ -338,7 +357,9 @@ export class VantageViewer {
       streaming: options.streaming ?? {},
       urlState: options.urlState ?? false,
       renderOnDemand: options.renderOnDemand ?? true,
+      caveGeometry: options.caveGeometry ?? 'auto',
     };
+    this.caveMode = this.options.caveGeometry;
     if (options.light) this.light = { ...this.light, ...options.light };
     if (options.display) this.display = { ...this.display, ...options.display };
 
@@ -455,6 +476,7 @@ export class VantageViewer {
     this.hasAnims = texData.anims.length > 0;
     this.lastTextureLayers = manifest.textureLayers ?? texData.layers;
     this.tile = null;
+    this.cavesShown = true; // a fresh manager starts with full draw ranges
     this.tiles = new TileManager({
       manifest,
       fetch: source.fetch,
@@ -468,6 +490,9 @@ export class VantageViewer {
       // tile's insertion on the atlas covering its layers (a no-op once the
       // atlas is complete). Returns the layer count now loaded.
       ...(manifest.rendering ? { ensureAtlas: (n: number) => this.ensureAtlasLayers(source, n).then(() => this.lastTextureLayers) } : {}),
+      // Map memory: pyramid-less worlds snapshot evicted tiles so explored
+      // terrain persists on the zoomed-out map (see StreamingSettings).
+      renderer: this.renderer,
       ...this.options.streaming,
     });
 
@@ -476,6 +501,9 @@ export class VantageViewer {
     this.setHeightSampler(this.tiles.heightAt);
     this.tilesUnsub = this.tiles.on('change', (stats) => {
       this.needsRender = true; // tiles entered/left the scene (or coverage flipped)
+      // Map memory can extend the drawable frontier past the hires ring —
+      // keep the zoom range and fog wall tracking it as snapshots land.
+      if (!this.manifest?.lowres) this.applyViewLimits();
       this.emitter.emit('stats', stats);
       // The legend settles as tiles stream; throttle the churn, then always
       // emit the final state once the queue drains.
@@ -504,7 +532,7 @@ export class VantageViewer {
     this._biomes = [];
     this.emitter.emit('load', {
       // Streamed worlds: the tile format follows the manifest schema version.
-      magic: manifest.format >= 5 ? 'VTL9' : manifest.format >= 4 ? 'VTL8' : manifest.format >= 3 ? 'VTL7' : 'VTL6',
+      magic: manifest.format >= 6 ? 'VTLA' : manifest.format >= 5 ? 'VTL9' : manifest.format >= 4 ? 'VTL8' : manifest.format >= 3 ? 'VTL7' : 'VTL6',
       vertexCount: 0,
       triangleCount: 0,
       size,
@@ -716,8 +744,15 @@ export class VantageViewer {
    *  fog retreats to the world edge — a faint horizon haze, never a wall. The
    *  hires→lowres seam needs no hiding: finer data simply overlays coarser.
    *
-   *  Without one (format 1), zoom and fog hug the hires ring so the map never
-   *  becomes a field of holes: solid haze right where tiles stop. */
+   *  Without one, zoom and fog hug the drawable frontier: the hires ring on a
+   *  fresh session (so the map never becomes a field of holes — solid haze
+   *  right where tiles stop), growing to the remembered map-memory extent as
+   *  the camera explores. Re-applied on tile 'change' events, so the fog wall
+   *  recedes as snapshots land.
+   *
+   *  Both branches share hard sanity ceilings (60k zoom, 250k far plane):
+   *  beyond them depth precision and control feel degrade faster than any
+   *  real overview gains — a 60k-block eye already frames a 100k-block map. */
   private applyViewLimits(): void {
     if (!this.tiles || !this.shader) return;
     const viewDistance = this.tiles.viewDistance;
@@ -728,10 +763,11 @@ export class VantageViewer {
       this.camera.far = Math.min(Math.max(8000, span * 2.5), 250000);
       fog.set(span * 0.9, span * 1.8);
     } else {
-      const r = this.streamRadius();
-      this.controls.maxDistance = viewDistance * 2.2;
-      this.camera.far = Math.max(8000, viewDistance * 6);
-      fog.set(r * 0.72, r * 1.05);
+      const focus = this.controls.flyMode ? this.camera.position : this.controls.position;
+      const reach = Math.max(this.streamRadius(), this.tiles.mapMemoryExtent(focus.x, focus.z));
+      this.controls.maxDistance = Math.min(Math.max(reach * 2.2, viewDistance * 2.2), 60000);
+      this.camera.far = Math.min(Math.max(8000, reach * 6), 250000);
+      fog.set(reach * 0.72, reach * 1.05);
     }
     this.camera.updateProjectionMatrix();
   }
@@ -1151,6 +1187,7 @@ export class VantageViewer {
       maxTiles: this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 120,
       concurrency: this.options.streaming.concurrency ?? 4,
       maxBytes: this.tiles?.maxBytes ?? this.options.streaming.maxBytes ?? 512 * 1024 * 1024,
+      mapMemory: this.options.streaming.mapMemory ?? 64,
     };
   }
 
@@ -1364,6 +1401,44 @@ export class VantageViewer {
     this.needsRender = true;
   }
 
+  /** Set the cave-geometry draw policy (see the option of the same name).
+   *  Takes effect on the next frame. */
+  setCaveGeometry(mode: 'auto' | 'always'): void {
+    this.caveMode = mode;
+    this.invalidate();
+  }
+
+  /** The current cave-geometry draw policy. */
+  get caveGeometry(): 'auto' | 'always' {
+    return this.caveMode;
+  }
+
+  /** Re-evaluate whether cave-dark tails belong in the draw ranges. Above
+   *  ground with the depth slice closed they are provably behind terrain from
+   *  the camera's side of the surface, so 'auto' trims every tile's draw range
+   *  to its surface prefix; opening the slice or descending underground brings
+   *  them straight back. The underground test rides the streamed surface maps
+   *  (the same data the terrain-following pivot uses) with a couple of blocks
+   *  of hysteresis so skimming the terrain doesn't flicker the ranges. */
+  private applyCavePolicy(): void {
+    if (!this.tiles) return;
+    let show = true;
+    if (this.caveMode === 'always' || this.sliceActive) {
+      show = true;
+    } else {
+      const cam = this.camera.position;
+      const ground = this.tiles.heightAt(cam.x, cam.z);
+      // Below the local surface = inside terrain (a cave, a ravine overhang).
+      // Unknown ground (nothing resident yet) counts as above ground.
+      const margin = this.cavesShown ? 2.5 : 0.5;
+      show = ground !== null && cam.y < ground + margin;
+    }
+    if (show !== this.cavesShown) {
+      this.cavesShown = show;
+      if (this.tiles.setCaveGeometry(show)) this.needsRender = true;
+    }
+  }
+
   /** Idle animation cadence (ms). Water/lava bake at a 2-tick frametime
    *  (100 ms), so a 10 fps tick steps them at exactly their authored rate. */
   private static readonly ANIM_TICK_MS = 100;
@@ -1425,6 +1500,7 @@ export class VantageViewer {
       }
     }
 
+    this.applyCavePolicy();
     this.pickHover();
 
     // Render on demand: skip the draw entirely when nothing changed. Animated

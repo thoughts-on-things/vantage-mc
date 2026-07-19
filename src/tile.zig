@@ -457,30 +457,31 @@ pub const MAGIC8 = "VTL8";
 pub const VERSION8: u32 = 8;
 pub const MAGIC9 = "VTL9";
 pub const VERSION9: u32 = 9;
+pub const MAGIC10 = "VTLA";
+pub const VERSION10: u32 = 10;
 
-/// VTL9 = VTL8's light-independent greedy geometry with a losslessly packed
-/// lightmap atlas:
-///   - greedy merging still yields ~23% fewer vertices, and big merged quads
-///     retain true per-block light gradients instead of 4-corner flattening.
-///   - each section header gains `lm_start`: vertices from that index up (the
-///     greedy tail) are lit by the atlas; earlier vertices keep per-vertex
-///     light (packed in normal.w) and AO (colour alpha) as before.
-///   - the tail's lightmap UVs ship as u16 half-texel pairs (uv_texels =
-///     stored / 2; the +0.5 texel-centre offset is baked into the values),
-///     delta-coded per component like positions.
-///   - after both sections: u32 atlas W, u32 H, then two byte planes: packed
-///     `(sky << 4) | block`, then AO. Sky/block are natively 4-bit, so this is
-///     exact. Planes preserve gzip locality; the browser interleaves to RG8
-///     and manually filters decoded texels, preserving VTL8's gradients.
+/// VTLA (version 10) = VTL9 with each section's cave partition made visible:
+///   - the mesher stable-partitions cave-dark quads (faces only a sky-light-0,
+///     non-water cell can see) to the END of each lighting segment, so a
+///     viewer can draw a surface-only PREFIX of each mesh while the camera is
+///     above ground — whole cave systems stop costing GPU vertex work without
+///     dropping a face from the tile.
+///   - each section header gains `cave_start` (first cave-dark vertex of the
+///     vertex-lit head `[0, lm_start)`) and `cave_lm_start` (first cave-dark
+///     vertex of the atlas-lit tail `[lm_start, V)`). Both equal their
+///     segment's end when there is no cave geometry.
+///   - everything else is VTL9: packed RG8 lightmap planes, delta-coded
+///     positions/lmuv, i16 uv, no index array.
 /// Layout:
-///   "VTL9", u32 ver=9,
+///   "VTLA", u32 ver=10,
 ///   <solid l-section>, <fluid l-section>,
 ///   u32 lm_w, u32 lm_h, u8[lm_w·lm_h] packed light, u8[...] AO,
 ///   u32 sx, u32 sz, i32 min_x, i32 min_z,
 ///   u16[sx*sz] biome, i16[sx*sz] height,
 ///   u32 biome_count, legend.
-/// An l-section is a VTL7 c-section with `u32 lm_start` after V and
-/// `u16[2·(V−lm_start)] lmuv` after the biome ids (then 0/2 pad bytes).
+/// An l-section is a VTL7 c-section with `u32 lm_start, u32 cave_start,
+/// u32 cave_lm_start` after V and `u16[2·(V−lm_start)] lmuv` after the biome
+/// ids (then 0/2 pad bytes).
 pub fn serializeWithLightmap(
     arena: std.mem.Allocator,
     built: mesh.Built,
@@ -499,10 +500,18 @@ pub fn serializeWithLightmap(
     for (biome_names) |name| exact_size += 2 + @min(name.len, std.math.maxInt(u16));
     try out.ensureTotalCapacityPrecise(arena, exact_size);
 
-    try out.appendSlice(arena, MAGIC9);
-    try appendU32(arena, &out, VERSION9);
-    try appendMeshSectionLit(arena, &out, built.solid, built.lm_start);
-    try appendMeshSectionLit(arena, &out, built.fluid, built.fluid.vertex_count);
+    // Clamp the cave boundaries into their segments: `Built`'s maxInt default
+    // ("unset") becomes an all-surface section, so hand-built meshes and empty
+    // tiles serialize without spelling the fields out.
+    const sv = built.solid.vertex_count;
+    const solid_cave = @min(built.solid_cave, built.lm_start);
+    const solid_cave_lm = @min(@max(built.solid_cave_lm, built.lm_start), sv);
+    const fluid_cave = @min(built.fluid_cave, built.fluid.vertex_count);
+
+    try out.appendSlice(arena, MAGIC10);
+    try appendU32(arena, &out, VERSION10);
+    try appendMeshSectionLit(arena, &out, built.solid, built.lm_start, solid_cave, solid_cave_lm);
+    try appendMeshSectionLit(arena, &out, built.fluid, built.fluid.vertex_count, fluid_cave, built.fluid.vertex_count);
 
     // The shelf-packed lightmap atlas (may be empty: flat light, empty tile).
     try appendU32(arena, &out, built.lightmap.w);
@@ -534,19 +543,22 @@ pub fn serializeWithLightmap(
     return out.toOwnedSlice(arena);
 }
 
-/// Exact encoded size of one aligned VTL9 lit section. Both counts are quad
+/// Exact encoded size of one aligned VTLA lit section. Both counts are quad
 /// multiples, so the expression is already 4-byte aligned.
 fn litSectionSize(vertex_count: u32, lm_start: u32) usize {
     const v: usize = vertex_count;
-    return 32 + 26 * v - 4 * @as(usize, lm_start);
+    return 40 + 26 * v - 4 * @as(usize, lm_start);
 }
 
-fn appendMeshSectionLit(arena: std.mem.Allocator, out: *std.ArrayList(u8), m: mesh.Mesh2, lm_start: u32) !void {
+fn appendMeshSectionLit(arena: std.mem.Allocator, out: *std.ArrayList(u8), m: mesh.Mesh2, lm_start: u32, cave_start: u32, cave_lm_start: u32) !void {
     const v = m.vertex_count;
     if (v % 4 != 0) return error.NonQuadMesh;
     std.debug.assert(m.lmuv.items.len == 2 * (v - lm_start));
+    std.debug.assert(cave_start <= lm_start and cave_lm_start >= lm_start and cave_lm_start <= v);
     try appendU32(arena, out, v);
     try appendU32(arena, out, lm_start);
+    try appendU32(arena, out, cave_start);
+    try appendU32(arena, out, cave_lm_start);
 
     // Encode directly into the exactly reserved output. The old temporary
     // uv/position/id arrays accumulated in the tile arena and materially
@@ -919,7 +931,7 @@ test "VTL7 refuses non-quad meshes" {
     try std.testing.expectError(error.NonQuadMesh, serializeWithSurfaceCompact(a, solid, fluid, surface, &.{}));
 }
 
-test "VTL9 carries lm_start, the lmuv tail, and the packed atlas" {
+test "VTLA carries lm_start, the cave boundaries, the lmuv tail, and the packed atlas" {
     const a = std.testing.allocator;
     var built: mesh.Built = .{};
     defer {
@@ -952,25 +964,31 @@ test "VTL9 carries lm_start, the lmuv tail, and the packed atlas" {
     const bytes = try serializeWithLightmap(a, built, surface, &names);
     defer a.free(bytes);
 
-    try std.testing.expectEqualSlices(u8, MAGIC9, bytes[0..4]);
-    try std.testing.expectEqual(VERSION9, std.mem.readInt(u32, bytes[4..8], .little));
+    try std.testing.expectEqualSlices(u8, MAGIC10, bytes[0..4]);
+    try std.testing.expectEqual(VERSION10, std.mem.readInt(u32, bytes[4..8], .little));
     const V = 8;
     try std.testing.expectEqual(@as(u32, V), std.mem.readInt(u32, bytes[8..12], .little));
     try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, bytes[12..16], .little)); // lm_start
+    // Cave boundaries: unset on the hand-built mesh, so the serializer clamps
+    // them to "all surface" — head boundary == lm_start, tail boundary == V.
+    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, bytes[16..20], .little)); // cave_start
+    try std.testing.expectEqual(@as(u32, V), std.mem.readInt(u32, bytes[20..24], .little)); // cave_lm_start
 
-    // Walk the solid section: header(8+8) + uv 4V + colour 4V + normal 4V +
-    // bbox 24 + pos 6V + layer 2V + biome 2V = 16 + 22V + 24, then the
+    // Walk the solid section: header(8+16) + uv 4V + colour 4V + normal 4V +
+    // bbox 24 + pos 6V + layer 2V + biome 2V = 24 + 22V + 24, then the
     // delta-coded lmuv: u [1,1,7,7] → zz [2,0,12,0]; v [1,5,5,1] → zz [2,8,0,7].
-    const lmuv_off = 16 + 22 * V + 24;
+    const lmuv_off = 24 + 22 * V + 24;
     try std.testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, bytes[lmuv_off..][0..2], .little));
     try std.testing.expectEqual(@as(u16, 12), std.mem.readInt(u16, bytes[lmuv_off + 4 * 2 ..][0..2], .little));
     try std.testing.expectEqual(@as(u16, 7), std.mem.readInt(u16, bytes[lmuv_off + 7 * 2 ..][0..2], .little));
-    // Fluid section is empty: V=0, lm_start=0, bbox only.
+    // Fluid section is empty: V=0, lm_start=0, cave boundaries 0/0, bbox only.
     const fluid_off = lmuv_off + 8 * 2; // 8 lmuv u16s (V - lm_start = 4 verts)
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, bytes[fluid_off..][0..4], .little));
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, bytes[fluid_off + 4 ..][0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, bytes[fluid_off + 8 ..][0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, bytes[fluid_off + 12 ..][0..4], .little));
     // Atlas header follows the fluid section (its bbox is 24 zero-filled bytes).
-    const lm_off = fluid_off + 8 + 24;
+    const lm_off = fluid_off + 16 + 24;
     try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, bytes[lm_off..][0..4], .little));
     try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, bytes[lm_off + 4 ..][0..4], .little));
     try std.testing.expectEqual(@as(u8, 0xa5), bytes[lm_off + 8]); // packed sky/block

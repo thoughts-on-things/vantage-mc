@@ -15,24 +15,26 @@ export interface SettingsPanelProps {
   className?: string;
 }
 
-/** A quality preset: streamed range, resident-tile budget, and render scale.
- *  Tile budgets are sized to fill the view-distance disc (π·(vd/tileBlocks)²
- *  for 128-block tiles) so the range is actually reachable. */
+/** A quality preset: streamed range, resident-tile budget, render scale, and
+ *  map-memory snapshot resolution. Tile budgets are sized to fill the
+ *  view-distance disc (π·(vd/tileBlocks)² for 128-block tiles) so the range
+ *  is actually reachable. */
 export interface QualityPreset {
   name: string;
   viewDistance: number;
   maxTiles: number;
   maxBytes: number;
   renderScale: number;
+  mapMemory: number;
 }
 
 const MiB = 1024 * 1024;
 
 export const QUALITY_PRESETS: QualityPreset[] = [
-  { name: 'low', viewDistance: 448, maxTiles: 44, maxBytes: 320 * MiB, renderScale: 0.75 },
-  { name: 'med', viewDistance: 768, maxTiles: 120, maxBytes: 512 * MiB, renderScale: 1 },
-  { name: 'high', viewDistance: 1152, maxTiles: 264, maxBytes: 768 * MiB, renderScale: 1 },
-  { name: 'ultra', viewDistance: 1408, maxTiles: 400, maxBytes: 1024 * MiB, renderScale: 1 },
+  { name: 'low', viewDistance: 448, maxTiles: 44, maxBytes: 320 * MiB, renderScale: 0.75, mapMemory: 32 },
+  { name: 'med', viewDistance: 768, maxTiles: 120, maxBytes: 512 * MiB, renderScale: 1, mapMemory: 64 },
+  { name: 'high', viewDistance: 1152, maxTiles: 264, maxBytes: 768 * MiB, renderScale: 1, mapMemory: 128 },
+  { name: 'ultra', viewDistance: 1408, maxTiles: 400, maxBytes: 1024 * MiB, renderScale: 1, mapMemory: 128 },
 ];
 
 interface Knobs {
@@ -41,18 +43,19 @@ interface Knobs {
   maxBytes: number;
   renderScale: number;
   fog: number;
+  mapMemory: number;
 }
 
 export function SettingsPanel({ title = 'quality', defaultCollapsed = true, className }: SettingsPanelProps) {
   const { viewer } = useVantage();
-  const [k, setK] = useState<Knobs>({ viewDistance: 768, maxTiles: 120, maxBytes: 512 * MiB, renderScale: 1, fog: 1 });
+  const [k, setK] = useState<Knobs>({ viewDistance: 768, maxTiles: 120, maxBytes: 512 * MiB, renderScale: 1, fog: 1, mapMemory: 64 });
 
   // Seed from the engine's current settings once it exists.
   useEffect(() => {
     if (!viewer) return;
     const s = viewer.streamingSettings;
     const d = viewer.displaySettings;
-    setK({ viewDistance: s.viewDistance, maxTiles: s.maxTiles, maxBytes: s.maxBytes, renderScale: d.renderScale, fog: d.fog });
+    setK({ viewDistance: s.viewDistance, maxTiles: s.maxTiles, maxBytes: s.maxBytes, renderScale: d.renderScale, fog: d.fog, mapMemory: s.mapMemory });
   }, [viewer]);
 
   if (!viewer) return null;
@@ -60,8 +63,8 @@ export function SettingsPanel({ title = 'quality', defaultCollapsed = true, clas
   const apply = (next: Partial<Knobs>) => {
     const merged = { ...k, ...next };
     setK(merged);
-    if (next.viewDistance !== undefined || next.maxTiles !== undefined || next.maxBytes !== undefined) {
-      viewer.setStreaming({ viewDistance: merged.viewDistance, maxTiles: merged.maxTiles, maxBytes: merged.maxBytes });
+    if (next.viewDistance !== undefined || next.maxTiles !== undefined || next.maxBytes !== undefined || next.mapMemory !== undefined) {
+      viewer.setStreaming({ viewDistance: merged.viewDistance, maxTiles: merged.maxTiles, maxBytes: merged.maxBytes, mapMemory: merged.mapMemory });
     }
     if (next.renderScale !== undefined || next.fog !== undefined) {
       viewer.setDisplay({ renderScale: merged.renderScale, fog: merged.fog });
@@ -69,7 +72,12 @@ export function SettingsPanel({ title = 'quality', defaultCollapsed = true, clas
   };
 
   const active = QUALITY_PRESETS.find(
-    (p) => p.viewDistance === k.viewDistance && p.maxTiles === k.maxTiles && p.maxBytes === k.maxBytes && p.renderScale === k.renderScale,
+    (p) =>
+      p.viewDistance === k.viewDistance &&
+      p.maxTiles === k.maxTiles &&
+      p.maxBytes === k.maxBytes &&
+      p.renderScale === k.renderScale &&
+      p.mapMemory === k.mapMemory,
   );
 
   const SLIDERS = [
@@ -78,6 +86,9 @@ export function SettingsPanel({ title = 'quality', defaultCollapsed = true, clas
     { key: 'maxBytes' as const, label: 'memory budget', min: 128 * MiB, max: 1536 * MiB, step: 64 * MiB, fmt: (v: number) => `${Math.round(v / MiB)} MiB` },
     { key: 'renderScale' as const, label: 'render scale', min: 0.5, max: 2, step: 0.05, fmt: (v: number) => `${v.toFixed(2)}×` },
     { key: 'fog' as const, label: 'haze', min: 0, max: 1, step: 0.05, fmt: (v: number) => v.toFixed(2) },
+    // Snapshot resolution for remembered (evicted) tiles on pyramid-less
+    // streamed worlds — see StreamingSettings.mapMemory.
+    { key: 'mapMemory' as const, label: 'map memory', min: 0, max: 128, step: 32, fmt: (v: number) => (v === 0 ? 'off' : `${v}px`) },
   ];
 
   return (
@@ -94,7 +105,9 @@ export function SettingsPanel({ title = 'quality', defaultCollapsed = true, clas
             <button
               key={p.name}
               className={active?.name === p.name ? 'vtg-seg-on' : undefined}
-              onClick={() => apply({ viewDistance: p.viewDistance, maxTiles: p.maxTiles, maxBytes: p.maxBytes, renderScale: p.renderScale })}
+              onClick={() =>
+                apply({ viewDistance: p.viewDistance, maxTiles: p.maxTiles, maxBytes: p.maxBytes, renderScale: p.renderScale, mapMemory: p.mapMemory })
+              }
             >
               {p.name}
             </button>

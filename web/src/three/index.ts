@@ -7,6 +7,7 @@ export {
   buildTileMeshes,
   buildQuantizedTileMeshes,
   buildLowresMesh,
+  applyCaveRange,
   type TerrainObjects,
   type TileMeshes,
 } from './terrain.js';

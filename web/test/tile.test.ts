@@ -13,6 +13,7 @@ import {
   encodeVTL7,
   encodeVTL8,
   encodeVTL9,
+  encodeVTLA,
   LEGEND,
 } from './encode.js';
 
@@ -158,6 +159,17 @@ describe('parseTile', () => {
     expect(t.colors![4 * 4 + 3]).toBe(255);
   });
 
+  it('decodes VTLA the classic way, skipping the cave boundaries', () => {
+    const t = parseTile(encodeVTLA());
+    expect(t.magic).toBe('VTLA');
+    expect(t.lightmap?.packed).toBe(true);
+    // The expand path draws everything; the extra header fields must not
+    // shift the streams — same corner-light bakes as VTL9.
+    expect(t.light![4]).toBe((1 << 4) | 2);
+    expect(t.light![6]).toBe((6 << 4) | 2);
+    expect(t.colors![4 * 4 + 3]).toBe(255);
+  });
+
   it('throws on an unrecognized magic', () => {
     const buf = new ArrayBuffer(16);
     new Uint8Array(buf).set([88, 88, 88, 88]); // "XXXX"
@@ -240,6 +252,46 @@ describe('parseTileQuantized', () => {
     expect(Array.from(q!.lightmap!.pixels.slice(0, 6))).toEqual([0x02, 255, 0x12, 255, 0x22, 255]);
     expect(Array.from(q!.solid.lmuv!)).toEqual([3, 1, 3, 3, 5, 3, 5, 1]);
     expect(Array.from(q!.surface.height)).toEqual([64, 65, 66, 67]);
+    // Pre-VTLA tiles carry no cave boundaries.
+    expect(q!.solid.caveStart).toBeUndefined();
+    expect(q!.fluid.caveStart).toBeUndefined();
+  });
+
+  it('reads VTLA cave-partition boundaries and everything after them', () => {
+    const q = parseTileQuantized(encodeVTLA());
+    expect(q?.magic).toBe('VTLA');
+    const s = q!.solid;
+    // The encoder marks the vertex-lit quad cave-dark and the atlas quad
+    // surface: head boundary 0, tail boundary 8 (= vertexCount).
+    expect(s.caveStart).toBe(0);
+    expect(s.caveLmStart).toBe(8);
+    expect(q!.fluid.caveStart).toBe(0);
+    // The streams after the new header fields still line up exactly.
+    expect(s.lmStart).toBe(4);
+    expect(Array.from(s.lmuv!)).toEqual([3, 1, 3, 3, 5, 3, 5, 1]);
+    expect(Array.from(s.positions.slice(0, 6))).toEqual([0, 0, 0, 65535, 0, 0]);
+    expect(q!.lightmap?.packed).toBe(true);
+    expect(Array.from(q!.lightmap!.pixels.slice(0, 4))).toEqual([0x02, 255, 0x12, 255]);
+    expect(Array.from(q!.surface.height)).toEqual([64, 65, 66, 67]);
+    expect(q!.biomeNames).toEqual(LEGEND);
+  });
+
+  it('rejects lit sections whose header boundaries are out of range or unaligned', () => {
+    // Patch a valid VTLA buffer's header in place: V@8, lmStart@12,
+    // caveStart@16, caveLmStart@20 (little-endian u32s after magic+version).
+    const corrupt = (offset: number, value: number) => {
+      const buf = encodeVTLA();
+      new DataView(buf).setUint32(offset, value, true);
+      return buf;
+    };
+    // lmStart past the vertex count would size a negative lmuv view.
+    expect(() => parseTileQuantized(corrupt(12, 12))).toThrow(/corrupt lit section/);
+    // Cave boundaries must be quad-aligned and ordered within their segments.
+    expect(() => parseTileQuantized(corrupt(16, 8))).toThrow(/corrupt VTLA cave/); // caveStart > lmStart
+    expect(() => parseTileQuantized(corrupt(20, 7))).toThrow(/corrupt VTLA cave/); // unaligned
+    expect(() => parseTileQuantized(corrupt(20, 12))).toThrow(/corrupt VTLA cave/); // caveLmStart > V
+    // The classic expand path shares the reader, so it rejects them too.
+    expect(() => parseTile(corrupt(12, 12))).toThrow(/corrupt lit section/);
   });
 
   it('parses the same VTL7 buffer twice without corruption (delta decode copies)', () => {

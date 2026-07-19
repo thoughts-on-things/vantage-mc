@@ -122,6 +122,12 @@ pub const Mesh2 = struct {
     /// the greedy (atlas-lit) vertex tail, so its length is
     /// `2 * (vertex_count - lm_start)`. Empty in flat-light mode and for fluids.
     lmuv: std.ArrayList(u16) = .empty,
+    /// One flag per QUAD (`vertex_count / 4` entries): the quad is cave-dark —
+    /// every cell it faces gets no sky light and holds no water, so it cannot
+    /// be seen from anywhere the sky reaches. Bake-time metadata only; it
+    /// drives the cave partition (see `partitionCaveTail`) and is not shipped
+    /// per quad.
+    cave: std.ArrayList(bool) = .empty,
     vertex_count: u32 = 0,
 
     // No index list: every emitter writes strict quads (4 verts, two CCW
@@ -198,6 +204,17 @@ pub const Built = struct {
     solid: Mesh2 = .{},
     fluid: Mesh2 = .{},
     lm_start: u32 = 0,
+    /// First cave-dark vertex of the solid vertex-lit head `[0, lm_start)` —
+    /// the head is partitioned `[surface][cave]` so a viewer can draw the
+    /// surface prefix alone when the camera is above ground. `== lm_start`
+    /// when the head has no cave tail; the maxInt default means "unset" and
+    /// the serializer clamps it into range (hand-built test meshes get an
+    /// all-surface section without spelling the fields out).
+    solid_cave: u32 = std.math.maxInt(u32),
+    /// First cave-dark vertex of the atlas-lit tail `[lm_start, V)`, same idea.
+    solid_cave_lm: u32 = std.math.maxInt(u32),
+    /// First cave-dark vertex of the fluid section.
+    fluid_cave: u32 = std.math.maxInt(u32),
     lightmap: Lightmap = .{},
     light_ms: i64 = 0,
 };
@@ -381,7 +398,9 @@ pub fn buildTextured(
     // run as 6 workers into disjoint meshes, concatenated in direction order
     // (inline when the thread budget is 1). Precompute each cell's per-direction
     // face visibility once so the six sweeps skip the neighbour probing.
-    ctx.face_vis = try buildFaceVis(&ctx, arena);
+    const fv = try buildFaceVis(&ctx, arena);
+    ctx.face_vis = fv.vis;
+    ctx.sky_vis = fv.sky;
     const gp = try arena.alloc(GreedyPartial, 6);
     for (gp, 0..) |*p, di| p.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator), .di = di };
     if (n_threads <= 1) {
@@ -403,7 +422,96 @@ pub fn buildTextured(
     const lightmap = try appendAtlasTail(arena, gp, &mesh);
     for (gp) |*p| p.arena.deinit(); // after packing — patches live in these
 
-    return .{ .solid = mesh, .fluid = fluid, .lm_start = lm_start, .lightmap = lightmap, .light_ms = light_ms };
+    // Partition each lighting segment so its cave-dark quads form a contiguous
+    // tail: [surface][cave] within the vertex-lit head, and again within the
+    // atlas-lit tail (which must itself stay contiguous for lm_start). The
+    // viewer can then draw a surface-only PREFIX of each mesh — a shorter draw
+    // range — while the camera is above ground, so cave systems stop costing
+    // vertex work the moment nobody can see them, without dropping a single
+    // face from the tile. Stable within each class: determinism and the
+    // delta-coded streams' locality are preserved.
+    const lmq = lm_start / 4;
+    const solid_cave = try partitionCaveTail(&mesh, 0, lmq, lmq);
+    const solid_cave_lm = try partitionCaveTail(&mesh, lmq, mesh.vertex_count / 4, lmq);
+    const fluid_cave = try partitionCaveTail(&fluid, 0, fluid.vertex_count / 4, fluid.vertex_count / 4);
+
+    return .{
+        .solid = mesh,
+        .fluid = fluid,
+        .lm_start = lm_start,
+        .solid_cave = solid_cave,
+        .solid_cave_lm = solid_cave_lm,
+        .fluid_cave = fluid_cave,
+        .lightmap = lightmap,
+        .light_ms = light_ms,
+    };
+}
+
+/// Stable-partition the quads of `m` in `[q0, q1)` so every cave-dark quad
+/// (see `Mesh2.cave`) sits after every surface quad, preserving relative order
+/// within each class. `lm_base` is the mesh's first lmuv-bearing quad
+/// (`lm_start / 4`): ranges at or above it also permute their slice of the
+/// lmuv stream, ranges below it must not touch lmuv at all. Returns the first
+/// cave quad's VERTEX index (`4·q1` when the range has no cave quads).
+/// Scratch comes from a private page arena so the tile arena's peak doesn't
+/// grow by another copy of the mesh.
+fn partitionCaveTail(m: *Mesh2, q0: usize, q1: usize, lm_base: usize) !u32 {
+    const n = q1 - q0;
+    if (n == 0) return @intCast(4 * q1);
+    std.debug.assert(m.cave.items.len == m.vertex_count / 4);
+    var n_surface: usize = 0;
+    for (m.cave.items[q0..q1]) |c| n_surface += @intFromBool(!c);
+    // Already partitioned (all one class) — the common case for open terrain
+    // and for fully-culled default bakes.
+    if (n_surface == n or n_surface == 0) return @intCast(4 * (q0 + n_surface));
+
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
+    const salloc = scratch.allocator();
+
+    // Gather order: surface quads first, then cave quads, both in stream order.
+    const order = try salloc.alloc(u32, n);
+    var w: usize = 0;
+    for (q0..q1) |q| {
+        if (!m.cave.items[q]) {
+            order[w] = @intCast(q);
+            w += 1;
+        }
+    }
+    for (q0..q1) |q| {
+        if (m.cave.items[q]) {
+            order[w] = @intCast(q);
+            w += 1;
+        }
+    }
+
+    try permuteQuads(f32, salloc, m.positions.items, order, q0, 12);
+    try permuteQuads(f32, salloc, m.uv.items, order, q0, 8);
+    try permuteQuads(f32, salloc, m.layer.items, order, q0, 4);
+    try permuteQuads(u8, salloc, m.color.items, order, q0, 16);
+    try permuteQuads(i8, salloc, m.normals.items, order, q0, 16);
+    try permuteQuads(f32, salloc, m.biome.items, order, q0, 4);
+    try permuteQuads(bool, salloc, m.cave.items, order, q0, 1);
+    if (m.lmuv.items.len != 0 and q1 > lm_base) {
+        std.debug.assert(q0 >= lm_base); // a range never straddles lm_start
+        const tmp = try salloc.alloc(u16, n * 8);
+        for (order, 0..) |src_q, k| {
+            @memcpy(tmp[k * 8 ..][0..8], m.lmuv.items[(@as(usize, src_q) - lm_base) * 8 ..][0..8]);
+        }
+        @memcpy(m.lmuv.items[(q0 - lm_base) * 8 ..][0 .. n * 8], tmp);
+    }
+    return @intCast(4 * (q0 + n_surface));
+}
+
+/// Scatter the per-quad blocks of `items` (`per` elements per quad) into
+/// `[q0, q0+order.len)` following `order` (absolute quad indices).
+fn permuteQuads(comptime T: type, salloc: std.mem.Allocator, items: []T, order: []const u32, q0: usize, comptime per: usize) !void {
+    const tmp = try salloc.alloc(T, order.len * per);
+    defer salloc.free(tmp);
+    for (order, 0..) |src_q, k| {
+        @memcpy(tmp[k * per ..][0..per], items[@as(usize, src_q) * per ..][0..per]);
+    }
+    @memcpy(items[q0 * per ..][0 .. order.len * per], tmp);
 }
 
 /// Append the atlas-lit quads to `mesh` — reordered patch-height-first (stable)
@@ -504,6 +612,7 @@ fn appendAtlasTail(arena: std.mem.Allocator, gp: []GreedyPartial, mesh: *Mesh2) 
             try mesh.lmuv.append(arena, src.lmuv.items[(q * 4 + vi) * 2 + 0] + @as(u16, @intCast(2 * o[0])));
             try mesh.lmuv.append(arena, src.lmuv.items[(q * 4 + vi) * 2 + 1] + @as(u16, @intCast(2 * o[1])));
         }
+        try mesh.cave.append(arena, src.cave.items[q]);
         mesh.vertex_count += 4;
     }
 
@@ -572,6 +681,11 @@ const MeshCtx = struct {
     /// the dense solid interior (every neighbour occluding) collapses to a
     /// single masked skip. Empty until set; the per-block pass never reads it.
     face_vis: []const u8 = &.{},
+    /// Companion mask to `face_vis`, same shape: bit `di` is set when the cell's
+    /// visible greedy face in that direction looks into a SKY-LIT (or water)
+    /// cell. A merged rect with no set bit is cave-dark (see `Mesh2.cave`).
+    /// Built together with `face_vis`; empty until set.
+    sky_vis: []const u8 = &.{},
     /// The XZ sub-box to emit geometry for (the whole grid unless this is a
     /// tiled render with an apron). Cells outside are read but never emitted.
     interior: grid.Interior,
@@ -603,6 +717,15 @@ const MeshCtx = struct {
     /// looking into water are never culled (ocean/lake floors).
     fn caveCulled(ctx: *const MeshCtx, x: isize, y: isize, z: isize) bool {
         if (!ctx.caveDark(x, y, z)) return false;
+        return !ctx.waterish[ctx.g.at(x, y, z)];
+    }
+
+    /// Whether a face looking into cell (x,y,z) is hidden from the sky: the
+    /// cell gets no sky light and holds no water. The same predicate as
+    /// `caveCulled` without the Y horizon — it CLASSIFIES kept faces for the
+    /// cave partition (surface prefix vs cave tail) instead of dropping them.
+    fn skyHidden(ctx: *const MeshCtx, x: isize, y: isize, z: isize) bool {
+        if (ctx.g.lightAt(x, y, z) >> 4 != 0) return false;
         return !ctx.waterish[ctx.g.at(x, y, z)];
     }
 };
@@ -684,11 +807,19 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
                 const cb = ctx.cache[id].?; // populated by the occluder pre-pass
                 for (cb.faces) |face| {
                     if (face.greedy) continue; // emitted (merged) by the greedy pass
+                    // Cave-partition class: a face is dark when the cell it
+                    // faces (its own cell for cull-less billboards) is hidden
+                    // from the sky — the horizonless twin of the cull above.
+                    var cave = false;
                     if (face.cull) |c| {
                         const off = dirOffset(c);
                         if (ctx.id_occluder[g.at(xi + off[0], yi + off[1], zi + off[2])]) continue;
                         if (ctx.caveCulled(xi + off[0], yi + off[1], zi + off[2])) continue;
-                    } else if (ctx.caveCulled(xi, yi, zi)) continue;
+                        cave = ctx.skyHidden(xi + off[0], yi + off[1], zi + off[2]);
+                    } else {
+                        if (ctx.caveCulled(xi, yi, zi)) continue;
+                        cave = ctx.skyHidden(xi, yi, zi);
+                    }
                     const rgb = ctx.tint_colors[bid * ctx.nkind + @intFromEnum(face.tint)];
                     var ao = [4]u8{ 255, 255, 255, 255 };
                     if (face.ao) {
@@ -706,7 +837,7 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
                         const base = [3]i8{ face.verts[0].n[0], face.verts[0].n[1], face.verts[0].n[2] };
                         for (0..4) |ci| lights[ci] = cornerLight(g, ctx.id_occluder, x, y, z, base, face.ao_off[ci]);
                     }
-                    try emitBaked(alloc, mesh, ctx, wx, wy, wz, face, rgb, ao, lights, bid);
+                    try emitBaked(alloc, mesh, ctx, wx, wy, wz, face, rgb, ao, lights, bid, cave);
                 }
 
                 // Waterlogged block (seagrass, kelp, waterlogged stair/…): it just
@@ -730,6 +861,7 @@ fn appendMesh(alloc: std.mem.Allocator, dst: *Mesh2, src: *const Mesh2) !void {
     try dst.normals.appendSlice(alloc, src.normals.items);
     try dst.biome.appendSlice(alloc, src.biome.items);
     try dst.lmuv.appendSlice(alloc, src.lmuv.items);
+    try dst.cave.appendSlice(alloc, src.cave.items);
     dst.vertex_count += src.vertex_count;
 }
 
@@ -819,6 +951,11 @@ fn greedyMerge(
     }
 }
 
+/// The greedy pass' precomputed per-cell masks: face visibility plus the
+/// sky-lit classification bit per direction (see `MeshCtx.face_vis` /
+/// `MeshCtx.sky_vis`).
+const FaceVis = struct { vis: []u8, sky: []u8 };
+
 /// Precompute the per-direction greedy-face visibility mask (see
 /// `MeshCtx.face_vis`) in one linear pass over the interior XZ columns × full Y.
 /// For each occluder cell, set bit `di` when its greedy face in that direction
@@ -826,10 +963,15 @@ fn greedyMerge(
 /// per-direction sweep used to re-derive with two grid probes per cell. Reusing
 /// the neighbour id for both the occluder and the water test makes this cheaper
 /// than one sweep's probing, and the six sweeps then read one byte per cell.
-fn buildFaceVis(ctx: *const MeshCtx, alloc: std.mem.Allocator) ![]u8 {
+/// The companion `sky` mask records, for each visible face, whether the faced
+/// cell is sky-lit or water — the cave-partition classification, computed here
+/// while the neighbour id and light are already at hand.
+fn buildFaceVis(ctx: *const MeshCtx, alloc: std.mem.Allocator) !FaceVis {
     const g = ctx.g;
     const vis = try alloc.alloc(u8, g.sx * g.sy * g.sz);
+    const sky = try alloc.alloc(u8, g.sx * g.sy * g.sz);
     @memset(vis, 0);
+    @memset(sky, 0);
     const x0 = ctx.interior.x0;
     const x1 = ctx.interior.x1;
     var y: usize = 0;
@@ -846,6 +988,7 @@ fn buildFaceVis(ctx: *const MeshCtx, alloc: std.mem.Allocator) ![]u8 {
                 if (id == grid.AIR) continue;
                 const gf = ctx.greedy_faces[id];
                 var mask: u8 = 0;
+                var sky_mask: u8 = 0;
                 inline for (0..6) |di| {
                     if (gf[di] >= 0) {
                         const n = gdirs[di].n;
@@ -853,15 +996,19 @@ fn buildFaceVis(ctx: *const MeshCtx, alloc: std.mem.Allocator) ![]u8 {
                         const ny = @as(isize, @intCast(y)) + n[1];
                         const nz = @as(isize, @intCast(z)) + n[2];
                         const nid = g.at(nx, ny, nz);
-                        if (!ctx.id_occluder[nid] and !(ctx.caveDark(nx, ny, nz) and !ctx.waterish[nid]))
+                        if (!ctx.id_occluder[nid] and !(ctx.caveDark(nx, ny, nz) and !ctx.waterish[nid])) {
                             mask |= @as(u8, 1) << di;
+                            if (g.lightAt(nx, ny, nz) >> 4 != 0 or ctx.waterish[nid])
+                                sky_mask |= @as(u8, 1) << di;
+                        }
                     }
                 }
                 vis[gi] = mask;
+                sky[gi] = sky_mask;
             }
         }
     }
-    return vis;
+    return .{ .vis = vis, .sky = sky };
 }
 
 /// Mesh one of the 6 greedy directions: for each slice perpendicular to the
@@ -898,9 +1045,15 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, lm
     const sv = stride[gd.vax];
     const sn = stride[gd.nax];
     const bit: u8 = @as(u8, 1) << @intCast(di);
-    // Production shares one mask across all six directions (built in
-    // `buildTextured`); a direct caller (unit tests) gets it built on demand.
-    const vis = if (ctx.face_vis.len != 0) ctx.face_vis else try buildFaceVis(ctx, alloc);
+    // Production shares one mask pair across all six directions (built in
+    // `buildTextured`); a direct caller (unit tests) gets them built on demand.
+    var vis = ctx.face_vis;
+    var sky_vis = ctx.sky_vis;
+    if (vis.len == 0) {
+        const fv = try buildFaceVis(ctx, alloc);
+        vis = fv.vis;
+        sky_vis = fv.sky;
+    }
 
     var s: usize = lo3[gd.nax];
     while (s < hi3[gd.nax]) : (s += 1) {
@@ -957,8 +1110,26 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, lm
             base[gd.nax] = s;
             base[gd.uax] = r.u;
             base[gd.vax] = r.v;
+            // Cave-partition class: dark unless ANY merged cell's faced cell
+            // sees sky (or water). Conservative on purpose — a wall running
+            // from a lit entrance into the dark stays in the always-drawn
+            // surface prefix, so nothing visible from outside is ever cut.
+            var cave = true;
+            scan: for (0..r.h) |dv| {
+                var gi2 = s * sn + (r.v + dv) * sv + r.u * su;
+                var t: usize = 0;
+                while (t < r.w) : ({
+                    t += 1;
+                    gi2 += su;
+                }) {
+                    if (sky_vis[gi2] & bit != 0) {
+                        cave = false;
+                        break :scan;
+                    }
+                }
+            }
             if (!ctx.atlas) {
-                try emitGreedyQuad(alloc, mesh, ctx, gd, di, base, r, null);
+                try emitGreedyQuad(alloc, mesh, ctx, gd, di, base, r, null, cave);
                 continue;
             }
             // Uniform-light rects stay vertex-lit in the plain mesh; gradient
@@ -966,9 +1137,9 @@ fn meshGreedyDir(ctx: *const MeshCtx, alloc: std.mem.Allocator, mesh: *Mesh2, lm
             // quad, so the atlas region is one contiguous tail — no per-vertex
             // flags, and its lmuv stream delta-codes like positions do).
             if (try sampleLmPatch(ctx, alloc, out_lm, gd, di, s, r)) |uni| {
-                try emitGreedyQuad(alloc, mesh, ctx, gd, di, base, r, uni);
+                try emitGreedyQuad(alloc, mesh, ctx, gd, di, base, r, uni, cave);
             } else {
-                try emitGreedyQuad(alloc, lm_mesh, ctx, gd, di, base, r, null);
+                try emitGreedyQuad(alloc, lm_mesh, ctx, gd, di, base, r, null, cave);
             }
         }
     }
@@ -1045,7 +1216,7 @@ fn sampleLmPatch(ctx: *const MeshCtx, alloc: std.mem.Allocator, out: *LmPartial,
 /// the merged w×h footprint (UV tiles via repeat-wrap). Light/AO per vertex come
 /// from the merge key (flat mode), from `uni` (an atlas-mode rect that sampled
 /// uniform), or are placeholders for atlas-lit rects (the lightmap wins).
-fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, gd: GDir, di: usize, base: [3]usize, r: Rect, uni: ?LmUniform) !void {
+fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, gd: GDir, di: usize, base: [3]usize, r: Rect, uni: ?LmUniform, cave: bool) !void {
     const g = ctx.g;
     const id = r.key.id;
     const face = ctx.cache[id].?.faces[@intCast(ctx.greedy_faces[id][di])];
@@ -1106,6 +1277,7 @@ fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, g
             });
         }
     }
+    try mesh.cave.append(alloc, cave);
     mesh.vertex_count += 4;
 }
 
@@ -1219,10 +1391,13 @@ const TopScratch = struct {
 /// The fluid-top merge key rides `GKey`: `ao` carries the f32 bits of the
 /// surface height (corners must agree to the BIT to merge — that's what keeps
 /// merged sheets watertight against per-cell neighbours) and `light` packs
-/// [light byte, water depth, 0, 0]. Block id is irrelevant — a source and a
-/// falling column merge fine if their exposed tops line up.
-fn fluidTopKey(bid: u16, light: u8, depth: u8, h: f32) GKey {
-    return .{ .id = 0, .biome = bid, .ao = @bitCast(h), .light = .{ light, depth, 0, 0 } };
+/// [light byte, water depth, cave flag, 0]. Block id is irrelevant — a source
+/// and a falling column merge fine if their exposed tops line up. The cave
+/// flag (the cell above is sky-hidden) rides the key so a merged sheet never
+/// mixes partition classes; water tops can't mix anyway (their light IS the
+/// above cell's), lava tops can (lava is lit by its own full-bright cell).
+fn fluidTopKey(bid: u16, light: u8, depth: u8, h: f32, cave: bool) GKey {
+    return .{ .id = 0, .biome = bid, .ao = @bitCast(h), .light = .{ light, depth, @intFromBool(cave), 0 } };
 }
 
 /// Greedy-merge the FLAT exposed fluid tops of one y-slice into big
@@ -1285,7 +1460,7 @@ fn meshFluidTops(
             const light = if (kind == .lava) g.lightAt(xi, yi, zi) else g.lightAt(xi, yi + 1, zi);
             const idx = z * U + x;
             s.present[idx] = true;
-            s.keys[idx] = fluidTopKey(@intCast(g.biomeAt(x, y, z)), light, depth, h);
+            s.keys[idx] = fluidTopKey(@intCast(g.biomeAt(x, y, z)), light, depth, h, ctx.skyHidden(xi, yi + 1, zi));
             any = true;
         }
     }
@@ -1332,6 +1507,7 @@ fn meshFluidTops(
             try mesh.normals.appendSlice(alloc, &.{ 0, 127, 0, light });
             try mesh.biome.append(alloc, bid_f);
         }
+        try mesh.cave.append(alloc, r.key.light[2] != 0);
         mesh.vertex_count += 4;
     }
 }
@@ -1451,6 +1627,10 @@ fn emitFluid(
     for (tex_faces, vis) |tf, visible| {
         if (!visible) continue;
         const lp: i8 = if (kind == .lava) own_light else @bitCast(g.lightAt(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2]));
+        // Cave-partition class from the faced cell for BOTH fluids — lava is
+        // LIT by its own cell, but sky-visibility is a property of the air the
+        // face looks into.
+        const face_cave = ctx.skyHidden(xi + tf.d[0], yi + tf.d[1], zi + tf.d[2]);
         const is_up = tf.n[1] > 0;
         const is_side = tf.n[1] == 0;
         const flow_top = is_up and flowing;
@@ -1481,6 +1661,7 @@ fn emitFluid(
             try mesh.normals.appendSlice(arena, &.{ nrm[0], nrm[1], nrm[2], lp });
             try mesh.biome.append(arena, bid_f);
         }
+        try mesh.cave.append(arena, face_cave);
         mesh.vertex_count += 4;
     }
 }
@@ -1926,7 +2107,7 @@ fn addv(a: [3]i8, b: [3]i8) [3]i8 {
 /// `rgb` is the face's biome tint (shared by all 4 verts); `ao` and `light` are
 /// per-vertex — AO brightness in the colour's alpha, packed sky/block light in
 /// the normal's spare 4th byte (equal across verts for flat-quality faces).
-fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, wx: f32, wy: f32, wz: f32, face: BakedFace, rgb: [3]u8, ao: [4]u8, light: [4]u8, bid: usize) !void {
+fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, wx: f32, wy: f32, wz: f32, face: BakedFace, rgb: [3]u8, ao: [4]u8, light: [4]u8, bid: usize, cave: bool) !void {
     const bid_f: f32 = @floatFromInt(bid);
     const blend = ctx.blend_biomes and isBlendable(face.tint);
     const ox = wx - @as(f32, @floatFromInt(ctx.g.min_x));
@@ -1941,6 +2122,7 @@ fn emitBaked(arena: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, wx: f3
         try mesh.normals.appendSlice(arena, &.{ v.n[0], v.n[1], v.n[2], @bitCast(light[i]) });
         try mesh.biome.append(arena, bid_f);
     }
+    try mesh.cave.append(arena, cave);
     mesh.vertex_count += 4;
 }
 
@@ -2392,6 +2574,107 @@ test "greedy pass emits only interior cells (apron feeds reads, not geometry)" {
         try std.testing.expect(px >= 1 and px <= 3);
         try std.testing.expect(pz >= 1 and pz <= 3);
     }
+}
+
+test "greedy pass classifies sky-lit vs cave-dark faces (flat mode fragments at the boundary)" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    // Stone floor at y=0, air at y=1; the air over x=1 is sky-lit, over x=2
+    // pitch dark. Flat-light merge keys include the light, so the up-faces
+    // fragment into a lit rect and a dark rect — the dark one must be flagged
+    // cave, the lit one surface.
+    var ids = [_]u16{1} ** 16 ++ [_]u16{0} ** 16;
+    var light = [_]u8{0} ** 32;
+    for (1..3) |z| {
+        light[(1 * 4 + z) * 4 + 1] = 0xF0; // x=1: open sky
+        light[(1 * 4 + z) * 4 + 2] = 0x00; // x=2: cave-dark
+    }
+    var names = [_][]const u8{ "", "minecraft:stone" };
+    const g: grid.Grid = .{ .sx = 4, .sy = 2, .sz = 4, .min_x = 0, .min_y = 0, .min_z = 0, .ids = &ids, .names = &names, .light = &light };
+    const up = dirIndex(.up);
+    var faces_buf = [_]BakedFace{.{
+        .verts = .{
+            .{ .pos = .{ 0, 1, 0 }, .uv = .{ 0, 0 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 0, 1, 1 }, .uv = .{ 0, 1 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 1, 1, 1 }, .uv = .{ 1, 1 }, .n = .{ 0, 1, 0 } },
+            .{ .pos = .{ 1, 1, 0 }, .uv = .{ 1, 0 }, .n = .{ 0, 1, 0 } },
+        },
+        .layer = 0,
+        .tint = .none,
+        .cull = .up,
+        .ao = false,
+        .greedy = true,
+        .ao_off = .{.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }} ** 4,
+    }};
+    var cache = [_]?Cached{ null, .{ .faces = &faces_buf, .occluder = true } };
+    var greedy_faces = [_][6]i16{ .{ -1, -1, -1, -1, -1, -1 }, .{ -1, -1, -1, -1, -1, -1 } };
+    greedy_faces[1][up] = 0;
+    const nkind = @as(usize, biome.Tint.count);
+    const tint = try a.alloc([3]u8, 1 * nkind);
+    @memset(tint, .{ 255, 255, 255 });
+    var id_occluder = [_]bool{ false, true };
+    const ctx: MeshCtx = .{
+        .g = g,
+        .cache = &cache,
+        .id_occluder = &id_occluder,
+        .is_water = &.{ false, false },
+        .is_lava = &.{ false, false },
+        .waterish = &.{ false, false },
+        .tint_colors = tint,
+        .nkind = nkind,
+        .quality = .flat,
+        .blend_biomes = false,
+        .fluid_level = &.{ -1, -1 },
+        .greedy_faces = &greedy_faces,
+        .interior = .{ .x0 = 1, .z0 = 1, .x1 = 3, .z1 = 3 },
+        .cave_y = null,
+    };
+    var out: Mesh2 = .{};
+    var out_lm_mesh: Mesh2 = .{};
+    var out_lm: LmPartial = .{};
+    try meshGreedyDir(&ctx, a, &out, &out_lm_mesh, &out_lm, up);
+    // Two 1×2 rects (light differs along x), one flag per quad, dark second.
+    try std.testing.expectEqual(@as(u32, 8), out.vertex_count);
+    try std.testing.expectEqualSlices(bool, &.{ false, true }, out.cave.items);
+}
+
+test "partitionCaveTail moves cave quads to a stable tail (lmuv range included)" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    // Three quads tagged by their layer value (10, 20, 30); the middle one is
+    // surface, the outer two cave. All three sit in the lmuv-bearing tail
+    // (lm_base = 0) so the lmuv stream must follow the permutation too.
+    var m: Mesh2 = .{};
+    for (0..3) |q| {
+        const tag: f32 = @floatFromInt((q + 1) * 10);
+        for (0..4) |_| {
+            try m.positions.appendSlice(a, &.{ tag, 0, 0 });
+            try m.uv.appendSlice(a, &.{ tag, tag });
+            try m.layer.append(a, tag);
+            try m.color.appendSlice(a, &.{ 1, 2, 3, 4 });
+            try m.normals.appendSlice(a, &.{ 0, 1, 0, 0 });
+            try m.biome.append(a, tag);
+            try m.lmuv.appendSlice(a, &.{ @intFromFloat(tag), @intFromFloat(tag + 1) });
+        }
+        try m.cave.append(a, q != 1);
+        m.vertex_count += 4;
+    }
+    const boundary = try partitionCaveTail(&m, 0, 3, 0);
+    // One surface quad → the boundary is vertex 4.
+    try std.testing.expectEqual(@as(u32, 4), boundary);
+    // Order is now [20, 10, 30]: surface first, then the cave quads in their
+    // original relative order (stable).
+    try std.testing.expectEqualSlices(f32, &.{ 20, 10, 30 }, &.{ m.layer.items[0], m.layer.items[4], m.layer.items[8] });
+    try std.testing.expectEqual(@as(f32, 20), m.positions.items[0]);
+    try std.testing.expectEqual(@as(f32, 10), m.positions.items[12]);
+    try std.testing.expectEqual(@as(u16, 20), m.lmuv.items[0]);
+    try std.testing.expectEqual(@as(u16, 11), m.lmuv.items[9]);
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true }, m.cave.items);
+    // Ranges that end before lm_base leave the lmuv stream alone.
+    const head_only = try partitionCaveTail(&m, 0, 1, 1);
+    try std.testing.expectEqual(@as(u32, 4), head_only);
 }
 
 test "atlas mode: a merged rect yields one (w+1)x(h+1) lightmap patch + local lmuv" {

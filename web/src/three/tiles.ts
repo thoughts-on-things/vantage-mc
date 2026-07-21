@@ -240,6 +240,9 @@ export class TileManager {
   /** Distance² where the last plan ran out of budget (null = nothing cut).
    *  Derives {@link admittedRadius} — the honest hires frontier. */
   private planCutoffSq: number | null = null;
+  /** When the last plan ran, so byte-estimate learning re-plans at a bounded
+   *  rate instead of once per tile load. */
+  private lastPlanMs = 0;
   /** Compressed tile payloads kept after eviction, keyed by tile key. A
    *  revisit rebuilds from here — no network fetch, no server re-bake. LRU
    *  by Map insertion order, bounded by `tileCacheBytes`. */
@@ -399,6 +402,7 @@ export class TileManager {
       (t) => this.sizeHints.get(tileKey(t.x, t.z)) ?? Math.max(this.averageHiresBytes, t.bytes * 20),
     );
     this.planCutoffSq = plan.cutoffSq;
+    this.lastPlanMs = performance.now();
     this.applyHazeFloor(); // the honest hires frontier may have moved
     const desired = plan.admitted.map((candidate) => ({ t: candidate.ref, d: candidate.distanceSq }));
     const desiredKeys = new Set(desired.map(({ t }) => recKey(0, t.x, t.z)));
@@ -435,6 +439,17 @@ export class TileManager {
     for (const [key, rec] of this.records) {
       if (desiredKeys.has(key)) continue;
       if (rec.level === 0) {
+        // Hysteresis for READY tiles just outside the plan: the admission
+        // frontier breathes as byte estimates are learned and the camera
+        // moves, and unloading on every breath re-fetches the same ring
+        // tiles over and over — the boundary-flicker machine. They stay
+        // until clearly behind the frontier; real memory pressure still
+        // reclaims farthest-first via trimToMemoryBudget. Unfinished work
+        // (loading/built/failed) outside the plan is still cancelled now.
+        if (rec.state === 'ready') {
+          const keep = this.admittedRadius * 1.15 + this.tileBlocks * 0.5;
+          if (this.distSqTo(rec.ref, 0, focusX, focusZ) <= keep * keep) continue;
+        }
         this.unload(key, rec);
         continue;
       }
@@ -479,6 +494,18 @@ export class TileManager {
     }
   }
 
+  /** Whether anything already draws terrain under hires tile (x,z) — a
+   *  remembered/queued impostor, or a resident lowres ring covering it. */
+  private hasUnderlay(x: number, z: number): boolean {
+    if (this.impostors?.has(tileKey(x, z))) return true;
+    for (const lvl of this.lowLevels) {
+      const f = 2 ** lvl.level;
+      const rec = this.records.get(recKey(lvl.level, Math.floor(x / f), Math.floor(z / f)));
+      if (rec?.state === 'ready') return true;
+    }
+    return false;
+  }
+
   /** Insert built tiles into the scene at a bounded per-frame rate (via
    *  update()), so GPU buffer uploads are spread across frames instead of
    *  bursting. Normally one per frame; when a backlog builds (a big preset
@@ -492,13 +519,17 @@ export class TileManager {
       if (!rec || rec.state !== 'built') continue; // unloaded while queued
       rec.state = 'ready';
       this.pendingBuilt--;
-      // Dissolve in rather than pop: the tile starts fully transparent and
-      // fades up over FADE_MS (alpha-to-coverage dither under MSAA). The
-      // lowres placeholder keeps showing beneath until the fade retires, so
-      // the hires lighting eases in over the flat-lit underlay instead of
-      // snapping on — the "lighting pop-in" fix.
-      rec.fadeStart = performance.now();
-      this.fadingKeys.add(key);
+      // Dissolve in rather than pop — but ONLY over an underlay (a lowres
+      // ring, a remembered impostor, or a still-pinned outgoing capture).
+      // The fade starts fully transparent, so over nothing it spends FADE_MS
+      // showing the background through the dither: the "white square slowly
+      // filling in" read at a pan's leading edge. With no underlay the tile
+      // appears at full opacity immediately; with one, the hires lighting
+      // eases in over the flat-lit stand-in — the "lighting pop-in" fix.
+      if (rec.level !== 0 || this.hasUnderlay(rec.ref.x, rec.ref.z)) {
+        rec.fadeStart = performance.now();
+        this.fadingKeys.add(key);
+      }
       this.opts.scene.add(rec.terrain!);
       if (rec.terrainLm) this.opts.scene.add(rec.terrainLm);
       if (rec.water) this.opts.scene.add(rec.water);
@@ -913,8 +944,10 @@ export class TileManager {
       this.averageHiresBytes = this.averageHiresBytes * 0.875 + rec.memoryBytes * 0.125;
       // A budget-cut plan re-runs as real sizes are learned: decoded tiles
       // usually cost less than the conservative estimate, so the next plan
-      // often affords more of the disc. Cheap — planning is O(visible grid).
-      if (this.planCutoffSq !== null) {
+      // often affords more of the disc. Throttled — replanning after every
+      // load makes the frontier breathe tile-by-tile, and each breath churns
+      // the boundary ring.
+      if (this.planCutoffSq !== null && performance.now() - this.lastPlanMs > 250) {
         this.lastFocusX = Infinity;
         this.lastFocusZ = Infinity;
       }
@@ -951,13 +984,16 @@ export class TileManager {
     if (priorState === 'built') this.pendingBuilt--;
     // Map memory: a fully-streamed hires tile leaving the ring hands its
     // meshes to the impostor layer (which renders one snapshot, then disposes
-    // them) instead of vanishing. Anything not worth remembering — partial
-    // loads, lowres records — is disposed as before.
+    // them) instead of vanishing. Remembered meshes STAY IN THE SCENE until
+    // that snapshot lands — removing them here would open a background-
+    // colored hole for every frame the capture queue hasn't drained yet, the
+    // white-square wake a fast pan used to leave behind. Anything not worth
+    // remembering — partial loads, lowres records — is disposed as before.
     const remember = this.impostors !== null && rec.level === 0 && priorState === 'ready' && rec.terrain !== undefined && rec.surface !== undefined;
     for (const mesh of [rec.terrain, rec.terrainLm, rec.water]) {
       if (!mesh) continue;
+      if (remember) continue; // scene membership + disposal move to the impostor layer below
       this.opts.scene.remove(mesh);
-      if (remember) continue; // ownership moves to the impostor layer below
       // Detach the shared quad index first: dispose() deletes the GPU buffers
       // of everything still attached, and the index is shared by every tile.
       if (isSharedQuadIndex(mesh.geometry.index)) mesh.geometry.setIndex(null);
@@ -1021,11 +1057,15 @@ export class TileManager {
         hires.push({ key, rec, d: this.distSqTo(rec.ref, 0, this.focusX, this.focusZ) });
       }
     }
-    if (total <= this.opts.maxBytes || hires.length <= 1) return;
+    // The unload hysteresis lets ready tiles linger past the plan frontier;
+    // this is where their count is truly bounded (bytes AND a capped tile-
+    // count overshoot), farthest first.
+    const maxResident = Math.ceil(this.opts.maxTiles * 1.25);
+    if ((total <= this.opts.maxBytes && hires.length <= maxResident) || hires.length <= 1) return;
     hires.sort((a, b) => b.d - a.d);
     let remaining = hires.length;
     for (const entry of hires) {
-      if (total <= this.opts.maxBytes || remaining <= 1) break;
+      if ((total <= this.opts.maxBytes && remaining <= maxResident) || remaining <= 1) break;
       total -= entry.rec.memoryBytes;
       remaining--;
       this.unload(entry.key, entry.rec);

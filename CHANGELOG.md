@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/thoughts-on-things/vantage-mc/compare/v0.9.0...v0.9.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* support Minecraft 26.2 sprite texture bindings ([#57](https://github.com/thoughts-on-things/vantage-mc/issues/57)) ([9a4a0c0](https://github.com/thoughts-on-things/vantage-mc/commit/9a4a0c049522fc42bc5cf30f69916ad6bceb48ae))
+
 ## [0.9.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.8.0...v0.9.0) (2026-07-21)
 
 

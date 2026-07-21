@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.8.0...v0.9.0) (2026-07-21)
+
+
+### Features
+
+* large-world server streaming — prebake, contiguous admission, revisit cache, lossless map memory ([#55](https://github.com/thoughts-on-things/vantage-mc/issues/55)) ([53f8c9e](https://github.com/thoughts-on-things/vantage-mc/commit/53f8c9e14635ed93c89b0a8ab53820aba9389f0b))
+
 ## [0.8.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.7.0...v0.8.0) (2026-07-19)
 
 

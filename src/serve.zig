@@ -14,6 +14,18 @@ const builtin = @import("builtin");
 const viewer = @import("viewer_assets");
 const openapi_spec = @import("server_openapi").json;
 
+/// What a {@link Producer} sees of one request: the manifest-relative path,
+/// plus the negotiation bits that let it skip work — a validator so an
+/// unchanged resource never has to be rebuilt or copied, and gzip acceptance
+/// so large JSON (the live manifest) travels compressed.
+pub const ProduceRequest = struct {
+    path: []const u8,
+    /// The request's If-None-Match value, verbatim, when present.
+    validator: ?[]const u8 = null,
+    /// Whether the client accepts a gzip content-coding.
+    accept_gzip: bool = false,
+};
+
 /// A dynamic response a {@link Producer} synthesized for a request path.
 pub const Produced = struct {
     body: []const u8,
@@ -23,6 +35,9 @@ pub const Produced = struct {
     /// `304 Not Modified` with no body — the continuous manifest sets this so
     /// idle pollers stop re-downloading an unchanged catalog.
     etag: ?[]const u8 = null,
+    /// Set (to `"gzip"`) when `body` carries that content-coding. Producers
+    /// only compress when the request's `accept_gzip` said they may.
+    content_encoding: ?[]const u8 = null,
 };
 
 /// An on-demand content source (the `vantage live` server): given a
@@ -31,10 +46,10 @@ pub const Produced = struct {
 /// serving. `arena` is a per-request arena, freed after the response is sent.
 pub const Producer = struct {
     ctx: *anyopaque,
-    func: *const fn (ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, path: []const u8) anyerror!?Produced,
+    func: *const fn (ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, request: ProduceRequest) anyerror!?Produced,
 
-    fn produce(self: Producer, io: std.Io, arena: std.mem.Allocator, path: []const u8) !?Produced {
-        return self.func(self.ctx, io, arena, path);
+    fn produce(self: Producer, io: std.Io, arena: std.mem.Allocator, request: ProduceRequest) !?Produced {
+        return self.func(self.ctx, io, arena, request);
     }
 };
 
@@ -209,15 +224,8 @@ fn serveRequest(
     if (req.head.method != .HEAD) if (producer) |p| {
         var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena_inst.deinit();
-        if (try p.produce(io, arena_inst.allocator(), target[1..])) |resp| {
-            if (resp.etag) |etag|
-                return respondConditional(req, resp.content_type, resp.body, "no-cache", null, etag);
-            return req.respond(resp.body, .{ .extra_headers = &.{
-                .{ .name = "content-type", .value = resp.content_type },
-                .{ .name = "cache-control", .value = "no-cache" },
-                security_headers[0],
-                security_headers[1],
-            } });
+        if (try p.produce(io, arena_inst.allocator(), producerRequest(req, target[1..]))) |resp| {
+            return respondProduced(req, resp, "no-cache", null);
         }
     };
 
@@ -331,10 +339,8 @@ fn serveApiRequest(
     if (req.head.method != .HEAD) if (producer) |p| {
         var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena_inst.deinit();
-        if (try p.produce(io, arena_inst.allocator(), rel)) |resp| {
-            if (resp.etag) |etag|
-                return respondConditional(req, resp.content_type, resp.body, "private, no-store", origin, etag);
-            return apiRespond(req, .ok, resp.content_type, resp.body, "private, no-store", origin);
+        if (try p.produce(io, arena_inst.allocator(), producerRequest(req, rel))) |resp| {
+            return respondProduced(req, resp, "private, no-store", origin);
         }
     };
 
@@ -407,33 +413,60 @@ fn addCorsHeaders(headers: *HeaderBuffer, origin: []const u8) void {
     headers.add("vary", "Origin");
 }
 
-/// 200 carrying a strong validator, or 304 with no body when the request's
-/// If-None-Match already names it. A duplicate If-None-Match is ambiguous, so
-/// the precondition is ignored and the full body answers.
-fn respondConditional(
+/// Assemble what the producer sees of one request. Duplicate conditional or
+/// encoding headers are ambiguous and fail safe (full body, identity coding).
+fn producerRequest(req: *const std.http.Server.Request, path: []const u8) ProduceRequest {
+    const inm = requestHeader(req, "if-none-match");
+    const enc = requestHeader(req, "accept-encoding");
+    return .{
+        .path = path,
+        .validator = if (inm.duplicate) null else inm.value,
+        .accept_gzip = !enc.duplicate and enc.value != null and acceptsGzip(enc.value.?),
+    };
+}
+
+/// Whether an Accept-Encoding value admits gzip. Coding names are matched as
+/// list members; a `q=0` opt-out is still treated as acceptance — no real
+/// client sends one, and the worst case is a response it can decode anyway.
+fn acceptsGzip(value: []const u8) bool {
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |raw| {
+        var name = std.mem.trim(u8, raw, " \t");
+        if (std.mem.indexOfScalar(u8, name, ';')) |semi| name = std.mem.trim(u8, name[0..semi], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "gzip") or std.mem.eql(u8, name, "*")) return true;
+    }
+    return false;
+}
+
+/// Send a producer's response: a 200 carrying the body (and its optional
+/// validator/content-coding), or a 304 with no body when the request's
+/// If-None-Match already names the validator. A duplicate If-None-Match is
+/// ambiguous, so the precondition is ignored and the full body answers.
+fn respondProduced(
     req: *std.http.Server.Request,
-    content_type: []const u8,
-    body: []const u8,
+    resp: Produced,
     cache_control: []const u8,
     origin: ?[]const u8,
-    etag: []const u8,
 ) !void {
     const inm = requestHeader(req, "if-none-match");
-    const unchanged = !inm.duplicate and inm.value != null and etagMatches(inm.value.?, etag);
+    const unchanged = resp.etag != null and !inm.duplicate and inm.value != null and etagMatches(inm.value.?, resp.etag.?);
     var headers: HeaderBuffer = .{};
     // A 304 carries only cache metadata, not representation headers.
-    if (!unchanged) headers.add("content-type", content_type);
+    if (!unchanged) {
+        headers.add("content-type", resp.content_type);
+        if (resp.content_encoding) |coding| headers.add("content-encoding", coding);
+    }
     headers.add("cache-control", cache_control);
-    headers.add("etag", etag);
+    if (resp.etag) |etag| headers.add("etag", etag);
     headers.add(security_headers[0].name, security_headers[0].value);
     headers.add(security_headers[1].name, security_headers[1].value);
     if (origin) |value| {
         addCorsHeaders(&headers, value);
         // Cross-origin scripts only see safelisted response headers; the
         // viewer must read the validator to poll conditionally.
-        headers.add("access-control-expose-headers", "ETag");
+        if (resp.etag != null) headers.add("access-control-expose-headers", "ETag");
     }
-    return req.respond(if (unchanged) "" else body, .{
+    return req.respond(if (unchanged) "" else resp.body, .{
         .status = if (unchanged) .not_modified else .ok,
         .extra_headers = headers.slice(),
     });
@@ -441,7 +474,9 @@ fn respondConditional(
 
 /// RFC 9110 If-None-Match: `*`, or a comma-separated entity-tag list compared
 /// weakly (a `W/` prefix on a presented tag still matches our strong tag).
-fn etagMatches(header: []const u8, etag: []const u8) bool {
+/// Public so producers holding a cached validator can skip building a body
+/// the transport layer would immediately discard as a 304.
+pub fn etagMatches(header: []const u8, etag: []const u8) bool {
     if (std.mem.eql(u8, std.mem.trim(u8, header, " \t"), "*")) return true;
     var it = std.mem.splitScalar(u8, header, ',');
     while (it.next()) |raw| {
@@ -643,6 +678,17 @@ test "origin allowlist is exact" {
     try std.testing.expect(originAllowed(&allowed, "https://maps.example"));
     try std.testing.expect(!originAllowed(&allowed, "https://maps.example.evil"));
     try std.testing.expect(!originAllowed(&allowed, "https://maps.example/"));
+}
+
+test "accept-encoding negotiation admits gzip as a list member" {
+    try std.testing.expect(acceptsGzip("gzip"));
+    try std.testing.expect(acceptsGzip("gzip, deflate, br"));
+    try std.testing.expect(acceptsGzip("deflate, gzip;q=0.5"));
+    try std.testing.expect(acceptsGzip("GZIP"));
+    try std.testing.expect(acceptsGzip("*"));
+    try std.testing.expect(!acceptsGzip("deflate, br"));
+    try std.testing.expect(!acceptsGzip("gzipped")); // a name, not a list member
+    try std.testing.expect(!acceptsGzip(""));
 }
 
 test "if-none-match validators match strong etags" {

@@ -154,6 +154,7 @@ Useful server-specific flags are:
 | `--max-connections <n>` | `64` | Hard cap on concurrent HTTP connection workers. |
 | `--allow-origin <origin>` | none | Exact browser origin allowed by CORS; repeatable. |
 | `--token-env <name>` | `VANTAGE_SERVER_TOKEN` | Environment variable holding the internal bearer. |
+| `--prebake on\|off` | `on` | Background-bake the world with idle bake slots (see below). |
 
 All `vantage live` render controls also apply, including `--radius`,
 `--tile-chunks`, `--caves`, `--light`, `--biome-blend`, `--gz`, `--memory`, and
@@ -195,6 +196,25 @@ The manifest response also carries a strong `ETag` over its exact body
 unchanged, so an idle map costs a status line per poll instead of the full
 tile list. The bundled viewer does this automatically; clients that never
 send `If-None-Match` see identical protocol v1 behavior.
+
+The built manifest is cached server-side per change generation, so idle
+conditional polls cost a counter compare rather than an O(tiles) rebuild, and
+changed manifests travel `Content-Encoding: gzip` to clients whose
+`Accept-Encoding` admits it — on a large world the tile catalog is megabytes
+of repetitive JSON and is re-fetched every poll while tiles bake.
+
+### Background prebake
+
+On-demand baking alone means every first look at an area waits a full tile
+bake. With `--prebake on` (the default), idle bake slots continuously bake the
+unbaked tile nearest the most recent viewer request — spawn-outward until
+anyone connects — so exploration mostly lands on warm cache. Interactive
+fetches keep priority: prebake workers stand down while any viewer request is
+waiting for a bake permit, and one slot's worth of headroom is reserved for
+them. After a world save advances tile revisions, the same loop re-bakes the
+changed tiles on its own, so clients pick up edits without ever fetching cold.
+The cache therefore converges on a full render of the world; disable with
+`--prebake off` if disk or CPU budget forbids that.
 
 ## Host integration
 

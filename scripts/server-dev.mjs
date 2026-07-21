@@ -259,11 +259,29 @@ async function smokeCheck(serverUrl, viewerOrigin, token) {
 
   const authHeaders = { Authorization: `Bearer ${token}`, Origin: viewerOrigin };
   const manifestUrl = new URL('/v1/worlds/default/manifest.json', serverUrl);
+
+  // Prebake converges on the whole world in the background; wait for it so the
+  // ETag pair-check below sees a quiescent catalog (and so the smoke actually
+  // verifies prebake finishes).
+  const prebakeDeadline = Date.now() + 120_000;
+  for (;;) {
+    const probe = await fetch(manifestUrl, { headers: authHeaders, signal: AbortSignal.timeout(30_000) });
+    assertResponse(probe.ok, `manifest returned HTTP ${probe.status}`);
+    const body = await probe.json();
+    if (!body.progress || body.progress.done >= body.progress.total) break;
+    assertResponse(Date.now() < prebakeDeadline, `prebake did not finish (${body.progress.done}/${body.progress.total})`);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+  }
+
   const manifestResponse = await fetch(manifestUrl, {
     headers: authHeaders,
     signal: AbortSignal.timeout(30_000),
   });
   assertResponse(manifestResponse.ok, `manifest returned HTTP ${manifestResponse.status}`);
+  assertResponse(
+    (manifestResponse.headers.get('content-encoding') ?? '').includes('gzip'),
+    'manifest should travel gzip-coded to accepting clients',
+  );
   assertResponse(
     manifestResponse.headers.get('access-control-allow-origin') === viewerOrigin,
     'manifest did not return the exact configured CORS origin',

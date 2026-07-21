@@ -95,16 +95,20 @@ fn printUsage() void {
         \\  vantage live    <world-save-dir> [--out <dir>] [--tile-chunks <n>] [--radius <chunks>]
         \\                  [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
         \\                  [--threads <n>] [--memory <MiB>] [--gz <1..12>] [--port <n>] [--host <addr>] [--open]
+        \\                  [--prebake on|off]
         \\      Open a world in the browser NOW — no full pre-render. Every tile is
         \\      listed up front and baked on demand as it scrolls into view, caching
         \\      into --out (default web/public) so panning back is instant.
+        \\      --prebake on also bakes the rest of the world in the background.
         \\  vantage server  <world-save-dir> [live render flags] [--port <n>] [--host <addr>]
         \\                  [--token-env <name>] [--allow-origin <origin>] [--max-connections <n>]
-        \\                  [--scan-interval <seconds>]
+        \\                  [--scan-interval <seconds>] [--prebake on|off]
         \\      Run the hardened Vantage server data plane for launchers and web apps.
         \\      Binds to 127.0.0.1 by default for an authenticating reverse proxy.
         \\      Non-loopback binds require a >=32-byte bearer secret in the environment
         \\      (VANTAGE_SERVER_TOKEN by default). TLS belongs at the reverse proxy.
+        \\      Idle bake slots prebake the world around the viewer (--prebake off
+        \\      to disable); saved world edits re-bake changed tiles automatically.
         \\  vantage extract [client.jar]
         \\      Extract the assets a render needs into ~/.cache/vantage/assets/<version>.
         \\      With no argument, uses the newest jar in your .minecraft/versions.
@@ -248,10 +252,26 @@ fn bakeMemoryBudget(explicit_mib: ?usize) usize {
     return std.math.clamp(physical / 8, 512 * MiB, 1024 * MiB);
 }
 
+/// `vantage server` is a dedicated service, so its default bake pool is
+/// sized like one: a quarter of physical RAM, clamped 512 MiB – 4 GiB. More
+/// budget means more concurrent bake slots, which is what prebake throughput
+/// and multi-viewer cold starts scale with. `--memory` still overrides.
+fn serverBakeMemoryBudget(explicit_mib: ?usize) usize {
+    if (explicit_mib) |mib| return std.math.mul(usize, mib, MiB) catch std.math.maxInt(usize);
+    const physical: usize = @intCast(@min(std.process.totalSystemMemory() catch 4 * 1024 * MiB, std.math.maxInt(usize)));
+    return std.math.clamp(physical / 4, 512 * MiB, 4096 * MiB);
+}
+
 fn bakeWorkerCount(cpu_count: usize, work_items: usize, requested: ?usize, memory_bytes: usize, per_worker: usize) usize {
     const cpu_limit = @max(1, requested orelse cpu_count);
     const memory_limit = @max(1, memory_bytes / @max(1, per_worker));
     return @max(1, @min(@min(cpu_limit, memory_limit), @max(1, work_items)));
+}
+
+test "server bake budget honors --memory and clamps its default" {
+    try std.testing.expectEqual(@as(usize, 2048 * MiB), serverBakeMemoryBudget(2048));
+    const auto = serverBakeMemoryBudget(null);
+    try std.testing.expect(auto >= 512 * MiB and auto <= 4096 * MiB);
 }
 
 test "bake admission is bounded by memory, cpu, request, and work" {
@@ -2017,6 +2037,18 @@ const BakedTile = struct {
     revision: u64,
 };
 
+/// One built manifest representation, kept until the catalog's generation
+/// moves: the raw JSON, a gzip coding of it, and the strong validator over
+/// the raw bytes. Owns its allocations via a dedicated arena so a swap can
+/// free the previous generation in O(1) once no reader holds the mutex.
+const ManifestCache = struct {
+    arena: std.heap.ArenaAllocator,
+    generation: u64,
+    body: []const u8,
+    gzip: []const u8,
+    etag: []const u8,
+};
+
 /// Ref-counted, independently allocated view of the live region catalog. A
 /// refresh swaps the current pointer in O(1); in-flight bakes retain their old
 /// snapshot until completion, then its arena is reclaimed in one operation.
@@ -2126,6 +2158,27 @@ const LiveServer = struct {
     max_section_verts: u64 = 0,
     y_min: i32 = std.math.maxInt(i32),
     y_max: i32 = std.math.minInt(i32),
+    /// Monotonic change counter over everything the manifest reports: bumped
+    /// by every recorded bake and snapshot swap. The manifest cache below is
+    /// valid exactly while this stands still — which on a warm server is
+    /// almost always, so idle polls cost a generation compare, not an
+    /// O(tiles) JSON rebuild.
+    manifest_generation: u64 = 1,
+    manifest_cache: ?ManifestCache = null,
+    /// One thread rebuilds the cache per generation; racers fall back to a
+    /// plain per-request build rather than sharing a build arena.
+    manifest_building: bool = false,
+    /// Tile coordinates of the viewer's most recent tile request — the
+    /// prebake workers' focus, so idle bake slots warm the terrain the
+    /// player is actually near. Guarded by `mutex`.
+    last_request: ?[2]i32 = null,
+    /// Interactive fetches waiting on a bake permit. Prebake workers check
+    /// this before taking a slot, so a viewer never queues behind background
+    /// work for longer than one in-flight bake.
+    interactive_waiting: std.atomic.Value(usize) = .init(0),
+    /// Prebake focus fallback (the spawn tile) when nothing was requested yet.
+    centre_tx: i32 = 0,
+    centre_tz: i32 = 0,
 
     fn producer(self: *LiveServer) serve.Producer {
         return .{ .ctx = self, .func = produce };
@@ -2149,6 +2202,7 @@ const LiveServer = struct {
             self.y_min = @min(self.y_min, r.y_min);
             self.y_max = @max(self.y_max, r.y_max);
         }
+        self.manifest_generation +%= 1; // the served catalog moved
     }
 
     fn acquireSnapshot(self: *LiveServer) ?*RegionSnapshot {
@@ -2223,6 +2277,7 @@ const LiveServer = struct {
         if (current == null or current.?.catalog_revision != candidate.catalog_revision) {
             self.snapshot = candidate;
             changed = true;
+            self.manifest_generation +%= 1; // tile set/revisions moved
             if (current) |old| {
                 if (self.retireOwnerLocked(old)) old_to_destroy = old;
             }
@@ -2239,26 +2294,121 @@ const LiveServer = struct {
 /// The `serve.Producer` hook: synthesize the paths the live server owns — the
 /// manifest, the texture atlas, and un-cached tiles — and fall through
 /// (null) to static disk serving for everything else.
-fn produce(ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, path: []const u8) !?serve.Produced {
+fn produce(ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, request: serve.ProduceRequest) !?serve.Produced {
     _ = io;
     const self: *LiveServer = @ptrCast(@alignCast(ctx));
-    if (std.mem.eql(u8, path, "manifest.json")) {
-        // A strong validator over the exact bytes lets idle pollers trade the
-        // full catalog for a 304: identical body ⇒ identical tag, and any
-        // revision/progress/atlas movement changes the body.
-        const body = try liveManifest(self, arena);
-        const digest = std.hash.Wyhash.hash(0x5641_4e54_4554_4147, body); // "VANTETAG"
-        return .{
-            .body = body,
-            .content_type = "application/json",
-            .etag = try std.fmt.allocPrint(arena, "\"{x}\"", .{digest}),
-        };
-    }
+    const path = request.path;
+    if (std.mem.eql(u8, path, "manifest.json"))
+        return try manifestResponse(self, arena, request);
     if (std.mem.eql(u8, path, "terrain.vtexarr"))
         return .{ .body = try liveAtlas(self, arena), .content_type = "application/octet-stream" };
     if (parseTilePath(path)) |xz|
         return .{ .body = try liveTile(self, arena, xz[0], xz[1]), .content_type = "application/octet-stream" };
     return null; // not ours — static disk serves it (lowres, favicon, …)
+}
+
+/// The manifest ETag seed ("VANTETAG").
+const MANIFEST_ETAG_SEED: u64 = 0x5641_4e54_4554_4147;
+
+/// Serve the live manifest through a generation-keyed cache. A strong
+/// validator over the exact raw bytes lets idle pollers trade the full
+/// catalog for a 304 — and with the cache, that 304 costs a generation
+/// compare instead of an O(tiles) JSON rebuild. Changed catalogs go out
+/// gzip-coded when the poller accepts it: a large world's manifest is
+/// megabytes of highly repetitive JSON, re-fetched every poll while tiles
+/// bake, and gzip is ~10× on it.
+fn manifestResponse(self: *LiveServer, arena: std.mem.Allocator, request: serve.ProduceRequest) !serve.Produced {
+    const io = self.sh.io;
+    self.maybeRefresh();
+
+    // Fast path: the catalog hasn't moved since the cache was built. The
+    // representation is copied into the request arena UNDER the mutex — the
+    // cache's memory can be freed by a later swap the moment it's released.
+    self.mutex.lockUncancelable(io);
+    const generation = self.manifest_generation;
+    if (self.manifest_cache) |cache| if (cache.generation == generation) {
+        const out = manifestRepresentation(arena, cache.body, cache.gzip, cache.etag, request) catch |e| {
+            self.mutex.unlock(io);
+            return e;
+        };
+        self.mutex.unlock(io);
+        return out;
+    };
+    const lead_build = !self.manifest_building;
+    if (lead_build) self.manifest_building = true;
+    self.mutex.unlock(io);
+
+    if (!lead_build) {
+        // A concurrent poller is already rebuilding the cache; answer this
+        // request with a plain per-request build instead of racing it.
+        const body = try liveManifest(self, arena);
+        const etag = try std.fmt.allocPrint(arena, "\"{x}\"", .{std.hash.Wyhash.hash(MANIFEST_ETAG_SEED, body)});
+        return finishManifest(arena, body, etag, request);
+    }
+
+    // Lead builder: build into a cache-owned arena, answer THIS request from
+    // the freshly-built parts, and only then swap the cache in — after the
+    // swap the arena belongs to the cache and no failable step may run.
+    var cache_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    errdefer cache_arena.deinit();
+    // Any failure before the swap must clear the build claim, or the cache
+    // could never be rebuilt and every poll would degrade to the racer path.
+    errdefer {
+        self.mutex.lockUncancelable(io);
+        self.manifest_building = false;
+        self.mutex.unlock(io);
+    }
+    const ca = cache_arena.allocator();
+    const body = try liveManifest(self, ca);
+    const etag = try std.fmt.allocPrint(ca, "\"{x}\"", .{std.hash.Wyhash.hash(MANIFEST_ETAG_SEED, body)});
+    const gz = try compress.gzipCompress(ca, body, 6);
+    const out = try manifestRepresentation(arena, body, gz, etag, request);
+
+    var old: ?std.heap.ArenaAllocator = null;
+    self.mutex.lockUncancelable(io);
+    self.manifest_building = false;
+    if (self.manifest_cache) |cache| old = cache.arena;
+    // Tagged with the generation observed BEFORE the build: if a bake landed
+    // mid-build the cache is immediately stale and the next poll rebuilds —
+    // the body served now is still a consistent snapshot.
+    self.manifest_cache = .{ .arena = cache_arena, .generation = generation, .body = body, .gzip = gz, .etag = etag };
+    self.mutex.unlock(io);
+    if (old) |*stale| stale.deinit();
+    return out;
+}
+
+/// Pick and copy the representation a request gets — nothing for a validator
+/// match (the transport answers 304), the gzip coding when accepted, else the
+/// raw body — into the request arena.
+fn manifestRepresentation(arena: std.mem.Allocator, body: []const u8, gz: []const u8, etag_src: []const u8, request: serve.ProduceRequest) !serve.Produced {
+    const etag = try arena.dupe(u8, etag_src);
+    if (request.validator) |validator| if (serve.etagMatches(validator, etag)) {
+        return .{ .body = "", .content_type = "application/json", .etag = etag };
+    };
+    if (request.accept_gzip) {
+        return .{
+            .body = try arena.dupe(u8, gz),
+            .content_type = "application/json",
+            .etag = etag,
+            .content_encoding = "gzip",
+        };
+    }
+    return .{ .body = try arena.dupe(u8, body), .content_type = "application/json", .etag = etag };
+}
+
+/// A per-request (uncached) manifest response — the racer path.
+fn finishManifest(arena: std.mem.Allocator, body: []const u8, etag: []const u8, request: serve.ProduceRequest) !serve.Produced {
+    if (request.validator) |validator| if (serve.etagMatches(validator, etag))
+        return .{ .body = "", .content_type = "application/json", .etag = etag };
+    if (request.accept_gzip) {
+        return .{
+            .body = try compress.gzipCompress(arena, body, 6),
+            .content_type = "application/json",
+            .etag = etag,
+            .content_encoding = "gzip",
+        };
+    }
+    return .{ .body = body, .content_type = "application/json", .etag = etag };
 }
 
 /// Parse `tiles/t.<x>.<z>.vtile` → `{x, z}`; null for any other path.
@@ -2286,6 +2436,7 @@ fn liveTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32) ![]co
     if (snapshot == null and !self.known.contains(key)) return "";
 
     self.mutex.lockUncancelable(self.sh.io);
+    self.last_request = .{ tx, tz }; // the prebake workers' focus
     while (true) {
         if (self.baked.get(key)) |cached| if (cached.revision == revision) {
             self.mutex.unlock(self.sh.io);
@@ -2302,7 +2453,11 @@ fn liveTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32) ![]co
         self.ready.waitUncancelable(self.sh.io, &self.mutex);
     }
 
+    // Viewer-driven bakes take priority over prebake: the waiting count keeps
+    // background workers off the slot queue while any request is in line.
+    _ = self.interactive_waiting.fetchAdd(1, .acq_rel);
     self.bake_slots.waitUncancelable(self.sh.io);
+    _ = self.interactive_waiting.fetchSub(1, .acq_rel);
     defer self.bake_slots.post(self.sh.io);
 
     var res: TileResult = .{};
@@ -2314,6 +2469,85 @@ fn liveTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32) ![]co
     self.record(key, revision, if (res.written) &res else null);
     if (!res.written) return ""; // meshed to nothing (all air / cave-culled)
     return readCachedTile(self, arena, tx, tz);
+}
+
+/// Background prebake: while bake slots sit idle, bake the unbaked (or
+/// revision-stale) tile nearest the viewer's last request — else the spawn —
+/// so exploration mostly lands on warm cache instead of waiting a full bake
+/// per tile. Workers share the interactive path's `baking` registry, so a
+/// viewer request for a tile mid-prebake simply waits on the same bake
+/// instead of duplicating it, and revision-stale tiles re-bake on their own
+/// after a world save — players see edits without ever fetching cold.
+fn prebakeLoop(self: *LiveServer) void {
+    const io = self.sh.io;
+    while (true) {
+        if (self.interactive_waiting.load(.acquire) > 0) {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(25), .awake) catch {};
+            continue;
+        }
+        if (!prebakeOne(self)) {
+            // Everything is baked at the current revisions. New work appears
+            // only after a snapshot swap (throttled by --scan-interval), so a
+            // long idle nap keeps the converged no-work scan — O(tiles) under
+            // the state mutex per worker wake — off big worlds' lock.
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(2000), .awake) catch {};
+        }
+    }
+}
+
+/// One prebake step. Returns false when no tile needs baking right now.
+fn prebakeOne(self: *LiveServer) bool {
+    const io = self.sh.io;
+    const snapshot = self.acquireSnapshot();
+    defer if (snapshot) |current| self.releaseSnapshot(current);
+    const keys = if (snapshot) |current| current.tile_keys else self.tile_keys;
+    const regions = if (snapshot) |current| current.loaded else self.sh.loaded;
+
+    self.mutex.lockUncancelable(io);
+    const focus = self.last_request orelse .{ self.centre_tx, self.centre_tz };
+    var best_key: ?u64 = null;
+    var best_revision: u64 = 0;
+    var best_d: i64 = std.math.maxInt(i64);
+    for (keys) |key| {
+        const revision = if (snapshot) |current| current.tile_revisions.get(key).? else 0;
+        if (self.baked.get(key)) |cached| if (cached.revision == revision) continue;
+        if (self.baking.contains(key)) continue;
+        const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+        const tz: i32 = @bitCast(@as(u32, @truncate(key)));
+        const dx: i64 = tx - focus[0];
+        const dz: i64 = tz - focus[1];
+        const d = dx * dx + dz * dz;
+        if (d < best_d) {
+            best_d = d;
+            best_key = key;
+            best_revision = revision;
+        }
+    }
+    const key = best_key orelse {
+        self.mutex.unlock(io);
+        return false;
+    };
+    self.baking.put(key, {}) catch {
+        self.mutex.unlock(io);
+        return false;
+    };
+    self.mutex.unlock(io);
+
+    self.bake_slots.waitUncancelable(io);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
+    const tz: i32 = @bitCast(@as(u32, @truncate(key)));
+    var res: TileResult = .{};
+    const baked = bakeTileFromRegions(self.sh, arena.allocator(), regions, tx, tz, false, &res);
+    self.bake_slots.post(io);
+    if (baked) |_| {
+        self.record(key, best_revision, if (res.written) &res else null);
+    } else |e| {
+        std.debug.print("prebake: tile ({d},{d}) failed: {s} — leaving a gap\n", .{ tx, tz, @errorName(e) });
+        self.record(key, best_revision, null);
+    }
+    return true;
 }
 
 /// Read a session-cached tile off disk into the request arena (it was written
@@ -2328,7 +2562,7 @@ fn readCachedTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32)
 /// `rendering: true` until every tile has been baked at least once.
 fn liveManifest(self: *LiveServer, arena: std.mem.Allocator) ![]const u8 {
     const io = self.sh.io;
-    self.maybeRefresh();
+    // maybeRefresh runs in manifestResponse, before the cache fast path.
     const snapshot = self.acquireSnapshot();
     defer if (snapshot) |current| self.releaseSnapshot(current);
     const tile_keys = if (snapshot) |current| current.tile_keys else self.tile_keys;
@@ -2427,11 +2661,19 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     var allowed_origins: std.ArrayList([]const u8) = .empty;
     var max_connections: usize = 64;
     var scan_interval_seconds: u32 = 5;
+    // Prebake defaults on for `vantage server` (a persistent service whose
+    // cache SHOULD converge on the whole world) and off for local `vantage
+    // live` (whose pitch is instant startup with a footprint that follows
+    // what you actually looked at). `--prebake on|off` overrides either.
+    var prebake: bool = server_mode;
     const quality = try parseLightQuality(args);
     const blend_biomes = try parseBiomeBlend(args);
     const cave_y = try parseCaveY(args);
     const requested_threads = try parseThreads(args);
-    const memory_budget = bakeMemoryBudget(try parseMemoryMiB(args));
+    const memory_budget = if (server_mode)
+        serverBakeMemoryBudget(try parseMemoryMiB(args))
+    else
+        bakeMemoryBudget(try parseMemoryMiB(args));
     var argi: usize = 1;
     while (argi < args.len) : (argi += 1) {
         const arg = args[argi];
@@ -2471,6 +2713,13 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
             const v = try flagValue(args, &argi);
             const n = std.fmt.parseInt(u32, v, 10) catch return badValue("--scan-interval", v, "1..3600 seconds");
             scan_interval_seconds = std.math.clamp(n, 1, 3600);
+        } else if (std.mem.eql(u8, arg, "--prebake")) {
+            const v = try flagValue(args, &argi);
+            if (std.mem.eql(u8, v, "on")) {
+                prebake = true;
+            } else if (std.mem.eql(u8, v, "off")) {
+                prebake = false;
+            } else return badValue("--prebake", v, "on|off");
         } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
             std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "--memory"))
         {
@@ -2563,6 +2812,8 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         .radius = radius,
         .centre_cx = wl.centre_cx,
         .centre_cz = wl.centre_cz,
+        .centre_tx = @divFloor(wl.centre_cx, tile_chunks),
+        .centre_tz = @divFloor(wl.centre_cz, tile_chunks),
         .snapshot = region_snapshot,
         .scan_interval_ns = @as(i96, scan_interval_seconds) * std.time.ns_per_s,
     };
@@ -2584,6 +2835,22 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
             return e;
         };
         server.record(world.packChunk(tx, tz), revision, if (res.written) &res else null);
+    }
+
+    // Background prebake: fill idle bake slots warming the world around the
+    // viewer (spawn-outward until anyone connects). One slot's worth of
+    // headroom is left to interactive requests by the workers' politeness
+    // check, so first-fetch latency stays interactive even while the whole
+    // world bakes behind the scenes.
+    if (prebake and tile_keys.len > 0) {
+        const workers = @max(1, bake_count -| 1);
+        var spawned: usize = 0;
+        for (0..workers) |_| {
+            const t = std.Thread.spawn(.{}, prebakeLoop, .{server}) catch break;
+            t.detach();
+            spawned += 1;
+        }
+        if (spawned > 0) std.debug.print("prebake: {d} background worker(s) warming the tile cache\n", .{spawned});
     }
 
     std.debug.print("live: rendering on demand — tiles bake as you explore (cache: {s}/tiles)\n", .{out_dir});

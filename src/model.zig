@@ -200,9 +200,13 @@ pub const Resolver = struct {
             if (t == .object) {
                 var it = t.object.iterator();
                 while (it.next()) |e| {
-                    if (e.value_ptr.* == .string) {
-                        try g.textures.put(e.key_ptr.*, e.value_ptr.*.string);
-                    }
+                    // Minecraft 26.2 wraps translucent sprite references in
+                    // {"sprite":"...","force_translucent":true}. Older
+                    // packs use the string directly. Geometry only needs the
+                    // sprite path; PNG alpha already drives Vantage's cutout /
+                    // alpha-to-coverage path.
+                    if (textureSprite(e.value_ptr.*)) |sprite|
+                        try g.textures.put(e.key_ptr.*, sprite);
                 }
             }
         }
@@ -231,7 +235,7 @@ pub const Resolver = struct {
 
                         const tex_ref = blk: {
                             const t = fo.get("texture") orelse break :blk "";
-                            break :blk if (t == .string) t.string else "";
+                            break :blk textureSprite(t) orelse "";
                         };
                         const texture = self.resolveTexture(g.textures, tex_ref, 0) orelse "block/missing";
 
@@ -279,6 +283,24 @@ pub const Resolver = struct {
         return json.parseFromSliceLeaky(json.Value, self.arena, bytes, .{});
     }
 };
+
+/// Read a model texture binding from both resource-pack schemas:
+///
+///   "all": "minecraft:block/glass"                         (<= 26.1)
+///   "all": {"sprite":"minecraft:block/glass", ...}       (26.2+)
+///
+/// Unknown object forms deliberately return null so the normal missing-texture
+/// fallback remains loud instead of silently sampling the wrong asset.
+fn textureSprite(v: json.Value) ?[]const u8 {
+    return switch (v) {
+        .string => |s| s,
+        .object => |o| blk: {
+            const sprite = o.get("sprite") orelse break :blk null;
+            break :blk if (sprite == .string) sprite.string else null;
+        },
+        else => null,
+    };
+}
 
 /// Pick the variant whose key's conditions are all satisfied by `state`. Keys
 /// list a subset of the block's properties (e.g. "axis=y"); the most specific
@@ -485,4 +507,24 @@ test "texture variable resolution chains through the map" {
     try std.testing.expectEqualStrings("block/stone", r.resolveTexture(m, "#all", 0).?);
     try std.testing.expectEqualStrings("block/dirt", r.resolveTexture(m, "block/dirt", 0).?);
     try std.testing.expect(r.resolveTexture(m, "#missing", 0) == null);
+}
+
+test "textureSprite accepts legacy strings and 26.2 sprite objects" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+
+    const legacy = try json.parseFromSliceLeaky(json.Value, a, "\"minecraft:block/stone\"", .{});
+    try std.testing.expectEqualStrings("minecraft:block/stone", textureSprite(legacy).?);
+
+    const wrapped = try json.parseFromSliceLeaky(
+        json.Value,
+        a,
+        "{\"sprite\":\"minecraft:block/glass\",\"force_translucent\":true}",
+        .{},
+    );
+    try std.testing.expectEqualStrings("minecraft:block/glass", textureSprite(wrapped).?);
+
+    const unknown = try json.parseFromSliceLeaky(json.Value, a, "{\"texture\":\"minecraft:block/dirt\"}", .{});
+    try std.testing.expect(textureSprite(unknown) == null);
 }

@@ -87,10 +87,15 @@ export interface StreamingSettings {
   viewDistance?: number;
   /** Hard cap on resident tiles (nearest win). Default `120`. */
   maxTiles?: number;
-  /** Concurrent tile fetches. Default `4`. */
+  /** Concurrent tile fetches. Default `6`. */
   concurrency?: number;
   /** Estimated CPU/GPU tile residency budget, in bytes. Default `512 MiB`. */
   maxBytes?: number;
+  /** Budget for evicted tiles' compressed payloads, in bytes — panning back
+   *  over explored terrain rebuilds tiles from this cache instead of
+   *  re-fetching (and, on an on-demand server, re-baking) them. `0` turns it
+   *  off. Default `192 MiB`. */
+  tileCacheBytes?: number;
   /** Map memory for worlds WITHOUT a baked lowres pyramid (live bakes,
    *  `vantage server`): tiles leaving the streaming ring are snapshotted
    *  top-down and persist as cheap textured impostors, so everywhere the
@@ -728,11 +733,13 @@ export class VantageViewer {
   }
 
   /** The radius hires tiles are actually guaranteed resident to: the view
-   *  distance, unless the tile budget runs out first (nearest-first fill ⇒ a
-   *  disc of maxTiles tiles ⇒ radius tb·√(maxTiles/π)). */
+   *  distance, unless a budget runs out first. The manager reports its honest
+   *  frontier (tile count AND byte budget), so fog hugs where data really
+   *  stops — a budget cut reads as distance haze, not a cliff into the sky. */
   private streamRadius(): number {
-    const vd = this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768;
-    const mt = this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 120;
+    if (this.tiles) return this.tiles.admittedRadius;
+    const vd = this.options.streaming.viewDistance ?? 768;
+    const mt = this.options.streaming.maxTiles ?? 120;
     const tb = this.manifest?.tileBlocks ?? 128;
     return Math.min(vd, tb * Math.sqrt(mt / Math.PI));
   }
@@ -1185,8 +1192,9 @@ export class VantageViewer {
     return {
       viewDistance: this.tiles?.viewDistance ?? this.options.streaming.viewDistance ?? 768,
       maxTiles: this.tiles?.maxTiles ?? this.options.streaming.maxTiles ?? 120,
-      concurrency: this.options.streaming.concurrency ?? 4,
+      concurrency: this.options.streaming.concurrency ?? 6,
       maxBytes: this.tiles?.maxBytes ?? this.options.streaming.maxBytes ?? 512 * 1024 * 1024,
+      tileCacheBytes: this.options.streaming.tileCacheBytes ?? 192 * 1024 * 1024,
       mapMemory: this.options.streaming.mapMemory ?? 64,
     };
   }

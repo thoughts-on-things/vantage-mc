@@ -27,17 +27,36 @@ describe('streaming planner', () => {
     expect(candidates[0]!.distanceSq).toBeLessThanOrEqual(candidates.at(-1)!.distanceSq);
   });
 
-  it('uses learned byte weights as an admission budget', () => {
+  it('cuts a contiguous nearest-first prefix when the byte budget runs out', () => {
     const refs = [tile(0, 0), tile(1, 0), tile(2, 0), tile(3, 0)];
     const candidates = refs.map((ref, i) => ({ ref, distanceSq: i, priority: i }));
     const weights = new Map(refs.map((ref, i) => [tileKey(ref.x, ref.z), [6, 6, 3, 1][i]!]));
 
-    const admitted = admitTiles(candidates, 4, 10, (ref) => weights.get(tileKey(ref.x, ref.z))!);
-    expect(admitted.map(({ ref }) => ref.x)).toEqual([0, 2, 3]);
+    // Skipping tile 1 could fit tiles 2+3, but a hole mid-disc is the
+    // patchwork artifact — admission must stop at the frontier instead.
+    const plan = admitTiles(candidates, 4, 10, (ref) => weights.get(tileKey(ref.x, ref.z))!);
+    expect(plan.admitted.map(({ ref }) => ref.x)).toEqual([0]);
+    expect(plan.cutoffSq).toBe(1);
+  });
+
+  it('reports no cutoff when every candidate fits', () => {
+    const candidates = [tile(0, 0), tile(1, 0)].map((ref, i) => ({ ref, distanceSq: i, priority: i }));
+    const plan = admitTiles(candidates, 4, 100, () => 1);
+    expect(plan.admitted).toHaveLength(2);
+    expect(plan.cutoffSq).toBeNull();
+  });
+
+  it('reports the tile-count cutoff distance', () => {
+    const candidates = [tile(0, 0), tile(1, 0), tile(2, 0)].map((ref, i) => ({ ref, distanceSq: i * 4, priority: i }));
+    const plan = admitTiles(candidates, 2, 100, () => 1);
+    expect(plan.admitted).toHaveLength(2);
+    expect(plan.cutoffSq).toBe(8);
   });
 
   it('admits one oversized nearest tile instead of retrying forever', () => {
     const ref = tile(0, 0);
-    expect(admitTiles([{ ref, distanceSq: 0, priority: 0 }], 10, 1, () => 100)).toHaveLength(1);
+    const plan = admitTiles([{ ref, distanceSq: 0, priority: 0 }], 10, 1, () => 100);
+    expect(plan.admitted).toHaveLength(1);
+    expect(plan.cutoffSq).toBeNull();
   });
 });

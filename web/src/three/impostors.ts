@@ -29,8 +29,18 @@ import { isSharedQuadIndex } from './terrain.js';
 const GRID = 16;
 /** Atlas slots per edge — capacity is its square (1024 remembered tiles). */
 const SLOTS = 32;
-/** Pending captures beyond this are dropped oldest-first (pan storms). */
-const MAX_QUEUE = 12;
+/** Pending captures beyond this are dropped oldest-first. Sized for the
+ *  eviction BURSTS real panning produces: one re-plan can evict an entire
+ *  ring (dozens of tiles) in a single frame, and every dropped capture is
+ *  explored terrain forgotten — naked world-edge where the map should
+ *  remember. Queued meshes were resident a frame ago, so holding them here
+ *  briefly adds no new memory peak; the queue just delays their disposal by
+ *  the few frames the drain takes. */
+const MAX_QUEUE = 256;
+/** Captures drained per update() tick. Each is one small ortho render into an
+ *  atlas slot — a handful per frame clears a full-ring burst in well under a
+ *  second without stacking GPU work into any single frame. */
+const CAPTURES_PER_FRAME = 4;
 /** Rim skirt drop, in blocks — the backstop for unstitched boundaries. */
 const SKIRT = 12;
 
@@ -303,15 +313,19 @@ export class ImpostorLayer {
     if (imp) this.releaseImpostor(imp);
   }
 
-  /** Drain one pending capture (bounded per frame so a ring of evictions
+  /** Drain a few pending captures (bounded per frame so a ring of evictions
    *  never stacks its snapshot renders into one frame). Returns whether the
    *  scene changed (the caller redraws + re-runs coverage). */
   update(focusX: number, focusZ: number): boolean {
-    const p = this.queue.shift();
-    if (!p) return false;
-    this.snapshot(p, focusX, focusZ);
-    disposeCapture(p.meshes);
-    return true;
+    let changed = false;
+    for (let i = 0; i < CAPTURES_PER_FRAME; i++) {
+      const p = this.queue.shift();
+      if (!p) break;
+      this.snapshot(p, focusX, focusZ);
+      disposeCapture(p.meshes);
+      changed = true;
+    }
+    return changed;
   }
 
   /** Hide impostors whose hires tile is resident and fully faded in. */

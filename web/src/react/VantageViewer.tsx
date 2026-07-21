@@ -202,7 +202,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
   // Apply live streaming changes (no remount, no re-load).
   useEffect(() => {
     if (engine && streaming) engine.setStreaming(streaming);
-  }, [engine, streaming?.viewDistance, streaming?.maxTiles, streaming?.concurrency, streaming?.maxBytes]);
+  }, [engine, streaming?.viewDistance, streaming?.maxTiles, streaming?.concurrency, streaming?.maxBytes, streaming?.tileCacheBytes, streaming?.mapMemory]);
 
   const ctx = useMemo<VantageContextValue>(
     () => ({

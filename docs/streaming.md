@@ -34,7 +34,11 @@ and coordinate metadata continue to scale with world area.
 
 The live server applies the same bake semaphore. A keyed in-flight set also
 coalesces concurrent requests for the same tile: one request bakes while the
-others wait for the cached result.
+others wait for the cached result. Under `--prebake` (the multiplayer server's
+default), background workers spend idle bake slots on the unbaked tile nearest
+the most recent viewer request, standing down whenever an interactive fetch is
+waiting — the same coalescing makes a viewer request for a tile mid-prebake
+join that bake instead of duplicating it.
 
 The multiplayer server adds immutable world epochs. Its frequent change gate
 stats region filenames, sizes, and mtimes; only an advancing fingerprint
@@ -58,6 +62,21 @@ has been decoded, its geometry attributes, indices, lightmaps, surface maps,
 and height data become a size hint; an exponentially weighted mean covers new
 tiles. If actual residency crosses the budget, the farthest high-resolution
 tiles are evicted first.
+
+Whichever budget binds, admission stays a contiguous nearest-first prefix:
+the first unaffordable candidate ends the plan rather than being skipped for
+cheaper, farther tiles. A skip would buy a few extra resident tiles at the
+cost of holes mid-view, and it destroys the single frontier the renderer
+relies on — the planner reports the admitted radius so fog and the map-memory
+haze floor hug where high-resolution data really stops. Budget-cut plans
+re-run as decoded sizes replace estimates, so the disc grows to whatever the
+budget truly affords.
+
+Evicted tiles keep their compressed payloads in a client-side LRU
+(`tileCacheBytes`) keyed by tile revision. Panning back over explored terrain
+rebuilds geometry from that cache with no network round-trip — and against an
+on-demand server, no re-bake. Revision changes and manifest removals drop the
+affected entries.
 
 Fetch/decode concurrency and the built-but-not-uploaded queue are separately
 bounded. This backpressure matters because decoded typed arrays can be much

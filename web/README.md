@@ -55,7 +55,13 @@ applied live (`viewer.setStreaming` re-plans in place, no reload). Or set the
 ring up-front with
 `streaming={{ viewDistance: 1024, maxTiles: 128, maxBytes: 512 * 1024 * 1024 }}`.
 `maxTiles` is a count guard; `maxBytes` is the stronger residency limit for
-worlds whose tile complexity varies widely.
+worlds whose tile complexity varies widely. When a budget cuts the ring short,
+admission stays a contiguous nearest-first disc and the fog wall hugs the real
+frontier, so limits read as distance haze rather than missing tiles. Evicted
+tiles also keep their compressed payloads in a client-side cache
+(`tileCacheBytes`, default 192 MiB), so panning back over explored terrain
+rebuilds instantly instead of re-fetching — on a `vantage server`, instead of
+re-baking.
 
 The camera also lives in the URL hash (`#@x,y,z,dist,rot,tilt`), so **every
 view is a shareable deep link**: the hash follows the camera (debounced,

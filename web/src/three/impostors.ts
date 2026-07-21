@@ -25,12 +25,25 @@ import * as THREE from 'three';
 import { tileKey, type SurfaceMap } from '../core/index.js';
 import { isSharedQuadIndex } from './terrain.js';
 
-/** Impostor heightfield resolution per tile edge (cells; +1 sample apron). */
-const GRID = 16;
+/** Impostor heightfield resolution per tile edge (cells; +1 sample apron).
+ *  Sized for silhouettes: at 16 cells a 128-block tile's hills read as melted
+ *  blobs from a tilted camera; 24 keeps ridgelines while the whole mesh stays
+ *  a few hundred vertices. */
+const GRID = 24;
 /** Atlas slots per edge — capacity is its square (1024 remembered tiles). */
 const SLOTS = 32;
-/** Pending captures beyond this are dropped oldest-first (pan storms). */
-const MAX_QUEUE = 12;
+/** Pending captures beyond this are dropped oldest-first. Sized for the
+ *  eviction BURSTS real panning produces: one re-plan can evict an entire
+ *  ring (dozens of tiles) in a single frame, and every dropped capture is
+ *  explored terrain forgotten — naked world-edge where the map should
+ *  remember. Queued meshes were resident a frame ago, so holding them here
+ *  briefly adds no new memory peak; the queue just delays their disposal by
+ *  the few frames the drain takes. */
+const MAX_QUEUE = 256;
+/** Captures drained per update() tick. Each is one small ortho render into an
+ *  atlas slot — a handful per frame clears a full-ring burst in well under a
+ *  second without stacking GPU work into any single frame. */
+const CAPTURES_PER_FRAME = 4;
 /** Rim skirt drop, in blocks — the backstop for unstitched boundaries. */
 const SKIRT = 12;
 
@@ -226,7 +239,10 @@ export class ImpostorLayer {
           float camXZ = distance(vWorld.xz, cameraPosition.xz);
           float above = max(cameraPosition.y - vWorld.y, 0.0);
           float hazeNear = max(uHazeMin, above * 2.0);
-          float haze = smoothstep(hazeNear, hazeNear * 2.2, camXZ);
+          // A tight ramp: from a tilted camera the remembered band should
+          // read as distance haze soon after the hires frontier, not stand
+          // vivid for another whole frontier-width beyond it.
+          float haze = smoothstep(hazeNear, hazeNear * 1.8, camXZ);
           float f = clamp(max(smoothstep(uFog.x, uFog.y, vFog), haze) * uFogDensity, 0.0, 1.0);
           frag = vec4(toSRGB(mix(c, toLinear(uFogColor), f)), 1.0);
         }
@@ -279,9 +295,22 @@ export class ImpostorLayer {
     return Math.round(size * size * 4 * 1.34) + this.byKey.size * 8192;
   }
 
+  /** Whether a tile is remembered — or about to be (its capture is queued).
+   *  The manager uses this as its "underlay exists" test when deciding
+   *  whether a streaming-in tile has anything to dissolve over. */
+  has(key: string): boolean {
+    if (this.byKey.has(key)) return true;
+    for (const p of this.queue) if (p.key === key) return true;
+    return false;
+  }
+
   /** Queue an evicted tile's meshes for snapshotting. Takes OWNERSHIP of the
-   *  meshes — they are rendered once on a later update() tick, then disposed.
-   *  A full queue drops its oldest entry (its meshes are simply disposed). */
+   *  meshes — including their SCENE membership: the caller leaves them in the
+   *  scene, and they keep drawing (real terrain, live uniforms) until the
+   *  snapshot render reparents them away in the same tick their impostor
+   *  appears. That closed-form swap is what keeps a pan's eviction wake free
+   *  of background-colored holes. A full queue drops its oldest entry (its
+   *  meshes are removed and disposed). */
   capture(tileX: number, tileZ: number, meshes: CaptureMeshes, surface: SurfaceMap, minY: number, maxY: number): void {
     if (this.retired) {
       disposeCapture(meshes);
@@ -303,14 +332,18 @@ export class ImpostorLayer {
     if (imp) this.releaseImpostor(imp);
   }
 
-  /** Drain one pending capture (bounded per frame so a ring of evictions
+  /** Drain a few pending captures (bounded per frame so a ring of evictions
    *  never stacks its snapshot renders into one frame). Returns whether the
    *  scene changed (the caller redraws + re-runs coverage). */
   update(focusX: number, focusZ: number): boolean {
-    const p = this.queue.shift();
-    if (!p) return false;
-    this.snapshot(p, focusX, focusZ);
-    disposeCapture(p.meshes);
+    if (this.queue.length === 0) return false;
+    // Detach the whole batch in one splice rather than shifting per item —
+    // one O(n) move of a 256-slot queue per frame instead of four.
+    const batch = this.queue.splice(0, CAPTURES_PER_FRAME);
+    for (const p of batch) {
+      this.snapshot(p, focusX, focusZ);
+      disposeCapture(p.meshes);
+    }
     return true;
   }
 

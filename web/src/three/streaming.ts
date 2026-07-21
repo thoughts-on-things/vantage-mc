@@ -48,23 +48,41 @@ export function nearbyTiles(
   return out;
 }
 
-/** Nearest/highest-priority admission under both count and weighted budgets. */
+/** An admission plan: what streams in, and where the budgets cut it off. */
+export interface AdmissionPlan {
+  admitted: TileCandidate[];
+  /** Distance² of the first candidate the budgets could NOT afford (tile
+   *  count or bytes), or `null` when every candidate was admitted. This is
+   *  the honest hires frontier — fog and the haze floor hug it so a budget
+   *  cut reads as distance haze instead of a ragged cliff into the sky. */
+  cutoffSq: number | null;
+}
+
+/** Nearest/highest-priority admission under both count and weighted budgets.
+ *
+ *  Admission is a contiguous nearest-first prefix: the first candidate that
+ *  does not fit ends the plan. Skipping an expensive near tile while admitting
+ *  cheap far ones would buy a few more resident tiles, but it shreds the view
+ *  into an interleaved patchwork of crisp and remembered/absent tiles — the
+ *  large-world artifact — and leaves no single frontier for fog to hide. */
 export function admitTiles(
   candidates: readonly TileCandidate[],
   maxTiles: number,
   maxBytes: number,
   estimateBytes: (ref: ManifestTile) => number,
-): TileCandidate[] {
+): AdmissionPlan {
   const admitted: TileCandidate[] = [];
   let bytes = 0;
   for (const candidate of candidates) {
-    if (admitted.length >= maxTiles) break;
+    if (admitted.length >= maxTiles) return { admitted, cutoffSq: candidate.distanceSq };
     const weight = Math.max(1, estimateBytes(candidate.ref));
     // Always admit the nearest tile, even if one unusually large tile exceeds
     // the whole budget; a map that shows one tile is better than a retry loop.
-    if (admitted.length > 0 && bytes + weight > maxBytes) continue;
+    if (admitted.length > 0 && bytes + weight > maxBytes) {
+      return { admitted, cutoffSq: candidate.distanceSq };
+    }
     admitted.push(candidate);
     bytes += weight;
   }
-  return admitted;
+  return { admitted, cutoffSq: null };
 }

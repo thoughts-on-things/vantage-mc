@@ -336,15 +336,15 @@ export class ImpostorLayer {
    *  never stacks its snapshot renders into one frame). Returns whether the
    *  scene changed (the caller redraws + re-runs coverage). */
   update(focusX: number, focusZ: number): boolean {
-    let changed = false;
-    for (let i = 0; i < CAPTURES_PER_FRAME; i++) {
-      const p = this.queue.shift();
-      if (!p) break;
+    if (this.queue.length === 0) return false;
+    // Detach the whole batch in one splice rather than shifting per item —
+    // one O(n) move of a 256-slot queue per frame instead of four.
+    const batch = this.queue.splice(0, CAPTURES_PER_FRAME);
+    for (const p of batch) {
       this.snapshot(p, focusX, focusZ);
       disposeCapture(p.meshes);
-      changed = true;
     }
-    return changed;
+    return true;
   }
 
   /** Hide impostors whose hires tile is resident and fully faded in. */

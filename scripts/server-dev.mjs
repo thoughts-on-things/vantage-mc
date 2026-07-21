@@ -282,6 +282,23 @@ async function smokeCheck(serverUrl, viewerOrigin, token) {
     (manifestResponse.headers.get('content-encoding') ?? '').includes('gzip'),
     'manifest should travel gzip-coded to accepting clients',
   );
+  // A negotiated body must tell shared caches what it varied on, or an
+  // intermediary can hand the gzip variant to a client that never asked.
+  assertResponse(
+    (manifestResponse.headers.get('vary') ?? '').toLowerCase().includes('accept-encoding'),
+    'a gzip-coded manifest must Vary on Accept-Encoding',
+  );
+  // An explicit refusal (RFC 9110 q=0) must be honoured with identity bytes.
+  const refusedGzip = await fetch(manifestUrl, {
+    headers: { ...authHeaders, 'Accept-Encoding': 'gzip;q=0' },
+    signal: AbortSignal.timeout(30_000),
+  });
+  assertResponse(refusedGzip.ok, `manifest returned HTTP ${refusedGzip.status} for an identity request`);
+  assertResponse(
+    !(refusedGzip.headers.get('content-encoding') ?? '').includes('gzip'),
+    'a client refusing gzip (q=0) must receive identity bytes',
+  );
+  JSON.parse(await refusedGzip.text()); // identity body must be readable JSON
   assertResponse(
     manifestResponse.headers.get('access-control-allow-origin') === viewerOrigin,
     'manifest did not return the exact configured CORS origin',

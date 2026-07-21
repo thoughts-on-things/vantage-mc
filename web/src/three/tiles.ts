@@ -32,6 +32,7 @@ import { Emitter } from './emitter.js';
 import { ImpostorLayer } from './impostors.js';
 import { applyCaveRange, buildLowresMesh, buildQuantizedTileMeshes, buildTileMeshes, isSharedQuadIndex, sharedQuadIndex, type TileMeshes } from './terrain.js';
 import { admitTiles, nearbyTiles } from './streaming.js';
+import { TileByteCache } from './tilecache.js';
 
 export interface TileManagerOptions {
   manifest: WorldManifest;
@@ -243,11 +244,9 @@ export class TileManager {
   /** When the last plan ran, so byte-estimate learning re-plans at a bounded
    *  rate instead of once per tile load. */
   private lastPlanMs = 0;
-  /** Compressed tile payloads kept after eviction, keyed by tile key. A
-   *  revisit rebuilds from here — no network fetch, no server re-bake. LRU
-   *  by Map insertion order, bounded by `tileCacheBytes`. */
-  private readonly byteCache = new Map<string, { buffer: ArrayBuffer; revision: string | undefined }>();
-  private byteCacheSize = 0;
+  /** Compressed tile payloads kept after eviction. A revisit rebuilds from
+   *  here — no network fetch, no server re-bake. */
+  private readonly byteCache: TileByteCache;
   /** Whether resident tiles draw their cave-dark tails (VTLA). The viewer's
    *  cave policy toggles this off while the camera is above ground with the
    *  depth slice closed. */
@@ -275,6 +274,7 @@ export class TileManager {
       tileCacheBytes: 192 * 1024 * 1024,
       ...rest,
     };
+    this.byteCache = new TileByteCache(this.opts.tileCacheBytes);
     this.lowresMaterial = lowresMaterial ?? null;
     this.lmMaterial = lmMaterial ?? null;
     this.ensureAtlas = ensureAtlas ?? null;
@@ -645,7 +645,7 @@ export class TileManager {
         // Gone from the manifest = gone from the world; forget the snapshot
         // and the cached payload too.
         this.impostors?.remove(key);
-        this.cacheDrop(key);
+        this.byteCache.drop(key);
         changed = true;
       }
     }
@@ -659,7 +659,7 @@ export class TileManager {
         this.index.set(k, t);
         const rec = this.records.get(k);
         if (rec) this.unload(k, rec);
-        this.cacheDrop(k); // the cached payload is for the old revision
+        this.byteCache.drop(k); // the cached payload is for the old revision
         changed = true;
       } else {
         // Same source generation: refresh size/path metadata in place so
@@ -724,10 +724,7 @@ export class TileManager {
     if (settings.maxBytes !== undefined) this.opts.maxBytes = settings.maxBytes;
     if (settings.tileCacheBytes !== undefined) {
       this.opts.tileCacheBytes = settings.tileCacheBytes;
-      if (settings.tileCacheBytes <= 0) {
-        this.byteCache.clear();
-        this.byteCacheSize = 0;
-      }
+      this.byteCache.setBudget(settings.tileCacheBytes);
     }
     if (settings.mapMemory !== undefined && settings.mapMemory !== this.mapMemoryResolution) {
       this.impostors?.dispose();
@@ -856,16 +853,10 @@ export class TileManager {
       // Byte cache first: a tile that streamed out keeps its compressed
       // payload (per revision), so streaming back in skips the network — and
       // on an on-demand server, skips a whole tile re-bake.
-      const cached = this.byteCache.get(key);
-      const hit = cached !== undefined && cached.revision === ref.revision;
-      if (hit) {
-        // LRU touch: re-insertion moves the entry to the back of the Map.
-        this.byteCache.delete(key);
-        this.byteCache.set(key, cached);
-      }
-      const raw = hit ? cached.buffer : await this.opts.fetch(ref.path, abort.signal);
+      const cached = this.byteCache.get(key, ref.revision);
+      const raw = cached ?? (await this.opts.fetch(ref.path, abort.signal));
       if (this.disposed || rec.state !== 'loading') return; // unloaded mid-fetch
-      if (!hit) this.cachePut(key, raw, ref.revision);
+      if (!cached) this.byteCache.put(key, raw, ref.revision);
       const buffer = await maybeInflate(raw);
       if (this.disposed || rec.state !== 'loading') return; // unloaded mid-inflate
       // A live server lists every populated tile up front, but some mesh to
@@ -965,7 +956,7 @@ export class TileManager {
       if ((e as Error).name !== 'AbortError') {
         // A failed parse must not be retried out of the byte cache — drop the
         // payload so the retry path goes back to the network for fresh bytes.
-        this.cacheDrop(key);
+        this.byteCache.drop(key);
         this.markFailed(key, rec);
         console.warn(`vantage: tile ${key} failed to load:`, e);
       }
@@ -1018,29 +1009,6 @@ export class TileManager {
     this.coverageDirty = true; // an uncovered lowres parent may need to reappear
     this.invalidate();
     this.emitter.emit('change', this.stats);
-  }
-
-  /** Remember a fetched compressed payload for revisits, evicting
-   *  least-recently-used entries past the cache budget. Payloads bigger than
-   *  the whole budget are not cached. */
-  private cachePut(key: string, buffer: ArrayBuffer, revision: string | undefined): void {
-    const max = this.opts.tileCacheBytes;
-    if (max <= 0 || buffer.byteLength > max) return;
-    this.cacheDrop(key);
-    this.byteCache.set(key, { buffer, revision });
-    this.byteCacheSize += buffer.byteLength;
-    for (const [k, v] of this.byteCache) {
-      if (this.byteCacheSize <= max) break;
-      this.byteCache.delete(k);
-      this.byteCacheSize -= v.buffer.byteLength;
-    }
-  }
-
-  private cacheDrop(key: string): void {
-    const prev = this.byteCache.get(key);
-    if (!prev) return;
-    this.byteCache.delete(key);
-    this.byteCacheSize -= prev.buffer.byteLength;
   }
 
   /** Correct estimation misses after a tile is decoded. Farthest hires records
@@ -1104,7 +1072,7 @@ export class TileManager {
     }
     const remembered = this.impostors?.count ?? 0;
     if (this.impostors) residentBytes += this.impostors.gpuBytes;
-    this.statsCache = { loaded, loading, total: this.index.size, lowres, remembered, vertexCount, triangleCount, bytes, residentBytes, cachedBytes: this.byteCacheSize };
+    this.statsCache = { loaded, loading, total: this.index.size, lowres, remembered, vertexCount, triangleCount, bytes, residentBytes, cachedBytes: this.byteCache.size };
     return this.statsCache;
   }
 
@@ -1216,7 +1184,6 @@ export class TileManager {
     this.impostors = null;
     for (const [key, rec] of [...this.records]) this.unload(key, rec);
     this.byteCache.clear();
-    this.byteCacheSize = 0;
     this.emitter.clear();
   }
 }

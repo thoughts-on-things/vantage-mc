@@ -409,8 +409,14 @@ fn apiUnauthorized(req: *std.http.Server.Request, origin: ?[]const u8) !void {
 }
 
 fn addCorsHeaders(headers: *HeaderBuffer, origin: []const u8) void {
+    addCorsHeadersVary(headers, origin, "Origin");
+}
+
+/// CORS headers whose `Vary` also names the other request headers this
+/// response was selected on (content negotiation), as one combined field.
+fn addCorsHeadersVary(headers: *HeaderBuffer, origin: []const u8, vary: []const u8) void {
     headers.add("access-control-allow-origin", origin);
-    headers.add("vary", "Origin");
+    headers.add("vary", vary);
 }
 
 /// Assemble what the producer sees of one request. Duplicate conditional or
@@ -425,15 +431,39 @@ fn producerRequest(req: *const std.http.Server.Request, path: []const u8) Produc
     };
 }
 
-/// Whether an Accept-Encoding value admits gzip. Coding names are matched as
-/// list members; a `q=0` opt-out is still treated as acceptance — no real
-/// client sends one, and the worst case is a response it can decode anyway.
+/// Whether an Accept-Encoding value admits gzip (RFC 9110 §12.5.3). Codings
+/// are matched as list members, `q=0` is an explicit refusal, and a specific
+/// `gzip` entry outranks a wildcard — so `gzip;q=0, *` correctly refuses.
+/// Absent both, nothing here admits gzip: identity is always safe.
 fn acceptsGzip(value: []const u8) bool {
+    var gzip: ?bool = null; // an explicit gzip entry's acceptability
+    var wildcard: ?bool = null; // a `*` entry's acceptability
     var it = std.mem.splitScalar(u8, value, ',');
     while (it.next()) |raw| {
         var name = std.mem.trim(u8, raw, " \t");
-        if (std.mem.indexOfScalar(u8, name, ';')) |semi| name = std.mem.trim(u8, name[0..semi], " \t");
-        if (std.ascii.eqlIgnoreCase(name, "gzip") or std.mem.eql(u8, name, "*")) return true;
+        var acceptable = true;
+        if (std.mem.indexOfScalar(u8, name, ';')) |semi| {
+            acceptable = !qValueIsZero(name[semi + 1 ..]);
+            name = std.mem.trim(u8, name[0..semi], " \t");
+        }
+        if (std.ascii.eqlIgnoreCase(name, "gzip")) {
+            gzip = acceptable;
+        } else if (std.mem.eql(u8, name, "*")) {
+            wildcard = acceptable;
+        }
+    }
+    return gzip orelse wildcard orelse false;
+}
+
+/// Whether a list member's parameters carry `q=0` (in any spelling: `0`,
+/// `0.0`, `0.000`). Unparsable or absent q means "no objection stated".
+fn qValueIsZero(params: []const u8) bool {
+    var it = std.mem.splitScalar(u8, params, ';');
+    while (it.next()) |raw| {
+        const param = std.mem.trim(u8, raw, " \t");
+        if (param.len < 2 or !std.ascii.eqlIgnoreCase(param[0..2], "q=")) continue;
+        const q = std.fmt.parseFloat(f64, std.mem.trim(u8, param[2..], " \t")) catch continue;
+        return q <= 0.0;
     }
     return false;
 }
@@ -460,11 +490,17 @@ fn respondProduced(
     if (resp.etag) |etag| headers.add("etag", etag);
     headers.add(security_headers[0].name, security_headers[0].value);
     headers.add(security_headers[1].name, security_headers[1].value);
+    // This body was selected on Accept-Encoding (a producer may answer gzip or
+    // identity for the same URL), so every response here — including the 304,
+    // which updates a cache's stored headers — must say so, or an intermediary
+    // could hand a gzip variant to a client that never asked for one.
     if (origin) |value| {
-        addCorsHeaders(&headers, value);
+        addCorsHeadersVary(&headers, value, "Origin, Accept-Encoding");
         // Cross-origin scripts only see safelisted response headers; the
         // viewer must read the validator to poll conditionally.
         if (resp.etag != null) headers.add("access-control-expose-headers", "ETag");
+    } else {
+        headers.add("vary", "Accept-Encoding");
     }
     return req.respond(if (unchanged) "" else resp.body, .{
         .status = if (unchanged) .not_modified else .ok,
@@ -689,6 +725,25 @@ test "accept-encoding negotiation admits gzip as a list member" {
     try std.testing.expect(!acceptsGzip("deflate, br"));
     try std.testing.expect(!acceptsGzip("gzipped")); // a name, not a list member
     try std.testing.expect(!acceptsGzip(""));
+}
+
+test "accept-encoding honours explicit q=0 refusals over wildcards" {
+    // An explicit refusal is a refusal, in every spelling.
+    try std.testing.expect(!acceptsGzip("gzip;q=0"));
+    try std.testing.expect(!acceptsGzip("gzip;q=0.0"));
+    try std.testing.expect(!acceptsGzip("gzip ; q=0.000"));
+    try std.testing.expect(!acceptsGzip("deflate, gzip;q=0"));
+    // A specific coding outranks the wildcard, in either order.
+    try std.testing.expect(!acceptsGzip("gzip;q=0, *"));
+    try std.testing.expect(!acceptsGzip("*, gzip;q=0"));
+    try std.testing.expect(acceptsGzip("gzip;q=1, *;q=0"));
+    // A wildcard refusal with no gzip entry leaves gzip unacceptable.
+    try std.testing.expect(!acceptsGzip("*;q=0"));
+    try std.testing.expect(!acceptsGzip("identity, *;q=0"));
+    // Any non-zero q — however small — still admits it.
+    try std.testing.expect(acceptsGzip("gzip;q=0.001"));
+    // An unparsable q states no objection.
+    try std.testing.expect(acceptsGzip("gzip;q=bogus"));
 }
 
 test "if-none-match validators match strong etags" {

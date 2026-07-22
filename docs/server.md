@@ -213,12 +213,16 @@ tiles that landed inside the window appear on the next poll.
 ### Tile revalidation
 
 A tile's bytes are fixed by its manifest `revision`, so a client that already
-has one never needs it again. Tile responses therefore carry a strong `ETag`
-and `Cache-Control: private, no-cache` — storable, but never usable without
-revalidating. A conditional fetch that matches answers `304` before any
-transfer, any disk read, and, on a tile that has not been baked yet, any
-bake at all. Panning back over explored terrain after a reload costs a status
-line per tile instead of a megabyte.
+has one never needs it again. Responses for advertised tiles therefore carry
+a strong `ETag` and `Cache-Control: private, no-cache` — storable, but never
+usable without revalidating. A conditional fetch that matches answers `304`
+before any transfer, any disk read, and, on a tile that has not been baked
+yet, any bake at all. Panning back over explored terrain after a reload costs
+a status line per tile instead of a megabyte. (A well-formed coordinate the
+manifest does not advertise stays an empty `200` with no `ETag` and the
+default `private, no-store`: there is no revision to validate it against. An
+advertised tile that merely meshed to nothing does have one, and revalidates
+like any other.)
 
 The validator is `"<session>-<revision>"`. The session half is a per-process
 random tag, and it is load-bearing: tile payloads address the texture array

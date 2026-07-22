@@ -2333,6 +2333,9 @@ const LiveServer = struct {
             // Not yet written, or deliberately removed — no host focus.
             if (self.focus_stamp != null) self.publishFocus(&.{});
             self.focus_stamp = null;
+            // Absent is its own state, so a file that comes back malformed
+            // is a new bad state and gets to complain again.
+            self.focus_complained = false;
             return;
         };
         const mtime_bits: u96 = @bitCast(stat.mtime.nanoseconds);
@@ -2513,8 +2516,10 @@ fn manifestResponse(self: *LiveServer, arena: std.mem.Allocator, request: serve.
     // The representation is copied into the request arena UNDER the mutex —
     // the cache's memory can be freed by a later swap the moment it's
     // released.
-    const now = std.Io.Timestamp.now(io, .awake);
     self.mutex.lockUncancelable(io);
+    // Sampled under the lock so it can never precede the `built_at` it is
+    // about to be compared against.
+    const now = std.Io.Timestamp.now(io, .awake);
     const generation = self.manifest_generation;
     if (self.manifest_cache) |cache| if (cache.generation == generation or
         (self.manifest_coalesce_ns > 0 and cache.built_at.durationTo(now).nanoseconds < self.manifest_coalesce_ns))

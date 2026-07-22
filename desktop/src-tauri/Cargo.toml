@@ -1,6 +1,6 @@
 [package]
 name = "vantage-desktop"
-version = "0.9.1"
+version = "0.10.0"
 description = "A native world studio for Vantage Minecraft renders"
 authors = ["Luis Padron"]
 license = "MIT"

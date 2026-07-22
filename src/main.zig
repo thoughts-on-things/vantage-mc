@@ -102,13 +102,15 @@ fn printUsage() void {
         \\      --prebake on also bakes the rest of the world in the background.
         \\  vantage server  <world-save-dir> [live render flags] [--port <n>] [--host <addr>]
         \\                  [--token-env <name>] [--allow-origin <origin>] [--max-connections <n>]
-        \\                  [--scan-interval <seconds>] [--prebake on|off]
+        \\                  [--scan-interval <seconds>] [--prebake on|off] [--focus-file <path>]
         \\      Run the hardened Vantage server data plane for launchers and web apps.
         \\      Binds to 127.0.0.1 by default for an authenticating reverse proxy.
         \\      Non-loopback binds require a >=32-byte bearer secret in the environment
         \\      (VANTAGE_SERVER_TOKEN by default). TLS belongs at the reverse proxy.
         \\      Idle bake slots prebake the world around the viewer (--prebake off
         \\      to disable); saved world edits re-bake changed tiles automatically.
+        \\      --focus-file points prebake at a JSON file of block coordinates the
+        \\      host rewrites as its players move, so the map warms where they are.
         \\  vantage extract [client.jar]
         \\      Extract the assets a render needs into ~/.cache/vantage/assets/<version>.
         \\      With no argument, uses the newest jar in your .minecraft/versions.
@@ -2047,6 +2049,11 @@ const ManifestCache = struct {
     body: []const u8,
     gzip: []const u8,
     etag: []const u8,
+    /// When this representation was built. A prebaking server moves the
+    /// generation several times a second, which would otherwise make the
+    /// cache above useless exactly when rebuilding is most expensive; polls
+    /// inside `manifest_coalesce_ns` of this share it anyway.
+    built_at: std.Io.Timestamp,
 };
 
 /// Ref-counted, independently allocated view of the live region catalog. A
@@ -2165,6 +2172,10 @@ const LiveServer = struct {
     /// O(tiles) JSON rebuild.
     manifest_generation: u64 = 1,
     manifest_cache: ?ManifestCache = null,
+    /// Longest a cached manifest representation may outlive its generation.
+    /// Zero disables coalescing (local `live`, whose catalog only moves when
+    /// the person at the keyboard scrolls).
+    manifest_coalesce_ns: i96 = 0,
     /// One thread rebuilds the cache per generation; racers fall back to a
     /// plain per-request build rather than sharing a build arena.
     manifest_building: bool = false,
@@ -2172,6 +2183,19 @@ const LiveServer = struct {
     /// prebake workers' focus, so idle bake slots warm the terrain the
     /// player is actually near. Guarded by `mutex`.
     last_request: ?[2]i32 = null,
+    /// Host-supplied prebake focus (tile coordinates), refreshed from
+    /// `--focus-file` on the scan tick. A host that knows where its players
+    /// are steers the warm cache toward them instead of leaving it to spiral
+    /// out from spawn. Guarded by `mutex`; a small fixed array keeps the
+    /// prebake scan's inner loop cache-resident and allocation-free.
+    focus_buf: [MAX_FOCUS_POINTS][2]i32 = undefined,
+    focus_len: usize = 0,
+    /// Read-only after startup. The two fields below it belong solely to the
+    /// scan thread, so they need no lock.
+    focus_file: ?[]const u8 = null,
+    /// Cheap change gate for the focus file: `{size, mtime}`.
+    focus_stamp: ?[2]u64 = null,
+    focus_complained: bool = false,
     /// Interactive fetches waiting on a bake permit. Prebake workers check
     /// this before taking a slot, so a viewer never queues behind background
     /// work for longer than one in-flight bake.
@@ -2179,6 +2203,13 @@ const LiveServer = struct {
     /// Prebake focus fallback (the spawn tile) when nothing was requested yet.
     centre_tx: i32 = 0,
     centre_tz: i32 = 0,
+    /// Random per process, and half of every tile validator. Tile payloads
+    /// reference texture-array layers by index and the atlas is built in
+    /// encounter order, so a tile is only interchangeable with one from the
+    /// same session — a world revision alone would let a client revalidate a
+    /// tile against a differently-ordered atlas. Layers are only ever
+    /// appended within a session, so an early tile stays valid as it grows.
+    session_tag: u64 = 0,
 
     fn producer(self: *LiveServer) serve.Producer {
         return .{ .ctx = self, .func = produce };
@@ -2289,7 +2320,127 @@ const LiveServer = struct {
         if (old_to_destroy) |old| old.destroy();
         if (changed) std.debug.print("server: world snapshot advanced ({d} render tiles)\n", .{candidate.tile_keys.len});
     }
+
+    /// Re-read `--focus-file` when its size or mtime moved. Absent or
+    /// unparseable clears the host focus rather than failing anything: the
+    /// file is an optimisation hint, and a half-written one must never cost
+    /// the map its warm-up. The complaint is printed once per bad state so a
+    /// misconfigured path cannot flood the log every scan tick.
+    fn refreshFocus(self: *LiveServer) void {
+        const path = self.focus_file orelse return;
+        const io = self.sh.io;
+        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
+            // Not yet written, or deliberately removed — no host focus.
+            if (self.focus_stamp != null) self.publishFocus(&.{});
+            self.focus_stamp = null;
+            return;
+        };
+        const mtime_bits: u96 = @bitCast(stat.mtime.nanoseconds);
+        const stamp: [2]u64 = .{ stat.size, @truncate(mtime_bits) };
+        if (self.focus_stamp) |previous| if (previous[0] == stamp[0] and previous[1] == stamp[1]) return;
+        self.focus_stamp = stamp;
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(FOCUS_FILE_LIMIT)) catch |e| {
+            self.complainAboutFocus(@errorName(e));
+            return;
+        };
+        var buf: [MAX_FOCUS_POINTS][2]i32 = undefined;
+        const points = parseFocusPoints(a, bytes, self.sh.tile_chunks, &buf) catch |e| {
+            self.complainAboutFocus(@errorName(e));
+            return;
+        };
+        self.focus_complained = false;
+        self.publishFocus(points);
+    }
+
+    fn complainAboutFocus(self: *LiveServer, reason: []const u8) void {
+        if (self.focus_complained) return;
+        self.focus_complained = true;
+        std.debug.print("server: ignoring --focus-file ({s}); prebake keeps its previous focus\n", .{reason});
+    }
+
+    fn publishFocus(self: *LiveServer, points: []const [2]i32) void {
+        const io = self.sh.io;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        @memcpy(self.focus_buf[0..points.len], points);
+        self.focus_len = points.len;
+    }
 };
+
+/// A focus file is a handful of coordinates; anything larger is a mistake.
+const FOCUS_FILE_LIMIT: usize = 64 * 1024;
+/// Enough for every player on the kind of server that runs one sidecar, and
+/// small enough that prebake's per-candidate distance test stays trivial.
+const MAX_FOCUS_POINTS: usize = 16;
+
+/// Parse a host focus document — `{"points":[{"x":120,"z":-340}, …]}` in
+/// BLOCK coordinates — into de-duplicated tile coordinates. Blocks rather
+/// than tiles because the host knows where its players stand, not how this
+/// process was configured to tile the world. De-duplication matters: several
+/// players in one base collapse to a single candidate instead of crowding
+/// out everyone else's.
+fn parseFocusPoints(
+    arena: std.mem.Allocator,
+    bytes: []const u8,
+    tile_chunks: i32,
+    out: *[MAX_FOCUS_POINTS][2]i32,
+) ![]const [2]i32 {
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch return error.InvalidFocusDocument;
+    if (root != .object) return error.InvalidFocusDocument;
+    const points = root.object.get("points") orelse return error.InvalidFocusDocument;
+    if (points != .array) return error.InvalidFocusDocument;
+    var len: usize = 0;
+    for (points.array.items) |entry| {
+        if (len == MAX_FOCUS_POINTS) break;
+        if (entry != .object) continue;
+        const x = focusCoordinate(entry.object.get("x")) orelse continue;
+        const z = focusCoordinate(entry.object.get("z")) orelse continue;
+        const point: [2]i32 = .{
+            @divFloor(@divFloor(x, 16), tile_chunks),
+            @divFloor(@divFloor(z, 16), tile_chunks),
+        };
+        for (out[0..len]) |existing| {
+            if (existing[0] == point[0] and existing[1] == point[1]) break;
+        } else {
+            out[len] = point;
+            len += 1;
+        }
+    }
+    return out[0..len];
+}
+
+/// One block coordinate from JSON. Players stand at fractional positions, so
+/// a float is as valid as an integer here; anything out of Minecraft's
+/// coordinate range is dropped rather than wrapped.
+fn focusCoordinate(value: ?std.json.Value) ?i32 {
+    const v = value orelse return null;
+    const raw: f64 = switch (v) {
+        .integer => |n| @floatFromInt(n),
+        .float => |f| f,
+        else => return null,
+    };
+    if (!std.math.isFinite(raw) or raw < -30_000_000.0 or raw > 30_000_000.0) return null;
+    return @intFromFloat(@floor(raw));
+}
+
+/// The server's world-change and focus tick. Before this loop existed a
+/// refresh only happened inside a manifest poll, which meant an unwatched
+/// server never noticed new terrain — so prebake, whose whole job is to be
+/// warm before anyone looks, converged on whatever the world was at boot.
+/// Running the scan here also keeps its multi-second catalog rebuild off the
+/// request thread that would otherwise have been unlucky enough to trigger it.
+fn scanLoop(self: *LiveServer, interval_ms: i64) void {
+    const io = self.sh.io;
+    while (true) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(interval_ms), .awake) catch {};
+        self.refreshFocus();
+        self.maybeRefresh();
+    }
+}
 
 /// The `serve.Producer` hook: synthesize the paths the live server owns — the
 /// manifest, the texture atlas, and un-cached tiles — and fall through
@@ -2302,9 +2453,41 @@ fn produce(ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, request: serve
         return try manifestResponse(self, arena, request);
     if (std.mem.eql(u8, path, "terrain.vtexarr"))
         return .{ .body = try liveAtlas(self, arena), .content_type = "application/octet-stream" };
-    if (parseTilePath(path)) |xz|
-        return .{ .body = try liveTile(self, arena, xz[0], xz[1]), .content_type = "application/octet-stream" };
+    if (parseTilePath(path)) |xz| return try tileResponse(self, arena, xz[0], xz[1], request);
     return null; // not ours — static disk serves it (lowres, favicon, …)
+}
+
+/// Tiles are immutable for a `{session, revision}` pair, so they are the one
+/// artifact worth letting a client keep: `no-cache` stores a copy that must
+/// be revalidated, and the revalidation is a 304 with no body — no transfer,
+/// no disk read, and on a cold tile no bake either. Panning back over
+/// explored terrain after a reload therefore costs a status line per tile.
+/// It stays `private` and revalidated because the map is private world data:
+/// a shared cache must not hold it and a client must not use it blind.
+const TILE_CACHE_CONTROL = "private, no-cache";
+
+fn tileResponse(
+    self: *LiveServer,
+    arena: std.mem.Allocator,
+    tx: i32,
+    tz: i32,
+    request: serve.ProduceRequest,
+) !serve.Produced {
+    const body = try liveTile(self, arena, tx, tz, request.validator);
+    // Revision 0 is a local `vantage live` session, whose catalog never
+    // revises; it has no stable validator to offer.
+    if (body.revision == 0)
+        return .{ .body = body.bytes, .content_type = "application/octet-stream" };
+    return .{
+        .body = body.bytes,
+        .content_type = "application/octet-stream",
+        .etag = try tileEtag(arena, self.session_tag, body.revision),
+        .cache_control = TILE_CACHE_CONTROL,
+    };
+}
+
+fn tileEtag(arena: std.mem.Allocator, session_tag: u64, revision: u64) ![]const u8 {
+    return std.fmt.allocPrint(arena, "\"{x}-{x}\"", .{ session_tag, revision });
 }
 
 /// The manifest ETag seed ("VANTETAG").
@@ -2321,12 +2504,21 @@ fn manifestResponse(self: *LiveServer, arena: std.mem.Allocator, request: serve.
     const io = self.sh.io;
     self.maybeRefresh();
 
-    // Fast path: the catalog hasn't moved since the cache was built. The
-    // representation is copied into the request arena UNDER the mutex — the
-    // cache's memory can be freed by a later swap the moment it's released.
+    // Fast path: the catalog hasn't moved since the cache was built — or it
+    // has, but only within the coalescing window. Prebake moves the
+    // generation with every tile it lands, so without that window a busy
+    // server rebuilds and re-gzips a megabyte-scale catalog for every poll of
+    // every client; with it, at most one rebuild per window is shared by all
+    // of them and a client sees the extra tiles on its next poll instead.
+    // The representation is copied into the request arena UNDER the mutex —
+    // the cache's memory can be freed by a later swap the moment it's
+    // released.
+    const now = std.Io.Timestamp.now(io, .awake);
     self.mutex.lockUncancelable(io);
     const generation = self.manifest_generation;
-    if (self.manifest_cache) |cache| if (cache.generation == generation) {
+    if (self.manifest_cache) |cache| if (cache.generation == generation or
+        (self.manifest_coalesce_ns > 0 and cache.built_at.durationTo(now).nanoseconds < self.manifest_coalesce_ns))
+    {
         const out = manifestRepresentation(arena, cache.body, cache.gzip, cache.etag, request) catch |e| {
             self.mutex.unlock(io);
             return e;
@@ -2371,7 +2563,14 @@ fn manifestResponse(self: *LiveServer, arena: std.mem.Allocator, request: serve.
     // Tagged with the generation observed BEFORE the build: if a bake landed
     // mid-build the cache is immediately stale and the next poll rebuilds —
     // the body served now is still a consistent snapshot.
-    self.manifest_cache = .{ .arena = cache_arena, .generation = generation, .body = body, .gzip = gz, .etag = etag };
+    self.manifest_cache = .{
+        .arena = cache_arena,
+        .generation = generation,
+        .body = body,
+        .gzip = gz,
+        .etag = etag,
+        .built_at = std.Io.Timestamp.now(io, .awake),
+    };
     self.mutex.unlock(io);
     if (old) |*stale| stale.deinit();
     return out;
@@ -2423,24 +2622,49 @@ fn parseTilePath(path: []const u8) ?[2]i32 {
     return .{ x, z };
 }
 
-/// Serve one tile: from the session cache if already baked (0 bytes = a valid
-/// empty body), else join or lead a single in-flight fill. Leaders wait for a
+/// One tile's bytes plus the revision they were baked at — the revision is
+/// what makes them cacheable, so the response layer needs it alongside them.
+const TileBody = struct {
+    bytes: []const u8,
+    revision: u64,
+};
+
+/// Serve one tile: nothing at all if the client already holds this revision,
+/// else from the session cache if already baked (0 bytes = a valid empty
+/// body), else join or lead a single in-flight fill. Leaders wait for a
 /// memory-budgeted bake permit before allocating their tile arena. A failure
 /// becomes a gap (an empty body the viewer marks empty), never a retry storm.
-fn liveTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32) ![]const u8 {
+fn liveTile(
+    self: *LiveServer,
+    arena: std.mem.Allocator,
+    tx: i32,
+    tz: i32,
+    validator: ?[]const u8,
+) !TileBody {
     const key = world.packChunk(tx, tz);
     const snapshot = self.acquireSnapshot();
     defer if (snapshot) |current| self.releaseSnapshot(current);
     const regions = if (snapshot) |current| current.loaded else self.sh.loaded;
-    const revision = if (snapshot) |current| current.tile_revisions.get(key) orelse return "" else 0;
-    if (snapshot == null and !self.known.contains(key)) return "";
+    const revision = if (snapshot) |current| current.tile_revisions.get(key) orelse return .{ .bytes = "", .revision = 0 } else 0;
+    if (snapshot == null and !self.known.contains(key)) return .{ .bytes = "", .revision = 0 };
+
+    // A client holding this exact revision needs no bytes — and, on a tile
+    // that hasn't been baked yet, no bake. The transport turns the empty body
+    // into the 304 because it re-derives the same condition from the same
+    // validator; a duplicate If-None-Match reaches us as null and takes the
+    // full path, exactly as it does there.
+    if (revision != 0) if (validator) |presented| {
+        const etag = try tileEtag(arena, self.session_tag, revision);
+        if (serve.etagMatches(presented, etag)) return .{ .bytes = "", .revision = revision };
+    };
 
     self.mutex.lockUncancelable(self.sh.io);
     self.last_request = .{ tx, tz }; // the prebake workers' focus
     while (true) {
         if (self.baked.get(key)) |cached| if (cached.revision == revision) {
             self.mutex.unlock(self.sh.io);
-            return if (cached.bytes == 0) "" else readCachedTile(self, arena, tx, tz);
+            const bytes = if (cached.bytes == 0) "" else try readCachedTile(self, arena, tx, tz);
+            return .{ .bytes = bytes, .revision = revision };
         };
         if (!self.baking.contains(key)) {
             self.baking.put(key, {}) catch |e| {
@@ -2464,11 +2688,12 @@ fn liveTile(self: *LiveServer, arena: std.mem.Allocator, tx: i32, tz: i32) ![]co
     bakeTileFromRegions(self.sh, arena, regions, tx, tz, false, &res) catch |e| {
         std.debug.print("live: tile ({d},{d}) failed: {s} — leaving a gap\n", .{ tx, tz, @errorName(e) });
         self.record(key, revision, null);
-        return ""; // empty body → the viewer marks it empty, no retry
+        return .{ .bytes = "", .revision = revision }; // the viewer marks it empty, no retry
     };
     self.record(key, revision, if (res.written) &res else null);
-    if (!res.written) return ""; // meshed to nothing (all air / cave-culled)
-    return readCachedTile(self, arena, tx, tz);
+    // Meshed to nothing (all air / cave-culled) is still a real answer.
+    const bytes = if (res.written) try readCachedTile(self, arena, tx, tz) else "";
+    return .{ .bytes = bytes, .revision = revision };
 }
 
 /// Background prebake: while bake slots sit idle, bake the unbaked (or
@@ -2504,7 +2729,8 @@ fn prebakeOne(self: *LiveServer) bool {
     const regions = if (snapshot) |current| current.loaded else self.sh.loaded;
 
     self.mutex.lockUncancelable(io);
-    const focus = self.last_request orelse .{ self.centre_tx, self.centre_tz };
+    var focus_buf: [MAX_FOCUS_POINTS + 1][2]i32 = undefined;
+    const focus = focusLocked(self, &focus_buf);
     var best_key: ?u64 = null;
     var best_revision: u64 = 0;
     var best_d: i64 = std.math.maxInt(i64);
@@ -2514,9 +2740,7 @@ fn prebakeOne(self: *LiveServer) bool {
         if (self.baking.contains(key)) continue;
         const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
         const tz: i32 = @bitCast(@as(u32, @truncate(key)));
-        const dx: i64 = tx - focus[0];
-        const dz: i64 = tz - focus[1];
-        const d = dx * dx + dz * dz;
+        const d = nearestFocusDistance(focus, tx, tz);
         if (d < best_d) {
             best_d = d;
             best_key = key;
@@ -2548,6 +2772,117 @@ fn prebakeOne(self: *LiveServer) bool {
         self.record(key, best_revision, null);
     }
     return true;
+}
+
+/// The tiles prebake warms outward from: every place a player is (from the
+/// host's focus file) plus wherever a viewer last looked, because someone
+/// scrolling the map wants the next tile as much as someone standing in a
+/// base does. Falls back to spawn when nothing else is known. Callers already
+/// hold `mutex`; `out` gives the result a caller-owned lifetime.
+fn focusLocked(self: *LiveServer, out: *[MAX_FOCUS_POINTS + 1][2]i32) []const [2]i32 {
+    @memcpy(out[0..self.focus_len], self.focus_buf[0..self.focus_len]);
+    var len = self.focus_len;
+    if (self.last_request) |viewer| {
+        out[len] = viewer;
+        len += 1;
+    }
+    if (len == 0) {
+        out[0] = .{ self.centre_tx, self.centre_tz };
+        len = 1;
+    }
+    return out[0..len];
+}
+
+/// Squared tile distance to the nearest focus point. Nearest-of-several (not
+/// a centroid) is what makes several separated bases warm in parallel-ish
+/// rings instead of the empty ocean between them.
+fn nearestFocusDistance(focus: []const [2]i32, tx: i32, tz: i32) i64 {
+    var best: i64 = std.math.maxInt(i64);
+    for (focus) |point| {
+        const dx: i64 = tx - point[0];
+        const dz: i64 = tz - point[1];
+        best = @min(best, dx * dx + dz * dz);
+    }
+    return best;
+}
+
+test "focus points map blocks to tiles, de-duplicate, and bound" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var out: [MAX_FOCUS_POINTS][2]i32 = undefined;
+
+    // 8-chunk tiles span 128 blocks. Two players in the same base are one
+    // candidate; a fractional stand-position floors like any other.
+    const points = try parseFocusPoints(
+        arena.allocator(),
+        \\{"points":[{"x":10,"z":20},{"x":100.5,"z":40},{"x":-1,"z":-1},{"x":900,"z":0}]}
+    ,
+        8,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 3), points.len);
+    try std.testing.expectEqual([2]i32{ 0, 0 }, points[0]);
+    try std.testing.expectEqual([2]i32{ -1, -1 }, points[1]);
+    try std.testing.expectEqual([2]i32{ 7, 0 }, points[2]);
+
+    // More players than we track: take the first MAX_FOCUS_POINTS.
+    var many: std.ArrayList(u8) = .empty;
+    defer many.deinit(std.testing.allocator);
+    try many.appendSlice(std.testing.allocator, "{\"points\":[");
+    for (0..MAX_FOCUS_POINTS + 8) |i| {
+        if (i > 0) try many.append(std.testing.allocator, ',');
+        try many.print(std.testing.allocator, "{{\"x\":{d},\"z\":0}}", .{i * 1000});
+    }
+    try many.appendSlice(std.testing.allocator, "]}");
+    const capped = try parseFocusPoints(arena.allocator(), many.items, 8, &out);
+    try std.testing.expectEqual(MAX_FOCUS_POINTS, capped.len);
+}
+
+test "focus points reject malformed documents and skip unusable entries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out: [MAX_FOCUS_POINTS][2]i32 = undefined;
+
+    // A truncated write, or a document of the wrong shape, is not a focus.
+    try std.testing.expectError(error.InvalidFocusDocument, parseFocusPoints(a, "{\"points\":[{\"x\":1,", 8, &out));
+    try std.testing.expectError(error.InvalidFocusDocument, parseFocusPoints(a, "[]", 8, &out));
+    try std.testing.expectError(error.InvalidFocusDocument, parseFocusPoints(a, "{\"points\":5}", 8, &out));
+    // An empty list is well-formed and simply means "nobody online".
+    try std.testing.expectEqual(@as(usize, 0), (try parseFocusPoints(a, "{\"points\":[]}", 8, &out)).len);
+    // Individual junk entries drop without taking the rest of the file down.
+    const mixed = try parseFocusPoints(
+        a,
+        \\{"points":[{"x":"here","z":0},{"z":0},{"x":1e30,"z":0},{"x":300,"z":300}]}
+    ,
+        8,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), mixed.len);
+    try std.testing.expectEqual([2]i32{ 2, 2 }, mixed[0]);
+}
+
+test "prebake ranks candidates by the nearest focus, not their centroid" {
+    // Two bases far apart: the tile beside one of them outranks the empty
+    // ocean halfway between, which is what a centroid would have picked.
+    const focus = [_][2]i32{ .{ -50, 0 }, .{ 50, 0 } };
+    try std.testing.expectEqual(@as(i64, 1), nearestFocusDistance(&focus, 51, 0));
+    try std.testing.expectEqual(@as(i64, 2500), nearestFocusDistance(&focus, 0, 0));
+    // A single focus degrades to plain squared distance.
+    try std.testing.expectEqual(@as(i64, 25), nearestFocusDistance(&.{.{ 0, 0 }}, 3, 4));
+}
+
+test "tile validators are scoped to both the session and the revision" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const etag = try tileEtag(a, 0xfeed, 0x1234);
+    try std.testing.expectEqualStrings("\"feed-1234\"", etag);
+    try std.testing.expect(serve.etagMatches(etag, etag));
+    // A restart re-orders the texture atlas, so last session's copy of the
+    // same world revision must not revalidate.
+    try std.testing.expect(!serve.etagMatches(try tileEtag(a, 0xbeef, 0x1234), etag));
+    try std.testing.expect(!serve.etagMatches(try tileEtag(a, 0xfeed, 0x1235), etag));
 }
 
 /// Read a session-cached tile off disk into the request arena (it was written
@@ -2661,6 +2996,7 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     var allowed_origins: std.ArrayList([]const u8) = .empty;
     var max_connections: usize = 64;
     var scan_interval_seconds: u32 = 5;
+    var focus_file: ?[]const u8 = null;
     // Prebake defaults on for `vantage server` (a persistent service whose
     // cache SHOULD converge on the whole world) and off for local `vantage
     // live` (whose pitch is instant startup with a footprint that follows
@@ -2713,6 +3049,8 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
             const v = try flagValue(args, &argi);
             const n = std.fmt.parseInt(u32, v, 10) catch return badValue("--scan-interval", v, "1..3600 seconds");
             scan_interval_seconds = std.math.clamp(n, 1, 3600);
+        } else if (server_mode and std.mem.eql(u8, arg, "--focus-file")) {
+            focus_file = try flagValue(args, &argi);
         } else if (std.mem.eql(u8, arg, "--prebake")) {
             const v = try flagValue(args, &argi);
             if (std.mem.eql(u8, v, "on")) {
@@ -2794,6 +3132,9 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     try std.Io.Dir.cwd().createDirPath(init.io, tiles_dir);
 
     const server = try a.create(LiveServer);
+    var session_bytes: [8]u8 = undefined;
+    init.io.random(&session_bytes);
+    const session_tag = std.mem.readInt(u64, &session_bytes, .little);
     var known = std.AutoHashMap(u64, void).init(sh.sa);
     for (tile_keys) |key| try known.put(key, {});
     const region_snapshot = if (server_mode)
@@ -2816,6 +3157,13 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         .centre_tz = @divFloor(wl.centre_cz, tile_chunks),
         .snapshot = region_snapshot,
         .scan_interval_ns = @as(i96, scan_interval_seconds) * std.time.ns_per_s,
+        .focus_file = focus_file,
+        // A poll may lag the catalog by up to this long. The viewer polls
+        // roughly every 1.2 s while anything is moving, so one window is
+        // under one poll of latency in exchange for bounding manifest
+        // rebuilds to one per window no matter how many clients are watching.
+        .manifest_coalesce_ns = if (server_mode) 1 * std.time.ns_per_s else 0,
+        .session_tag = session_tag,
     };
 
     // Seed the nearest tile synchronously: fail fast if assets/pipeline are
@@ -2851,6 +3199,18 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
             spawned += 1;
         }
         if (spawned > 0) std.debug.print("prebake: {d} background worker(s) warming the tile cache\n", .{spawned});
+    }
+
+    // The world/focus tick. Only the server needs it: local `live` has no
+    // region snapshot to advance and its single viewer is always the focus.
+    if (server_mode) {
+        server.refreshFocus(); // start warm on the host's points, not spawn
+        if (std.Thread.spawn(.{}, scanLoop, .{ server, @as(i64, scan_interval_seconds) * 1000 })) |t| {
+            t.detach();
+            if (focus_file) |path| std.debug.print("focus:   prebake follows {s}\n", .{path});
+        } else |e| {
+            std.debug.print("server: no background scan thread ({s}); world changes will be picked up by manifest polls only\n", .{@errorName(e)});
+        }
     }
 
     std.debug.print("live: rendering on demand — tiles bake as you explore (cache: {s}/tiles)\n", .{out_dir});

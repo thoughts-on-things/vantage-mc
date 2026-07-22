@@ -155,6 +155,7 @@ Useful server-specific flags are:
 | `--allow-origin <origin>` | none | Exact browser origin allowed by CORS; repeatable. |
 | `--token-env <name>` | `VANTAGE_SERVER_TOKEN` | Environment variable holding the internal bearer. |
 | `--prebake on\|off` | `on` | Background-bake the world with idle bake slots (see below). |
+| `--focus-file <path>` | none | JSON file of block coordinates prebake warms around (see below). |
 
 All `vantage live` render controls also apply, including `--radius`,
 `--tile-chunks`, `--caves`, `--light`, `--biome-blend`, `--gz`, `--memory`, and
@@ -180,7 +181,8 @@ world-list shape leaves room for a future multi-world supervisor.
 builds an atlas. `OPTIONS` supports a strict CORS preflight. Other methods are
 rejected because the component has no remote mutation or administration API.
 
-All protected responses use `private, no-store`. Bearer credentials belong in
+Protected responses use `private, no-store`, except tiles — see
+[Tile revalidation](#tile-revalidation). Bearer credentials belong in
 `Authorization`, never query strings. Browser access is opt-in per exact
 scheme/host/port with `--allow-origin`; wildcard or suffix matching is not
 supported. Responses include `Vary: Origin`, as required for origin-specific
@@ -201,20 +203,80 @@ The built manifest is cached server-side per change generation, so idle
 conditional polls cost a counter compare rather than an O(tiles) rebuild, and
 changed manifests travel `Content-Encoding: gzip` to clients whose
 `Accept-Encoding` admits it — on a large world the tile catalog is megabytes
-of repetitive JSON and is re-fetched every poll while tiles bake.
+of repetitive JSON and is re-fetched every poll while tiles bake. Prebake
+lands tiles faster than clients poll, which would otherwise move the
+generation on every poll and defeat that cache exactly when rebuilding is
+most expensive, so a representation is also shared for up to a second past
+its generation: one rebuild per second serves every watching client, and the
+tiles that landed inside the window appear on the next poll.
+
+### Tile revalidation
+
+A tile's bytes are fixed by its manifest `revision`, so a client that already
+has one never needs it again. Tile responses therefore carry a strong `ETag`
+and `Cache-Control: private, no-cache` — storable, but never usable without
+revalidating. A conditional fetch that matches answers `304` before any
+transfer, any disk read, and, on a tile that has not been baked yet, any
+bake at all. Panning back over explored terrain after a reload costs a status
+line per tile instead of a megabyte.
+
+The validator is `"<session>-<revision>"`. The session half is a per-process
+random tag, and it is load-bearing: tile payloads address the texture array
+by layer index, layers are assigned in the order the bakes encountered them,
+and so a tile is only interchangeable with one from the same process. Within
+a session layers are only ever appended, which is what keeps an early tile
+valid as the atlas grows. Across a restart the world revision may be
+identical and the tile still is not, so the session tag makes the old
+validator deliberately unmatchable rather than serving a tile against an
+atlas it was not baked for.
 
 ### Background prebake
 
 On-demand baking alone means every first look at an area waits a full tile
 bake. With `--prebake on` (the default), idle bake slots continuously bake the
-unbaked tile nearest the most recent viewer request — spawn-outward until
-anyone connects — so exploration mostly lands on warm cache. Interactive
-fetches keep priority: prebake workers stand down while any viewer request is
-waiting for a bake permit, and one slot's worth of headroom is reserved for
-them. After a world save advances tile revisions, the same loop re-bakes the
-changed tiles on its own, so clients pick up edits without ever fetching cold.
-The cache therefore converges on a full render of the world; disable with
-`--prebake off` if disk or CPU budget forbids that.
+unbaked tile nearest a focus point — spawn-outward until something better is
+known — so exploration mostly lands on warm cache. Interactive fetches keep
+priority: prebake workers stand down while any viewer request is waiting for a
+bake permit, and one slot's worth of headroom is reserved for them. A
+background tick scans the world at `--scan-interval` whether or not anyone is
+connected, so a save advances tile revisions and the same loop re-bakes the
+changed tiles on its own. The cache therefore converges on a full render of
+the world even on an unwatched server; disable with `--prebake off` if disk or
+CPU budget forbids that.
+
+Concurrency is what prebake throughput and cold-start latency actually scale
+with. `--threads` is a ceiling on simultaneous bake arenas, and prebake takes
+all but one of them, so `--threads 1` leaves a viewer's first look queued
+behind a background bake. Give a dedicated sidecar at least two.
+
+### Pointing the warm-up at your players
+
+Left alone, prebake warms outward from spawn until a viewer's tile request
+gives it something better to aim at. A host usually knows more than that: it
+knows where its players are standing right now, long before any of them opens
+the map. `--focus-file <path>` hands that knowledge over.
+
+The file is a small JSON document the host rewrites whenever it likes, in
+**block** coordinates — the host knows where players are, not how this process
+was told to tile the world:
+
+```json
+{ "points": [{ "x": 118, "z": -2043 }, { "x": -560, "z": 380 }] }
+```
+
+Vantage stats the file on each scan tick and re-reads it only when it moved.
+Points are converted to tile coordinates, de-duplicated (a whole team in one
+base is one candidate, not five), and capped at 16. Prebake then picks the
+unbaked tile nearest *any* focus point, plus wherever a viewer last looked, so
+several separated bases warm in parallel rings instead of the empty ocean
+between them. Write it atomically (write-then-rename) if you can; a
+half-written or malformed file is ignored with a single log line and the
+previous focus stands. A missing file simply means "no host focus" — this is a
+scheduling hint, and nothing about the map depends on it.
+
+This deliberately stays a file rather than an endpoint. The sidecar's data
+plane is GET-only with no remote mutation surface, and the privileged
+supervisor that owns the save path already owns a filesystem it can write to.
 
 ## Host integration
 
@@ -234,12 +296,17 @@ renders is:
 3. On every request, validate the player's existing session. Remove any
    client-supplied `Authorization` header, then attach the Vantage internal
    bearer before forwarding to `/v1/worlds/default/`.
-4. Apply player/session rate limits at the host or the edge. Never expose an
+4. Pass `If-None-Match` and `ETag` through the proxy in both directions, and
+   keep the browser-facing `Cache-Control` revalidatable rather than
+   `no-store`. Without that, every tile is re-transferred on every reload.
+5. Apply player/session rate limits at the host or the edge. Never expose an
    endpoint that lets a player choose a filesystem path, cache directory,
    command, or arbitrary tile coordinate.
-5. Return the session-gated manifest URL to the launcher. A browser can use the
+6. Return the session-gated manifest URL to the launcher. A browser can use the
    same-origin proxy directly; a native launcher can provide its existing
    session header through `worldFromHttp`.
+7. Optionally, have the supervisor write online players' positions to a
+   `--focus-file` so the map is already warm where they are.
 
 ```ts
 import { worldFromHttp } from '@thoughts-on-things/vantage-mc/core';
@@ -305,6 +372,7 @@ The resulting costs are:
 | Tile revision | O(overlapping regions), normally one to four. |
 | Tile bake | One tile plus seam apron; bounded concurrent working sets. |
 | Repeated tile fetch | Disk cache read; no rebake. |
+| Revalidated tile fetch | `304 Not Modified`; no read, no transfer, no bake. |
 | Duplicate in-flight fetch | Waits for and shares the leader's result. |
 | Unchanged manifest poll | `304 Not Modified`; headers only, no body. |
 
@@ -324,6 +392,8 @@ cache size, not the expensive resident bake working set.
 | Memory/connection exhaustion | Byte-derived bake semaphore, connection cap, and finite requests per keep-alive connection. |
 | Partial cache files | Atomic replacement after a successful bake. |
 | Save races | Stable location-table reads and reference-counted epochs; failed scans retain the last good snapshot. |
+| Stored tile copies | Tiles are `private` and `no-cache`: shared caches are excluded and a stored copy is unusable without a revalidation the host still authorizes. |
+| Focus-file tampering | Read-only, size-capped, schedule-only: it can reorder prebake, never widen what is served or advertised. Keep it writable by the supervisor alone. |
 
 The map can disclose player builds, explored terrain, and—in full-cave mode—
 underground structures. Treat it as private server data. Run the process as a

@@ -177,8 +177,11 @@
           "200": {
             "description": "Gzip-wrapped Vantage tile. A zero-byte response represents an advertised tile that meshed to empty terrain.",
             "headers": {
-              "Cache-Control": { "schema": { "type": "string", "const": "private, no-cache" } },
-              "ETag": { "description": "Strong validator over this tile's `{session, revision}` pair.", "schema": { "type": "string" } }
+              "Cache-Control": {
+                "description": "`private, no-cache` for a manifest-advertised tile, so a client may store a copy it must revalidate. A well-formed coordinate the manifest does not advertise keeps the default `private, no-store`.",
+                "schema": { "type": "string", "enum": ["private, no-cache", "private, no-store"] }
+              },
+              "ETag": { "description": "Strong validator over this tile's `{session, revision}` pair. Absent for a coordinate the manifest does not advertise, which has no revision to validate against.", "schema": { "type": "string" } }
             },
             "content": { "application/octet-stream": { "schema": { "type": "string", "contentEncoding": "binary" } } }
           },

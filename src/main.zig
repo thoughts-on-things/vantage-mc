@@ -2321,11 +2321,14 @@ const LiveServer = struct {
         if (changed) std.debug.print("server: world snapshot advanced ({d} render tiles)\n", .{candidate.tile_keys.len});
     }
 
-    /// Re-read `--focus-file` when its size or mtime moved. Absent or
-    /// unparseable clears the host focus rather than failing anything: the
-    /// file is an optimisation hint, and a half-written one must never cost
-    /// the map its warm-up. The complaint is printed once per bad state so a
-    /// misconfigured path cannot flood the log every scan tick.
+    /// Re-read `--focus-file` when its size or mtime moved. Nothing here can
+    /// fail the map: the file is an optimisation hint. The two bad outcomes
+    /// are deliberately not the same, though — an absent file is a host
+    /// saying "no focus" and clears it, while an unreadable or malformed one
+    /// is most likely a torn write and keeps the previous points rather than
+    /// discarding good focus over a file that will be whole again next tick.
+    /// The complaint is printed once per bad state so a misconfigured path
+    /// cannot flood the log every scan tick.
     fn refreshFocus(self: *LiveServer) void {
         const path = self.focus_file orelse return;
         const io = self.sh.io;
@@ -3195,6 +3198,10 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     // headroom is left to interactive requests by the workers' politeness
     // check, so first-fetch latency stays interactive even while the whole
     // world bakes behind the scenes.
+    // Publish the host's focus BEFORE any prebake worker starts, or the
+    // first few bakes aim at spawn and are thrown away.
+    if (server_mode) server.refreshFocus();
+
     if (prebake and tile_keys.len > 0) {
         const workers = @max(1, bake_count -| 1);
         var spawned: usize = 0;
@@ -3209,7 +3216,6 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     // The world/focus tick. Only the server needs it: local `live` has no
     // region snapshot to advance and its single viewer is always the focus.
     if (server_mode) {
-        server.refreshFocus(); // start warm on the host's points, not spawn
         if (std.Thread.spawn(.{}, scanLoop, .{ server, @as(i64, scan_interval_seconds) * 1000 })) |t| {
             t.detach();
             if (focus_file) |path| std.debug.print("focus:   prebake follows {s}\n", .{path});

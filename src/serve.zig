@@ -38,6 +38,12 @@ pub const Produced = struct {
     /// Set (to `"gzip"`) when `body` carries that content-coding. Producers
     /// only compress when the request's `accept_gzip` said they may.
     content_encoding: ?[]const u8 = null,
+    /// Overrides the transport's default caching policy for this response.
+    /// Null keeps it (`no-cache` locally, `private, no-store` on the API).
+    /// A producer sets this when a resource is worth revalidating rather than
+    /// re-transferring — a tile is immutable for its revision, so letting a
+    /// client keep a revalidatable copy turns a repeat view into a 304.
+    cache_control: ?[]const u8 = null,
 };
 
 /// An on-demand content source (the `vantage live` server): given a
@@ -486,7 +492,7 @@ fn respondProduced(
         headers.add("content-type", resp.content_type);
         if (resp.content_encoding) |coding| headers.add("content-encoding", coding);
     }
-    headers.add("cache-control", cache_control);
+    headers.add("cache-control", resp.cache_control orelse cache_control);
     if (resp.etag) |etag| headers.add("etag", etag);
     headers.add(security_headers[0].name, security_headers[0].value);
     headers.add(security_headers[1].name, security_headers[1].value);

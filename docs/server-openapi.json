@@ -163,11 +163,31 @@
         "operationId": "getWorldTile",
         "tags": ["Artifacts"],
         "summary": "Read or render one advertised geometry tile",
-        "description": "A cache hit is returned directly. A miss is rendered under Vantage's memory and concurrency admission limits. Concurrent requests for the same tile share one in-flight bake.",
+        "description": "A cache hit is returned directly. A miss is rendered under Vantage's memory and concurrency admission limits. Concurrent requests for the same tile share one in-flight bake. Responses for manifest-advertised tiles carry a strong `ETag` combining the tile's manifest `revision` with an opaque per-process session tag, and are `private, no-cache` so a client may keep a copy it must revalidate. A syntactically valid coordinate the manifest does not advertise is answered with an empty `200` carrying no `ETag` and the default `private, no-store`, since there is no revision to validate against. Presenting that validator answers `304` without transferring, reading, or — on a tile that has not been baked yet — rendering anything. The session tag is part of the validator because tile payloads index the texture array built by the process that baked them: after a restart the same world revision is deliberately not revalidatable.",
+        "parameters": [
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Entity tag from a previous response for this tile. A match short-circuits to `304 Not Modified` with no body and no bake.",
+            "schema": { "type": "string" }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Gzip-wrapped Vantage tile. A zero-byte response represents an advertised tile that meshed to empty terrain.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-cache" } },
+              "ETag": { "description": "Strong validator over this tile's `{session, revision}` pair.", "schema": { "type": "string" } }
+            },
             "content": { "application/octet-stream": { "schema": { "type": "string", "contentEncoding": "binary" } } }
+          },
+          "304": {
+            "description": "The client already holds this tile revision from this session; no body.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-cache" } },
+              "ETag": { "description": "The (still-current) strong validator.", "schema": { "type": "string" } }
+            }
           },
           "400": { "description": "Malformed or non-artifact path" },
           "401": { "$ref": "#/components/responses/Unauthorized" },

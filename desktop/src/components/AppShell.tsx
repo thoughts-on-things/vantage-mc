@@ -20,18 +20,26 @@ export function AppShell({ library, settings, onSettingsChange }: {
   const searchRef = useRef<HTMLInputElement>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const shortcutsButtonRef = useRef<HTMLButtonElement>(null);
+  const sheetOpenerRef = useRef<HTMLElement | null>(null);
 
   // Closing a sheet returns focus to whatever opened it, so keyboard users
   // land back where they were instead of at the top of the document.
-  const openSheet = useRef<Sheet>(null);
-  openSheet.current = sheet;
+  const activeSheetRef = useRef<Sheet>(null);
+  activeSheetRef.current = sheet;
+  const showSheet = useCallback((next: Exclude<Sheet, null>) => {
+    const active = document.activeElement;
+    sheetOpenerRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    setSheet(next);
+  }, []);
   const closeSheet = useCallback(() => {
-    const trigger = openSheet.current === 'settings' ? settingsButtonRef : shortcutsButtonRef;
-    trigger.current?.focus({ preventScroll: true });
+    const fallback = activeSheetRef.current === 'settings' ? settingsButtonRef : shortcutsButtonRef;
+    const opener = sheetOpenerRef.current;
+    (opener?.isConnected ? opener : fallback.current)?.focus({ preventScroll: true });
+    sheetOpenerRef.current = null;
     setSheet(null);
   }, []);
 
-  const openShortcuts = useCallback(() => setSheet('shortcuts'), []);
+  const openShortcuts = useCallback(() => showSheet('shortcuts'), [showSheet]);
 
   useLibraryHotkeys({
     enabled: !sheet && library.screen === 'library',
@@ -56,7 +64,7 @@ export function AppShell({ library, settings, onSettingsChange }: {
         onNavigate={library.goTo}
         settingsButtonRef={settingsButtonRef}
         shortcutsButtonRef={shortcutsButtonRef}
-        onOpenSettings={() => setSheet('settings')}
+        onOpenSettings={() => showSheet('settings')}
         onOpenShortcuts={openShortcuts}
       />
 

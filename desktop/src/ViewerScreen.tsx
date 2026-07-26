@@ -139,7 +139,10 @@ function ViewerChrome({ world, profile, onBack }: {
           <ArrowLeft size={17} /> Back <kbd>Esc</kbd>
         </button>
         <span className="toolbar-rule" />
-        <div className="toolbar-world"><strong>{world.name}</strong><small>{sourceLabel(world.source)} · local render</small></div>
+        <div className="toolbar-world">
+          <strong>{world.name}</strong>
+          <small>{world.source === 'render' ? 'saved local render' : `${sourceLabel(world.source)} · local render`}</small>
+        </div>
         <span className="toolbar-rule toolbar-status-rule" />
         <div className="toolbar-status" aria-live="polite">
           <span className={ready ? 'live-dot' : 'live-dot pending'} />

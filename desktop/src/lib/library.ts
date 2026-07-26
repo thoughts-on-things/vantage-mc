@@ -28,7 +28,7 @@ export function renderState(world: WorldInfo, settings: DesktopSettings): Render
   // stale rather than opening it.
   if (!world.renderSettings) return 'unknown';
   if (!sameSignature(world.renderSettings, settings)) return 'settings';
-  if (world.renderedAtMs && world.lastPlayedMs > world.renderedAtMs + PLAYED_SINCE_GRACE_MS) return 'outdated';
+  if (world.renderedAtMs !== null && world.lastPlayedMs > world.renderedAtMs + PLAYED_SINCE_GRACE_MS) return 'outdated';
   return 'ready';
 }
 

@@ -112,8 +112,8 @@ function RenderRow({ entry, settings, busy, locked, onOpen, onReveal, onDelete }
         <div className="render-confirm" role="group" aria-label={`Confirm deleting ${entry.worldName}`}>
           <p>Delete {formatBytes(entry.sizeBytes)} of generated map data?</p>
           <span>
-            <button onClick={() => setConfirming(false)}>Keep</button>
-            <button className="danger" onClick={onDelete}>Delete render</button>
+            <button onClick={() => setConfirming(false)} disabled={locked}>Keep</button>
+            <button className="danger" onClick={onDelete} disabled={locked}>Delete render</button>
           </span>
         </div>
       ) : (

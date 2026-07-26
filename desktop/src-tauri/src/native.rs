@@ -31,6 +31,13 @@ fn decode_png_data_url(data_url: &str, limit: usize) -> Result<Vec<u8>, String> 
     let encoded = data_url
         .strip_prefix(PNG_PREFIX)
         .ok_or("Image must be a PNG data URL")?;
+    // A padded base64 string needs at most four bytes for every three decoded
+    // bytes. Bound the input before decoding so the decoded-size cap also
+    // bounds the allocation an untrusted WebView payload can request.
+    let encoded_limit = limit.div_ceil(3).saturating_mul(4);
+    if encoded.len() > encoded_limit {
+        return Err("Image is too large".into());
+    }
     let bytes = BASE64.decode(encoded).map_err(|error| error.to_string())?;
     if bytes.len() > limit {
         return Err("Image is too large".into());
@@ -199,6 +206,11 @@ mod tests {
             decode_image_data_url(&data_url).is_ok(),
             "map exports are larger"
         );
+
+        // The encoded bound is checked before base64 decoding; even malformed
+        // oversized input cannot force an allocation beyond the image cap.
+        let oversized_encoded = "A".repeat(MAX_THUMBNAIL_BYTES.div_ceil(3) * 4 + 4);
+        assert!(decode_thumbnail_data_url(&format!("{PNG_PREFIX}{oversized_encoded}")).is_err());
     }
 
     #[test]

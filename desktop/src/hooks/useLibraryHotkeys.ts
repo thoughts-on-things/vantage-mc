@@ -50,7 +50,7 @@ export function useLibraryHotkeys({
         }
         return;
       }
-      if (((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'k') || (event.key === '/' && !typing)) {
+      if (enabled && (((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'k') || (event.key === '/' && !typing))) {
         if (actionRef.current) return;
         event.preventDefault();
         searchRef.current?.focus();

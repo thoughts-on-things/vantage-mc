@@ -14,6 +14,8 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 /// 4K with a high pixel ratio still lands far below this ceiling.
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_THUMBNAIL_BYTES: usize = 4 * 1024 * 1024;
+/// Minecraft writes a 64×64 `icon.png`; anything far past that is not one.
+const MAX_ICON_BYTES: usize = 512 * 1024;
 /// Enough to disambiguate exports taken in the same second.
 const MAX_NAME_ATTEMPTS: u32 = 64;
 
@@ -39,10 +41,13 @@ fn decode_png_data_url(data_url: &str, limit: usize) -> Result<Vec<u8>, String> 
     Ok(bytes)
 }
 
-/// Reads a small PNG back as a data URL for the library grid.
-pub fn image_data_url(path: &Path) -> Option<String> {
+/// Reads a world's `icon.png` back as a data URL. Icons are 64×64 and live in
+/// the save folder rather than anywhere Vantage owns, so they are the one
+/// image still inlined into the library payload — the cap keeps a
+/// hand-edited icon from bloating it.
+pub fn icon_data_url(path: &Path) -> Option<String> {
     let bytes = fs::read(path).ok()?;
-    if bytes.len() > 2 * 1024 * 1024 {
+    if bytes.len() > MAX_ICON_BYTES {
         return None;
     }
     Some(format!("{PNG_PREFIX}{}", BASE64.encode(bytes)))

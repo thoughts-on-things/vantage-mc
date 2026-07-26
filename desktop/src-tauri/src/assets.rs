@@ -9,6 +9,7 @@
 //! cache can then revalidate with `If-None-Match` and get an empty 304 instead
 //! of another full read off disk.
 
+use crate::renders;
 use serde::Serialize;
 use std::{
     fs::{File, Metadata},
@@ -27,6 +28,11 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const KEEP_ALIVE: Duration = Duration::from_secs(30);
 /// Cap on requests served by one connection before it is recycled.
 const MAX_KEEP_ALIVE_REQUESTS: u32 = 512;
+/// First path segment of the route that reaches every render's preview image.
+const LIBRARY_PREFIX: &str = "library";
+/// The only files that route will serve. The open-render root streams whole
+/// maps; this one is a picture gallery and nothing more.
+const LIBRARY_FILES: &[&str] = &[renders::THUMBNAIL_FILE];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,31 +41,48 @@ pub struct RenderReady {
     pub output_path: String,
 }
 
+/// Roots this endpoint will serve from.
+struct Roots {
+    /// The render currently open in the viewer — everything under it is
+    /// reachable, because that is what streaming a map means.
+    open: RwLock<Option<PathBuf>>,
+    /// `<local data>/Vantage/renders`. Reachable for *any* render, so it is
+    /// restricted to the preview images the library grid needs.
+    library: Option<PathBuf>,
+}
+
 #[derive(Clone)]
 pub struct AssetServer {
-    root: Arc<RwLock<Option<PathBuf>>>,
+    roots: Arc<Roots>,
     port: u16,
 }
 
 impl AssetServer {
-    pub fn start() -> Result<Self, String> {
+    /// `library` is the renders directory whose preview images the library
+    /// screens display; `None` disables that route entirely.
+    pub fn start(library: Option<PathBuf>) -> Result<Self, String> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| error.to_string())?;
         let port = listener
             .local_addr()
             .map_err(|error| error.to_string())?
             .port();
-        let root = Arc::new(RwLock::new(None));
-        let server_root = Arc::clone(&root);
+        let roots = Arc::new(Roots {
+            open: RwLock::new(None),
+            // Canonicalized once: comparing a canonical child against a
+            // non-canonical root would let a symlinked path slip through.
+            library: library.and_then(|path| path.canonicalize().ok()),
+        });
+        let server_roots = Arc::clone(&roots);
         thread::Builder::new()
             .name("vantage-assets".into())
             .spawn(move || {
                 for stream in listener.incoming().flatten() {
-                    let root = Arc::clone(&server_root);
-                    let _ = thread::spawn(move || serve(stream, root));
+                    let roots = Arc::clone(&server_roots);
+                    let _ = thread::spawn(move || serve(stream, roots));
                 }
             })
             .map_err(|error| error.to_string())?;
-        Ok(Self { root, port })
+        Ok(Self { roots, port })
     }
 
     /// Points the endpoint at a completed render and returns its manifest URL.
@@ -69,13 +92,23 @@ impl AssetServer {
             return Err("The render has no manifest.json".into());
         }
         *self
-            .root
+            .roots
+            .open
             .write()
             .map_err(|_| "asset server lock poisoned")? = Some(canonical.clone());
         Ok(RenderReady {
             manifest_url: format!("http://127.0.0.1:{}/manifest.json", self.port),
             output_path: canonical.to_string_lossy().into_owned(),
         })
+    }
+
+    /// URL for one render's preview image. `version` busts the WebView cache
+    /// when a world is re-rendered into the same directory.
+    pub fn library_image_url(&self, render_id: &str, file: &str, version: i64) -> String {
+        format!(
+            "http://127.0.0.1:{}/{LIBRARY_PREFIX}/{render_id}/{file}?v={version}",
+            self.port
+        )
     }
 }
 
@@ -86,7 +119,7 @@ struct Request {
     keep_alive: bool,
 }
 
-fn serve(stream: TcpStream, root: Arc<RwLock<Option<PathBuf>>>) {
+fn serve(stream: TcpStream, roots: Arc<Roots>) {
     let _ = stream.set_read_timeout(Some(KEEP_ALIVE));
     let _ = stream.set_nodelay(true);
     let Ok(write_half) = stream.try_clone() else {
@@ -109,7 +142,7 @@ fn serve(stream: TcpStream, root: Arc<RwLock<Option<PathBuf>>>) {
         let response = if request.method != "GET" && !head {
             respond_text(&mut writer, 405, "method not allowed", head, &request)
         } else {
-            respond_file(&mut writer, &request, &root, head)
+            respond_file(&mut writer, &request, &roots, head)
         };
         if response.is_err() || writer.flush().is_err() || !request.keep_alive {
             return;
@@ -170,21 +203,15 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Request> {
 fn respond_file(
     writer: &mut impl Write,
     request: &Request,
-    root: &Arc<RwLock<Option<PathBuf>>>,
+    roots: &Arc<Roots>,
     head: bool,
 ) -> io::Result<()> {
     let Some(relative) = safe_relative_path(&request.target) else {
         return respond_text(writer, 400, "invalid path", head, request);
     };
-    let Some(base) = root.read().ok().and_then(|guard| guard.clone()) else {
-        return respond_text(writer, 404, "no render selected", head, request);
-    };
-    let Ok(canonical) = base.join(relative).canonicalize() else {
+    let Some(canonical) = resolve_file(&relative, roots) else {
         return respond_text(writer, 404, "not found", head, request);
     };
-    if !canonical.starts_with(&base) || !canonical.is_file() {
-        return respond_text(writer, 404, "not found", head, request);
-    }
     let Ok(mut file) = File::open(&canonical) else {
         return respond_text(writer, 500, "read failed", head, request);
     };
@@ -275,6 +302,37 @@ fn write_header(
     }
     write!(writer, "Access-Control-Allow-Origin: *\r\n")?;
     write!(writer, "Connection: {connection}\r\n\r\n")
+}
+
+/// Maps an already-sanitized relative path onto a real file under one of the
+/// endpoint's roots, or `None` when nothing there may answer for it.
+///
+/// `/library/<render-id>/<image>` reaches any render's preview image; every
+/// other path is served from whichever render is currently open. Both are
+/// confirmed to stay inside their canonical root after resolution, so a
+/// symlink planted in a render directory cannot read outside it.
+fn resolve_file(relative: &Path, roots: &Roots) -> Option<PathBuf> {
+    let parts: Vec<_> = relative
+        .iter()
+        .map(|part| part.to_string_lossy().into_owned())
+        .collect();
+    let (base, joined) = match parts.as_slice() {
+        [prefix, render_id, file] if prefix == LIBRARY_PREFIX => {
+            let library = roots.library.as_ref()?;
+            if !renders::is_render_id(render_id) || !LIBRARY_FILES.contains(&file.as_str()) {
+                return None;
+            }
+            (library.clone(), library.join(render_id).join(file))
+        }
+        [prefix, ..] if prefix == LIBRARY_PREFIX => return None,
+        _ => {
+            let open = roots.open.read().ok()?.clone()?;
+            let joined = open.join(relative);
+            (open, joined)
+        }
+    };
+    let canonical = joined.canonicalize().ok()?;
+    (canonical.starts_with(&base) && canonical.is_file()).then_some(canonical)
 }
 
 /// Percent-decodes a request target and rejects anything that could escape the
@@ -399,16 +457,23 @@ mod tests {
     /// conditional refetch that costs nothing but a header.
     #[test]
     fn one_connection_serves_many_files_and_revalidates() {
-        let root = std::env::temp_dir().join(format!(
+        let library = std::env::temp_dir().join(format!(
             "vantage-endpoint-{}-{}",
             std::process::id(),
-            crate::renders::now_ms()
+            renders::now_ms()
         ));
+        let id = renders::render_id("C:\\saves\\Endpoint");
+        let root = library.join(&id);
         std::fs::create_dir_all(root.join("tiles")).unwrap();
         std::fs::write(root.join("manifest.json"), br#"{"version":6}"#).unwrap();
         std::fs::write(root.join("tiles").join("0.vtl"), vec![9_u8; 4096]).unwrap();
+        std::fs::write(
+            root.join(renders::THUMBNAIL_FILE),
+            b"\x89PNG\r\n\x1a\npreview",
+        )
+        .unwrap();
 
-        let server = AssetServer::start().unwrap();
+        let server = AssetServer::start(Some(library.clone())).unwrap();
         let ready = server.open(root.clone()).unwrap();
         let port: u16 = ready
             .manifest_url
@@ -449,7 +514,41 @@ mod tests {
         request(&mut stream, "/tiles/missing.vtl", None);
         assert_eq!(read_response(&mut reader).status, 404);
 
-        std::fs::remove_dir_all(&root).unwrap();
+        // The library route reaches any render's preview image — the version
+        // query is for the cache, not the server, so it is ignored.
+        request(
+            &mut stream,
+            &format!("/library/{id}/{}?v=17", renders::THUMBNAIL_FILE),
+            None,
+        );
+        let preview = read_response(&mut reader);
+        assert_eq!(preview.status, 200);
+        assert_eq!(preview.body, b"\x89PNG\r\n\x1a\npreview");
+        assert_eq!(preview.header("Content-Type"), Some("image/png"));
+
+        // ...and nothing else in that render, however it is asked for.
+        for refused in [
+            format!("/library/{id}/manifest.json"),
+            format!("/library/{id}/tiles/0.vtl"),
+            format!("/library/{id}"),
+            format!("/library/../{id}/{}", renders::THUMBNAIL_FILE),
+            format!("/library/not-a-render-id/{}", renders::THUMBNAIL_FILE),
+            format!(
+                "/library/{}/{}",
+                renders::render_id("C:\\saves\\Absent"),
+                renders::THUMBNAIL_FILE
+            ),
+        ] {
+            request(&mut stream, &refused, None);
+            let response = read_response(&mut reader);
+            assert!(
+                response.status == 404 || response.status == 400,
+                "{refused} answered {}",
+                response.status
+            );
+        }
+
+        std::fs::remove_dir_all(&library).unwrap();
     }
 
     fn get(target: &str) -> Request {

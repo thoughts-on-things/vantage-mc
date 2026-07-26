@@ -107,7 +107,11 @@ pub struct RenderEntry {
 /// Every render directory under `root`, newest first. Unreadable entries are
 /// skipped rather than failing the whole listing — one corrupt directory should
 /// never hide the rest of the library.
-pub fn list(root: &Path, thumbnail: impl Fn(&Path) -> Option<String>) -> Vec<RenderEntry> {
+///
+/// `thumbnail` receives each render's id and the path its preview image would
+/// live at, and returns the URL the UI should load it from (or `None` when
+/// there is no preview yet).
+pub fn list(root: &Path, thumbnail: impl Fn(&str, &Path) -> Option<String>) -> Vec<RenderEntry> {
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
     };
@@ -124,8 +128,8 @@ pub fn list(root: &Path, thumbnail: impl Fn(&Path) -> Option<String>) -> Vec<Ren
         let record = RenderRecord::read(&path);
         let world_path = record.as_ref().and_then(|record| record.world_path.clone());
         let (size_bytes, file_count) = measure(&path);
+        let id = entry.file_name().to_string_lossy().into_owned();
         renders.push(RenderEntry {
-            id: entry.file_name().to_string_lossy().into_owned(),
             world_name: record
                 .as_ref()
                 .and_then(|record| record.world_name.clone())
@@ -140,14 +144,15 @@ pub fn list(root: &Path, thumbnail: impl Fn(&Path) -> Option<String>) -> Vec<Ren
                 .or_else(|| modified_ms(&manifest))
                 .unwrap_or_default(),
             settings: record.as_ref().map(|record| record.signature),
-            thumbnail_url: thumbnail(&path.join(THUMBNAIL_FILE)),
+            thumbnail_url: thumbnail(&id, &path.join(THUMBNAIL_FILE)),
             world_path,
             size_bytes,
             file_count,
             path: path.to_string_lossy().into_owned(),
+            id,
         });
     }
-    renders.sort_by(|left, right| right.rendered_at_ms.cmp(&left.rendered_at_ms));
+    renders.sort_by_key(|entry| std::cmp::Reverse(entry.rendered_at_ms));
     renders
 }
 
@@ -223,7 +228,9 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
-fn is_render_id(name: &str) -> bool {
+/// Hashed directory names this app generates, and the only render handle any
+/// other part of the app (or the frontend) is allowed to name.
+pub fn is_render_id(name: &str) -> bool {
     name.len() == 16 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
@@ -340,7 +347,9 @@ mod tests {
         .unwrap();
 
         let record_bytes = fs::metadata(ready.join(RECORD_FILE)).unwrap().len();
-        let listed = list(&root, |_| None);
+        let listed = list(&root, |id, thumbnail| {
+            thumbnail.is_file().then(|| format!("/library/{id}"))
+        });
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].world_name, "Ready");
         // manifest + nested tile + the record itself, counted through one
@@ -348,6 +357,17 @@ mod tests {
         assert_eq!(listed[0].size_bytes, 2 + 512 + record_bytes);
         assert_eq!(listed[0].file_count, 3);
         assert!(listed[0].world_missing, "the save path does not exist");
+        // No preview has been captured, so no URL is offered for one.
+        assert_eq!(listed[0].thumbnail_url, None);
+
+        fs::write(ready.join(THUMBNAIL_FILE), b"\x89PNG\r\n\x1a\n").unwrap();
+        let listed = list(&root, |id, thumbnail| {
+            thumbnail.is_file().then(|| format!("/library/{id}"))
+        });
+        assert_eq!(
+            listed[0].thumbnail_url.as_deref(),
+            Some(format!("/library/{}", render_id("C:\\saves\\Ready")).as_str())
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 

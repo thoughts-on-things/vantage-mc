@@ -145,7 +145,10 @@ impl Drop for RenderGuard<'_> {
 }
 
 #[tauri::command]
-async fn discover_worlds(app: tauri::AppHandle) -> Result<Vec<WorldInfo>, String> {
+async fn discover_worlds(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<WorldInfo>, String> {
     let output = app
         .shell()
         .sidecar("vantage-core")
@@ -163,14 +166,14 @@ async fn discover_worlds(app: tauri::AppHandle) -> Result<Vec<WorldInfo>, String
             continue;
         };
         let mut world: WorldInfo = serde_json::from_str(json).map_err(|error| error.to_string())?;
-        let cache = cache_path(&app, &world.path)?;
+        let render_id = renders::render_id(&world.path);
+        let cache = renders_root(&app)?.join(&render_id);
         let manifest = cache.join(renders::MANIFEST_FILE);
         world.cached = manifest.is_file();
         world.icon_url = world
             .icon_path
             .as_deref()
-            .and_then(|path| native::image_data_url(Path::new(path)));
-        world.thumbnail_url = native::image_data_url(&cache.join(renders::THUMBNAIL_FILE));
+            .and_then(|path| native::icon_data_url(Path::new(path)));
         let record = RenderRecord::read(&cache).map(|record| {
             if !world.cached || !record.needs_naming() {
                 return record;
@@ -190,6 +193,17 @@ async fn discover_worlds(app: tauri::AppHandle) -> Result<Vec<WorldInfo>, String
             .and_then(|record| record.rendered_at_ms)
             .or_else(|| renders::modified_ms(&manifest));
         world.render_settings = record.map(|record| record.signature);
+        // Previews are streamed from the loopback endpoint rather than
+        // base64'd into this response: a library of rendered worlds would
+        // otherwise push megabytes across the IPC bridge on every scan. The
+        // preview's own timestamp versions the URL, so regenerating one
+        // (which leaves the render untouched) still changes what loads.
+        world.thumbnail_url =
+            renders::modified_ms(&cache.join(renders::THUMBNAIL_FILE)).map(|version| {
+                state
+                    .assets
+                    .library_image_url(&render_id, renders::THUMBNAIL_FILE, version)
+            });
         worlds.push(world);
     }
     Ok(worlds)
@@ -440,8 +454,18 @@ fn reset_world_render(
 
 /// Every cached render on this PC, newest first.
 #[tauri::command]
-fn list_renders(app: tauri::AppHandle) -> Result<Vec<RenderEntry>, String> {
-    Ok(renders::list(&renders_root(&app)?, native::image_data_url))
+fn list_renders(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<RenderEntry>, String> {
+    Ok(renders::list(&renders_root(&app)?, |id, thumbnail| {
+        let version = renders::modified_ms(thumbnail)?;
+        Some(
+            state
+                .assets
+                .library_image_url(id, renders::THUMBNAIL_FILE, version),
+        )
+    }))
 }
 
 #[tauri::command]
@@ -558,8 +582,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            // The renders directory backs the library's preview images, so it
+            // is created up front: the endpoint canonicalizes that root once
+            // and a path that does not exist yet could never be resolved.
+            let library = renders_root(app.handle()).ok().inspect(|root| {
+                let _ = fs::create_dir_all(root);
+            });
             app.manage(AppState {
-                assets: AssetServer::start().map_err(std::io::Error::other)?,
+                assets: AssetServer::start(library).map_err(std::io::Error::other)?,
                 rendering: AtomicBool::new(false),
                 cancel_requested: AtomicBool::new(false),
                 render_child: Mutex::new(None),

@@ -141,6 +141,18 @@ previous `no-store`, so the WebView keeps them and revalidates with
 `If-None-Match`: a tile that has not been rebaked comes back as an empty `304`
 instead of being re-read from disk and re-sent on every revisit.
 
+It serves two roots. Everything under the render currently open in the viewer
+is reachable, because that is what streaming a map means. `/library/<render
+id>/<image>` additionally reaches *any* render's preview, so the library grid
+and the renders manager can display previews without base64-ing megabytes of
+PNG through the IPC bridge on every scan. That second route only serves the
+preview file name, only under generated render ids, and only after confirming
+the resolved path stays inside the canonical renders directory. Preview URLs
+carry the image's own timestamp, so regenerating a preview — which leaves the
+render itself untouched — still changes what the WebView loads. World
+`icon.png` files live in the save folder rather than anywhere Vantage owns, so
+they remain small inline data URLs.
+
 ## Development
 
 Requirements: Zig 0.16, Rust stable, Node 18+, and the Windows WebView2 runtime.

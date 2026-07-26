@@ -185,7 +185,8 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Request> {
     let version = start.next().unwrap_or("HTTP/1.1").to_string();
 
     let mut if_none_match = None;
-    let mut keep_alive = version != "HTTP/1.0";
+    let mut connection_close = false;
+    let mut connection_keep_alive = false;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -194,12 +195,15 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Request> {
         match name.trim().to_ascii_lowercase().as_str() {
             "if-none-match" => if_none_match = Some(value.to_string()),
             "connection" => {
-                let value = value.to_ascii_lowercase();
-                keep_alive = value.contains("keep-alive") || !value.contains("close");
+                for token in value.split(',').map(|token| token.trim()) {
+                    connection_close |= token.eq_ignore_ascii_case("close");
+                    connection_keep_alive |= token.eq_ignore_ascii_case("keep-alive");
+                }
             }
             _ => {}
         }
     }
+    let keep_alive = !connection_close && (version != "HTTP/1.0" || connection_keep_alive);
     Some(Request {
         method,
         target,
@@ -667,5 +671,21 @@ mod tests {
             !text.contains("Content-Length"),
             "304 carries no body: {text}"
         );
+    }
+
+    #[test]
+    fn explicit_connection_close_wins_over_keep_alive() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        write!(
+            client,
+            "GET /manifest.json HTTP/1.1\r\nConnection: close, keep-alive\r\n\r\n"
+        )
+        .unwrap();
+        client.flush().unwrap();
+
+        let request = read_request(&mut BufReader::new(server)).unwrap();
+        assert!(!request.keep_alive);
     }
 }

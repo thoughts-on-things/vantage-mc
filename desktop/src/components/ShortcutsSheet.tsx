@@ -6,7 +6,7 @@ const GROUPS: { title: string; rows: [string[], string][] }[] = [
   {
     title: 'Library',
     rows: [
-      [['Ctrl K', '/'], 'Search worlds'],
+      [['Ctrl/Cmd K', '/'], 'Search worlds'],
       [['← ↑ → ↓'], 'Move between worlds'],
       [['Enter'], 'Open or render the selected world'],
       [['Double-click'], 'Open a world instantly'],
@@ -15,8 +15,8 @@ const GROUPS: { title: string; rows: [string[], string][] }[] = [
   {
     title: 'Navigate',
     rows: [
-      [['Ctrl 1'], 'Worlds'],
-      [['Ctrl 2'], 'Renders'],
+      [['Ctrl/Cmd 1'], 'Worlds'],
+      [['Ctrl/Cmd 2'], 'Renders'],
       [['?'], 'This shortcut list'],
       [['Esc'], 'Close a panel or leave the viewer'],
     ],

@@ -45,7 +45,7 @@ export function LibraryScreen({ library, settings, searchRef }: {
               disabled={locked}
             />
             {query && <button onClick={() => setQuery('')} aria-label="Clear search" disabled={locked}><X size={14} /></button>}
-            {!query && <kbd>Ctrl K</kbd>}
+            {!query && <kbd>Ctrl/Cmd K</kbd>}
           </label>
           <button className="icon-button bordered" onClick={() => void refresh(true)} aria-label="Scan again" disabled={locked}>
             <RefreshCw size={17} className={refreshing ? 'spin' : ''} />

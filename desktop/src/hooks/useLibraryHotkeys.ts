@@ -18,7 +18,7 @@ interface HotkeyOptions {
 }
 
 /**
- * Library keyboard model: Ctrl+K or / focuses search, Ctrl+1/Ctrl+2 switch
+ * Library keyboard model: Ctrl/Cmd+K or / focuses search, Ctrl/Cmd+1/2 switch
  * screens, ? opens the shortcut sheet, arrows move the world selection, Enter
  * opens it, Escape closes an open sheet. Everything that touches a world is
  * suspended while an action holds the lock.

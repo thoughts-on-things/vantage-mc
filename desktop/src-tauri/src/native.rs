@@ -3,7 +3,8 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -72,11 +73,22 @@ pub fn write_unique_png(directory: &Path, stem: &str, bytes: &[u8]) -> Result<Pa
             format!("{stem}-{}.png", attempt + 1)
         };
         let candidate = directory.join(name);
-        if candidate.exists() {
-            continue;
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(bytes) {
+                    drop(file);
+                    let _ = fs::remove_file(&candidate);
+                    return Err(error.to_string());
+                }
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
         }
-        fs::write(&candidate, bytes).map_err(|error| error.to_string())?;
-        return Ok(candidate);
     }
     Err("Too many exports with that name already exist.".into())
 }
@@ -239,6 +251,43 @@ mod tests {
         assert_eq!(first.file_name().unwrap(), "green-valley.png");
         assert_eq!(second.file_name().unwrap(), "green-valley-2.png");
         assert_eq!(fs::read(&first).unwrap(), png);
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_exports_claim_distinct_files_atomically() {
+        use std::sync::{Arc, Barrier};
+
+        const EXPORTS: usize = 8;
+        let directory = std::env::temp_dir().join(format!(
+            "vantage-export-concurrent-{}-{}",
+            std::process::id(),
+            crate::renders::now_ms()
+        ));
+        let barrier = Arc::new(Barrier::new(EXPORTS));
+        let handles: Vec<_> = (0..EXPORTS)
+            .map(|index| {
+                let directory = directory.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut payload = PNG_SIGNATURE.to_vec();
+                    payload.extend_from_slice(format!("map-{index}").as_bytes());
+                    barrier.wait();
+                    let path = write_unique_png(&directory, "Green Valley", &payload).unwrap();
+                    (path, payload)
+                })
+            })
+            .collect();
+
+        let exports: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let distinct: std::collections::HashSet<_> = exports.iter().map(|(path, _)| path).collect();
+        assert_eq!(distinct.len(), EXPORTS);
+        for (path, payload) in exports {
+            assert_eq!(fs::read(path).unwrap(), payload);
+        }
         fs::remove_dir_all(&directory).unwrap();
     }
 }

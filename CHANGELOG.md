@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.9.1...v0.10.0) (2026-07-26)
+
+
+### Features
+
+* **desktop:** renders manager, stale-render detection, and native studio polish ([#61](https://github.com/thoughts-on-things/vantage-mc/issues/61)) ([329a228](https://github.com/thoughts-on-things/vantage-mc/commit/329a228f05141801359c5c0a676aac983f68188c))
+* **server:** warm the map before players look at it ([#59](https://github.com/thoughts-on-things/vantage-mc/issues/59)) ([6927bf7](https://github.com/thoughts-on-things/vantage-mc/commit/6927bf718c708f59275640b188b60827e230511c))
+
 ## [0.9.1](https://github.com/thoughts-on-things/vantage-mc/compare/v0.9.0...v0.9.1) (2026-07-21)
 
 

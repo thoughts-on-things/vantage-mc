@@ -9,8 +9,11 @@ import type { DesktopSettings } from '../settings.js';
  * - `outdated` — the save has been played since the render was baked.
  * - `settings` — the render was baked with different geometry settings, so
  *   opening it triggers a rebuild.
+ * - `unknown` — the render has no settings record, so the host cannot vouch
+ *   for it and opening rebuilds. Every state that rebuilds on open must say
+ *   so, or the badge promises something the click does not deliver.
  */
-export type RenderState = 'none' | 'ready' | 'outdated' | 'settings';
+export type RenderState = 'none' | 'ready' | 'outdated' | 'settings' | 'unknown';
 
 /**
  * `LastPlayed` is written when Minecraft saves, which can land a moment after
@@ -21,7 +24,10 @@ const PLAYED_SINCE_GRACE_MS = 5 * 60 * 1000;
 
 export function renderState(world: WorldInfo, settings: DesktopSettings): RenderState {
   if (!world.cached) return 'none';
-  if (world.renderSettings && !sameSignature(world.renderSettings, settings)) return 'settings';
+  // Matches the host: `open_cached_world` reports a render without a record as
+  // stale rather than opening it.
+  if (!world.renderSettings) return 'unknown';
+  if (!sameSignature(world.renderSettings, settings)) return 'settings';
   if (world.renderedAtMs && world.lastPlayedMs > world.renderedAtMs + PLAYED_SINCE_GRACE_MS) return 'outdated';
   return 'ready';
 }
@@ -39,6 +45,7 @@ export const RENDER_STATE_COPY: Record<RenderState, { badge: string; detail: str
   ready: { badge: 'rendered', detail: 'Your render matches this save.' },
   outdated: { badge: 'played since', detail: 'This world was played after its render — re-render to see the new chunks.' },
   settings: { badge: 'settings changed', detail: 'This render used different detail settings; opening it rebuilds the map.' },
+  unknown: { badge: 'rebuilds on open', detail: 'This render predates the settings record, so opening it builds a fresh map.' },
 };
 
 export type SortMode = 'recent' | 'name' | 'rendered';

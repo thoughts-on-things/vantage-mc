@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Camera, FolderOpen, LoaderCircle, X } from 'lucide-react';
+import { ArrowLeft, Camera, FolderOpen, Keyboard, LoaderCircle, X } from 'lucide-react';
 import {
   BiomeLayer,
   DepthSlider,
@@ -9,9 +9,9 @@ import {
   SettingsPanel,
   useVantage,
   VantageViewer,
-  type VantageEngine,
 } from 'vantage-mc/react';
-import { revealPath, saveMapImage, saveWorldThumbnail, type SystemProfile } from './bridge.js';
+import { ShortcutsSheet } from './components/ShortcutsSheet.js';
+import { revealPath, saveMapImage, saveWorldThumbnail, type SystemProfile, type WorldInfo } from './bridge.js';
 import type { ViewerTarget } from './hooks/useLibrary.js';
 import { compactNumber, imageFileStem, sourceLabel, userFacingError } from './lib/format.js';
 import { selectRenderProfile, type RenderProfile } from './lib/renderProfile.js';
@@ -35,26 +35,73 @@ export default function ViewerScreen({ target, settings, system, onThumbnail, on
 }) {
   const { world, manifestUrl, captureThumbnail } = target;
   const profile = useMemo(() => selectRenderProfile(settings.performanceMode, system.logicalCores), [settings.performanceMode, system.logicalCores]);
-  const [viewer, setViewer] = useState<VantageEngine | null>(null);
+
+  return (
+    <div className="viewer-screen">
+      <VantageViewer
+        world={manifestUrl}
+        view="orbit"
+        urlState={false}
+        antialias
+        renderOnDemand
+        maxPixelRatio={profile.maxPixelRatio}
+        streaming={profile.streaming}
+        display={profile.display}
+        className="desktop-viewer"
+        loading={<ViewerLoader worldName={world.name} profile={profile.name} />}
+      >
+        {/* The chrome lives inside the viewer so it can read live engine state
+            and travel with the root into fullscreen. Everything the library's
+            own components own — the bottom nav, the side panels — is left to
+            them; the desktop only occupies the top-left corner. */}
+        <ViewerChrome world={world} profile={profile} onBack={onBack} />
+        {captureThumbnail && (
+          <ThumbnailCapture worldPath={world.path} hasThumbnail={Boolean(world.thumbnailUrl)} onThumbnail={onThumbnail} />
+        )}
+        <Reticle />
+        <DepthSlider />
+        <BiomeLayer legend hover />
+        <LightPanel />
+        <SettingsPanel />
+        <MapNav screenshot={false} />
+      </VantageViewer>
+    </div>
+  );
+}
+
+function ViewerChrome({ world, profile, onBack }: {
+  world: WorldInfo;
+  profile: RenderProfile;
+  onBack: () => void;
+}) {
+  const { viewer, status, info } = useVantage();
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      const target = event.target as HTMLElement | null;
-      if (target?.matches('input, textarea, select')) return;
-      onBack();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onBack]);
+  const [shortcuts, setShortcuts] = useState(false);
 
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), TOAST_MS);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.matches('input, textarea, select')) return;
+      if (event.key === '?') {
+        event.preventDefault();
+        setShortcuts(true);
+      } else if (event.key === 'Escape') {
+        // The sheet is the innermost thing Escape can close; only once it is
+        // gone does Escape leave the map.
+        if (shortcuts) setShortcuts(false);
+        else onBack();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onBack, shortcuts]);
 
   // The library's own screenshot button downloads through the browser, which a
   // WebView turns into a download prompt. Saving through the native host puts
@@ -72,66 +119,58 @@ export default function ViewerScreen({ target, settings, system, onThumbnail, on
     }
   }, [saving, viewer, world.name]);
 
+  // Revealing can fail after the fact — the folder may have been moved since
+  // the save — so the same toast reports it instead of dropping it.
+  const revealSaved = useCallback(async (path: string) => {
+    try {
+      await revealPath(path);
+    } catch (reason) {
+      setToast({ message: userFacingError(reason), failed: true });
+    }
+  }, []);
+
+  const ready = status === 'ready';
+  const caves = Boolean(info && viewer?.hasCaves);
+
   return (
-    <div className="viewer-screen">
-      <VantageViewer
-        world={manifestUrl}
-        view="orbit"
-        urlState={false}
-        antialias
-        renderOnDemand
-        maxPixelRatio={profile.maxPixelRatio}
-        streaming={profile.streaming}
-        display={profile.display}
-        className="desktop-viewer"
-        loading={<ViewerLoader worldName={world.name} profile={profile.name} />}
-      >
-        <ViewerHandle onViewer={setViewer} />
-        {captureThumbnail && (
-          <ThumbnailCapture worldPath={world.path} hasThumbnail={Boolean(world.thumbnailUrl)} onThumbnail={onThumbnail} />
-        )}
-        <Reticle />
-        <DepthSlider />
-        <BiomeLayer legend hover />
-        <LightPanel />
-        <SettingsPanel />
-        <MapNav screenshot={false} />
-        <ViewerTelemetry profile={profile} />
-      </VantageViewer>
+    <>
       <div className="viewer-toolbar glass-panel">
         <button className="toolbar-back" onClick={onBack} aria-label="Return to world library">
           <ArrowLeft size={17} /> Library <kbd>Esc</kbd>
         </button>
         <span className="toolbar-rule" />
-        <div><strong>{world.name}</strong><small>{sourceLabel(world.source)} · local render</small></div>
+        <div className="toolbar-world"><strong>{world.name}</strong><small>{sourceLabel(world.source)} · local render</small></div>
+        <span className="toolbar-rule toolbar-status-rule" />
+        <div className="toolbar-status" aria-live="polite">
+          <span className={ready ? 'live-dot' : 'live-dot pending'} />
+          <span>
+            <strong>{ready ? 'GPU view ready' : 'Streaming terrain'}</strong>
+            <small>{info ? compactNumber(info.triangleCount) : '—'} tris · {profile.name}{caves ? ' · cave-ready' : ''}</small>
+          </span>
+        </div>
         <span className="toolbar-rule" />
         <button className="toolbar-action" onClick={() => void saveImage()} disabled={!viewer || saving} aria-label="Save this view as an image">
-          {saving ? <LoaderCircle className="spin" size={16} /> : <Camera size={16} />} Save image
+          {saving ? <LoaderCircle className="spin" size={16} /> : <Camera size={16} />}
+          <span className="toolbar-label">Save image</span>
+        </button>
+        <button className="toolbar-icon" onClick={() => setShortcuts(true)} aria-label="Keyboard shortcuts">
+          <Keyboard size={16} />
         </button>
       </div>
       {toast && (
         <div className={`viewer-toast glass-panel${toast.failed ? ' failed' : ''}`} role="status" aria-live="polite">
           <span>{toast.message}</span>
           {toast.path && (
-            <button onClick={() => void revealPath(toast.path!).catch(() => {})} aria-label="Show the saved image in its folder">
+            <button onClick={() => void revealSaved(toast.path!)} aria-label="Show the saved image in its folder">
               <FolderOpen size={14} /> Show file
             </button>
           )}
           <button className="toast-close" onClick={() => setToast(null)} aria-label="Dismiss"><X size={14} /></button>
         </div>
       )}
-    </div>
+      {shortcuts && <ShortcutsSheet onClose={() => setShortcuts(false)} />}
+    </>
   );
-}
-
-/** Lifts the viewer instance out of the provider so the toolbar can use it. */
-function ViewerHandle({ onViewer }: { onViewer: (viewer: VantageEngine | null) => void }) {
-  const { viewer } = useVantage();
-  useEffect(() => {
-    onViewer(viewer ?? null);
-    return () => onViewer(null);
-  }, [onViewer, viewer]);
-  return null;
 }
 
 function ThumbnailCapture({ worldPath, hasThumbnail, onThumbnail }: {
@@ -217,20 +256,6 @@ function ViewerLoader({ worldName, profile }: { worldName: string; profile: Rend
       <div className="loader-mark" aria-hidden="true"><span /><span /><span /></div>
       <div className="loader-copy"><strong>Opening {worldName}</strong><span>Warming the GPU · {profile} quality</span></div>
       <div className="loader-track"><span /></div>
-    </div>
-  );
-}
-
-function ViewerTelemetry({ profile }: { profile: RenderProfile }) {
-  const { status, info, viewer } = useVantage();
-  const triangles = info ? compactNumber(info.triangleCount) : '—';
-  const caves = Boolean(info && viewer?.hasCaves);
-  return (
-    <div className="viewer-status glass-panel" aria-live="polite">
-      <span className={status === 'ready' ? 'live-dot' : 'live-dot pending'} />
-      <b>{status === 'ready' ? 'GPU view ready' : 'Streaming terrain'}</b>
-      <small>{triangles} tris · {profile.name} · {caves ? 'cave-ready' : 'surface'}</small>
-      <span className="control-hint">drag pan · right-drag orbit · C caves · scroll zoom</span>
     </div>
   );
 }

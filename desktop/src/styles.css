@@ -361,7 +361,8 @@ button:focus-visible, input:focus-visible, [role='button']:focus-visible {
 
 .shortcut-list { display: grid; gap: 7px; margin: 0; }
 .shortcut-list > div { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 12px; align-items: center; }
-.shortcut-list dt { margin: 0; }
+.shortcut-list dt { display: flex; align-items: center; gap: 6px; margin: 0; }
+.shortcut-list .key-or { color: var(--text-4); font-size: var(--text-xs); }
 .shortcut-list dd { margin: 0; color: var(--text-3); font-size: var(--text-sm); }
 .shortcut-list kbd { display: inline-block; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text-2); background: rgba(255, 255, 255, 0.04); font: var(--text-xs) var(--font-mono); white-space: nowrap; }
 
@@ -382,29 +383,34 @@ button:focus-visible, input:focus-visible, [role='button']:focus-visible {
 .desktop-viewer { position: absolute !important; inset: 0; width: 100%; height: 100%; }
 
 .glass-panel { border: 1px solid var(--line-strong); background: rgba(11, 14, 12, 0.72); box-shadow: var(--shadow-1); backdrop-filter: blur(18px) saturate(1.2); }
-.viewer-toolbar { position: absolute; z-index: 20; left: 17px; top: 17px; height: 52px; display: flex; align-items: center; gap: 12px; padding: 0 15px 0 8px; border-radius: var(--radius-md); }
-.toolbar-back { height: 37px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: var(--radius-sm); padding: 0 8px 0 10px; color: var(--text-2); background: rgba(255, 255, 255, 0.05); cursor: pointer; font-size: var(--text-sm); transition: background 0.16s ease, transform 0.12s ease; }
+/* The library's viewer owns the bottom row (nav) and the right edge (panels);
+   the desktop chrome stays in the top-left corner so nothing can overlap. */
+.viewer-toolbar { position: absolute; z-index: 20; left: 17px; top: 17px; height: 52px; max-width: calc(100% - 290px); display: flex; align-items: center; gap: 10px; padding: 0 8px; border-radius: var(--radius-md); }
+.toolbar-back { height: 37px; flex: 0 0 auto; display: flex; align-items: center; gap: 7px; border: 0; border-radius: var(--radius-sm); padding: 0 8px 0 10px; color: var(--text-2); background: rgba(255, 255, 255, 0.05); cursor: pointer; font-size: var(--text-sm); transition: background 0.16s ease, transform 0.12s ease; }
 .toolbar-back:hover { background: rgba(255, 255, 255, 0.1); }
 .toolbar-back:active { transform: scale(0.97); }
-.toolbar-rule { width: 1px; height: 24px; background: var(--line-strong); }
-.viewer-toolbar > div { display: grid; gap: 3px; }
-.viewer-toolbar strong { font-size: var(--text-md); }
-.viewer-toolbar small { color: var(--text-3); font-family: var(--font-mono); font-size: var(--text-xs); text-transform: uppercase; }
-.toolbar-action { height: 37px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: var(--radius-sm); padding: 0 12px; color: var(--text-2); background: rgba(255, 255, 255, 0.05); cursor: pointer; font-size: var(--text-sm); transition: background 0.16s ease, color 0.16s ease, transform 0.12s ease; }
+.toolbar-rule { width: 1px; height: 24px; flex: 0 0 auto; background: var(--line-strong); }
+.toolbar-world, .toolbar-status > span { min-width: 0; display: grid; gap: 3px; }
+.toolbar-world strong, .toolbar-status strong { display: block; overflow: hidden; font-size: var(--text-md); font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-toolbar small { display: block; color: var(--text-3); font-family: var(--font-mono); font-size: var(--text-xs); text-transform: uppercase; white-space: nowrap; }
+.toolbar-status { display: flex; align-items: center; gap: 9px; }
+.toolbar-status strong { font-size: var(--text-sm); font-weight: 560; }
+.toolbar-action { height: 37px; flex: 0 0 auto; display: flex; align-items: center; gap: 7px; border: 0; border-radius: var(--radius-sm); padding: 0 12px; color: var(--text-2); background: rgba(255, 255, 255, 0.05); cursor: pointer; font-size: var(--text-sm); transition: background 0.16s ease, color 0.16s ease, transform 0.12s ease; }
 .toolbar-action:hover:not(:disabled) { color: var(--text-1); background: rgba(255, 255, 255, 0.1); }
 .toolbar-action:active:not(:disabled) { transform: scale(0.97); }
 .toolbar-action:disabled { opacity: 0.45; cursor: wait; }
+.toolbar-icon { width: 34px; height: 37px; flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: var(--radius-sm); color: var(--text-3); background: transparent; cursor: pointer; transition: color 0.16s ease, background 0.16s ease; }
+.toolbar-icon:hover { color: var(--text-1); background: rgba(255, 255, 255, 0.08); }
 
-.viewer-toast { position: absolute; z-index: 30; left: 50%; bottom: 26px; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px; border-radius: var(--radius-md); color: var(--text-2); font-size: var(--text-sm); animation: toast-in 0.24s var(--ease-out) both; }
+/* Directly under the toolbar: it reports on a toolbar action, and the corners
+   it would otherwise take are the viewer's own (nav below, panels right,
+   lighting bottom-left). */
+.viewer-toast { position: absolute; z-index: 30; left: 17px; top: 81px; max-width: min(420px, calc(100% - 34px)); display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px; border-radius: var(--radius-md); color: var(--text-2); font-size: var(--text-sm); animation: toast-in 0.24s var(--ease-out) both; }
 .viewer-toast.failed { border-color: var(--danger-line); color: var(--danger); }
 .viewer-toast button { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 5px 9px; color: var(--text-2); background: rgba(255, 255, 255, 0.05); cursor: pointer; font-size: var(--text-xs); }
 .viewer-toast button:hover { color: var(--text-1); background: rgba(255, 255, 255, 0.1); }
 .viewer-toast .toast-close { border: 0; padding: 5px; background: transparent; color: var(--text-4); }
 
-.viewer-status { position: absolute; z-index: 20; left: 17px; bottom: 17px; min-height: 52px; display: grid; grid-template-columns: 8px auto auto; column-gap: 9px; align-items: center; padding: 8px 12px; border-radius: var(--radius-md); }
-.viewer-status b { font-size: var(--text-sm); }
-.viewer-status small { grid-column: 2; color: var(--text-3); font-family: var(--font-mono); font-size: var(--text-xs); text-transform: uppercase; }
-.viewer-status .control-hint { grid-column: 3; grid-row: 1 / span 2; margin-left: 6px; padding-left: 13px; border-left: 1px solid var(--line-strong); color: var(--text-4); font-size: var(--text-xs); }
 .live-dot.pending { background: #d9b85f; animation: status-pulse 1.2s ease-in-out infinite; }
 
 .viewer-loading { position: absolute; inset: 0; z-index: 10; display: grid; grid-template-columns: 42px minmax(190px, 260px); place-content: center; gap: 6px 15px; color: var(--text-2); background: radial-gradient(circle at 50% 42%, #202a21, #0d120f 62%); }
@@ -435,7 +441,7 @@ button:focus-visible, input:focus-visible, [role='button']:focus-visible {
 @keyframes layer-in { from { opacity: 0; } }
 @keyframes sheet-in { from { opacity: 0; transform: translateX(24px) scale(0.99); } }
 @keyframes busy-scan { 55%, 100% { transform: translateX(140%); } }
-@keyframes toast-in { from { opacity: 0; transform: translate(-50%, 10px); } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
@@ -456,6 +462,17 @@ button:focus-visible, input:focus-visible, [role='button']:focus-visible {
   .renders-summary, .render-list, .renders-loading { margin-left: 27px; margin-right: 27px; }
   .render-row { grid-template-columns: 72px minmax(0, 1fr); }
   .render-actions, .render-confirm { grid-column: 2; justify-content: flex-start; }
+}
+
+/* Narrow windows: shed the toolbar's optional segments before it can ever
+   reach the viewer's right-hand panels. */
+@media (max-width: 1180px) {
+  .toolbar-status, .toolbar-status-rule { display: none; }
+}
+
+@media (max-width: 940px) {
+  .toolbar-label { display: none; }
+  .toolbar-action { padding: 0 10px; }
 }
 
 @media (max-width: 720px) {

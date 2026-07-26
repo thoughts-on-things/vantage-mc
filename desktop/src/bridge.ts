@@ -129,6 +129,16 @@ function inTauri(): boolean {
   return '__TAURI_INTERNALS__' in window;
 }
 
+/**
+ * The browser preview has no native host, so the viewer screen is normally
+ * unreachable there. Point this at any manifest — `vantage serve` over one of
+ * your renders is the easy one — to work on the viewer chrome without
+ * rebuilding the native app:
+ *
+ *   VITE_MOCK_MANIFEST=http://127.0.0.1:8268/manifest.json npm run dev
+ */
+const mockManifestUrl: string | undefined = import.meta.env.VITE_MOCK_MANIFEST;
+
 export async function discoverWorlds(): Promise<WorldInfo[]> {
   if (!inTauri()) return mockWorlds;
   return invoke<WorldInfo[]>('discover_worlds');
@@ -153,7 +163,10 @@ export async function renderWorld(
 }
 
 export async function openCachedWorld(path: string, settings: DesktopSettings): Promise<CacheOpen> {
-  if (!inTauri()) throw new Error('Cached renders are available in the Tauri desktop window.');
+  if (!inTauri()) {
+    if (!mockManifestUrl) throw new Error('Cached renders are available in the Tauri desktop window.');
+    return { status: 'ready', manifestUrl: mockManifestUrl, outputPath: 'preview' };
+  }
   return invoke<CacheOpen>('open_cached_world', { path, settings });
 }
 

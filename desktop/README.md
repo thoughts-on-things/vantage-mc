@@ -132,6 +132,18 @@ shape is refused before it reaches the filesystem.
   `CREATE_NO_WINDOW`, and the file-manager helpers are started the same way
   with their stdio detached.
 
+## Viewer chrome
+
+The `vantage-mc` viewer places its own controls: the map nav along the bottom
+centre, the biome/lighting/quality panels down the right and bottom-left edges,
+the depth slider on the left. The desktop app therefore keeps everything it
+adds in a single top-left toolbar — back, world, live engine status, save
+image, shortcuts — rendered as a child of the viewer so it can read engine
+state and travel with the root into fullscreen. On narrow windows the toolbar
+sheds its status segment and then its button label rather than growing into the
+panels. Transient toasts sit directly beneath it, the one region no viewer
+component claims.
+
 ## Tile endpoint
 
 The loopback endpoint keeps HTTP/1.1 connections alive across the hundreds of

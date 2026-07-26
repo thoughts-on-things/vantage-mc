@@ -25,7 +25,9 @@ export function WorldDetail({ world, settings, progress, action, cancelling, onO
   const actionKind = action?.path === world.path ? action.kind : null;
   const rendering = actionKind === 'rendering';
   const state = renderState(world, settings);
-  const outdated = state === 'outdated' || state === 'settings';
+  // Every state where opening rebuilds instead of reopening reads the same in
+  // the panel: the map on disk no longer answers for this world.
+  const outdated = state === 'outdated' || state === 'settings' || state === 'unknown';
 
   return (
     <aside className="world-detail">

@@ -84,8 +84,12 @@ impl From<&DesktopSettings> for CacheSignature {
 /// Opening a cached render either succeeds or reports *why* it cannot be
 /// reused. A stale cache is an ordinary outcome the library handles by
 /// re-rendering; anything else is a real error worth showing.
+///
+/// `rename_all` on an enum renames the *variants*; the fields inside them need
+/// `rename_all_fields`, without which the frontend reads `manifestUrl` off a
+/// payload that spelled it `manifest_url`.
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase", tag = "status")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "status")]
 enum CacheOpen {
     Ready {
         manifest_url: String,
@@ -693,6 +697,29 @@ mod tests {
                 "6"
             ]
         );
+    }
+
+    /// The frontend reads these keys by name; a rename that silently stops
+    /// applying leaves the viewer with an undefined manifest URL and no way to
+    /// notice until a cached world is opened.
+    #[test]
+    fn cache_open_serializes_the_keys_the_frontend_reads() {
+        let ready = serde_json::to_value(CacheOpen::from(RenderReady {
+            manifest_url: "http://127.0.0.1:8000/manifest.json".into(),
+            output_path: "C:\\renders\\abc".into(),
+        }))
+        .unwrap();
+        assert_eq!(ready["status"], "ready");
+        assert_eq!(ready["manifestUrl"], "http://127.0.0.1:8000/manifest.json");
+        assert_eq!(ready["outputPath"], "C:\\renders\\abc");
+        assert!(ready.get("manifest_url").is_none(), "{ready}");
+
+        let stale = serde_json::to_value(CacheOpen::Stale {
+            reason: "settings changed".into(),
+        })
+        .unwrap();
+        assert_eq!(stale["status"], "stale");
+        assert_eq!(stale["reason"], "settings changed");
     }
 
     #[test]

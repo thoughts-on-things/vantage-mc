@@ -43,9 +43,11 @@ export const WorldCard = memo(function WorldCard({ world, index, settings, selec
       <div className="world-art">
         <WorldArt world={world} />
         <div className="world-art-shade" />
-        {state === 'ready' && <span className="ready-badge"><Check size={12} /> rendered</span>}
-        {state === 'outdated' && <span className="ready-badge stale"><History size={12} /> played since</span>}
-        {state === 'settings' && <span className="ready-badge stale"><SlidersHorizontal size={12} /> settings changed</span>}
+        {state === 'ready' && <span className="ready-badge"><Check size={12} /> {RENDER_STATE_COPY.ready.badge}</span>}
+        {state === 'outdated' && <span className="ready-badge stale"><History size={12} /> {RENDER_STATE_COPY.outdated.badge}</span>}
+        {(state === 'settings' || state === 'unknown') && (
+          <span className="ready-badge stale"><SlidersHorizontal size={12} /> {RENDER_STATE_COPY[state].badge}</span>
+        )}
         {!world.thumbnailUrl && !busy && (
           <span className="thumbnail-state">
             {world.iconUrl ? 'Minecraft icon · open for preview' : world.cached ? 'Open for real preview' : 'Preview after render'}

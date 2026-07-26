@@ -77,7 +77,7 @@ export function renderAge(timestamp: number | null): string {
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
 
 export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
+  if (!Number.isFinite(bytes) || bytes <= 0) return `0 ${BYTE_UNITS[0]}`;
   let value = bytes;
   let unit = 0;
   while (value >= 1024 && unit < BYTE_UNITS.length - 1) {

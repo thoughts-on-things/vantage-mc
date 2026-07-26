@@ -1,33 +1,34 @@
-import { useEffect, useRef, type KeyboardEvent } from 'react';
+import { Fragment, useEffect, useRef, type KeyboardEvent } from 'react';
 import { Keyboard, X } from 'lucide-react';
 
-const GROUPS: { title: string; rows: [string, string][] }[] = [
+/** Each row lists the keys that do the same thing, then what they do. */
+const GROUPS: { title: string; rows: [string[], string][] }[] = [
   {
     title: 'Library',
     rows: [
-      ['Ctrl K  /  /', 'Search worlds'],
-      ['← ↑ → ↓', 'Move between worlds'],
-      ['Enter', 'Open or render the selected world'],
-      ['Double-click', 'Open a world instantly'],
+      [['Ctrl K', '/'], 'Search worlds'],
+      [['← ↑ → ↓'], 'Move between worlds'],
+      [['Enter'], 'Open or render the selected world'],
+      [['Double-click'], 'Open a world instantly'],
     ],
   },
   {
     title: 'Navigate',
     rows: [
-      ['Ctrl 1', 'Worlds'],
-      ['Ctrl 2', 'Renders'],
-      ['?', 'This shortcut list'],
-      ['Esc', 'Close a panel or leave the viewer'],
+      [['Ctrl 1'], 'Worlds'],
+      [['Ctrl 2'], 'Renders'],
+      [['?'], 'This shortcut list'],
+      [['Esc'], 'Close a panel or leave the viewer'],
     ],
   },
   {
     title: 'In the map',
     rows: [
-      ['Drag', 'Pan'],
-      ['Right-drag', 'Orbit'],
-      ['Scroll', 'Zoom'],
-      ['C', 'Cave depth slice'],
-      ['B', 'Biome layer'],
+      [['Drag'], 'Pan'],
+      [['Right-drag'], 'Orbit'],
+      [['Scroll'], 'Zoom'],
+      [['C'], 'Cave depth slice'],
+      [['B'], 'Biome layer'],
     ],
   },
 ];
@@ -60,8 +61,15 @@ export function ShortcutsSheet({ onClose }: { onClose: () => void }) {
               <div className="settings-group-title"><Keyboard size={16} /><div><h3>{group.title}</h3></div></div>
               <dl className="shortcut-list">
                 {group.rows.map(([keys, meaning]) => (
-                  <div key={keys}>
-                    <dt><kbd>{keys}</kbd></dt>
+                  <div key={meaning}>
+                    <dt>
+                      {keys.map((key, index) => (
+                        <Fragment key={key}>
+                          {index > 0 && <span className="key-or">or</span>}
+                          <kbd>{key}</kbd>
+                        </Fragment>
+                      ))}
+                    </dt>
                     <dd>{meaning}</dd>
                   </div>
                 ))}

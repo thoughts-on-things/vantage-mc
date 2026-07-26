@@ -332,6 +332,7 @@ export function useLibrary(settings: DesktopSettings): LibraryController {
   }, [claimAction, patchWorld, releaseAction]);
 
   const reveal = useCallback(async (path: string) => {
+    setError(null);
     try {
       await revealPath(path);
     } catch (reason) {

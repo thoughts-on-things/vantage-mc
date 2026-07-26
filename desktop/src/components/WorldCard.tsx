@@ -17,6 +17,7 @@ export const WorldCard = memo(function WorldCard({ world, index, settings, selec
   onOpen: (world: WorldInfo) => void;
 }) {
   const state = renderState(world, settings);
+  const openLabel = state === 'none' ? 'Render' : state === 'ready' ? 'Open' : 'Re-render';
   return (
     <article
       className={`world-card world-tone-${index % 4}${selected ? ' selected' : ''}${busy ? ' busy' : ''}${locked ? ' locked' : ''}`}
@@ -58,7 +59,7 @@ export const WorldCard = memo(function WorldCard({ world, index, settings, selec
           className="card-open"
           disabled={locked}
           onClick={(event) => { event.stopPropagation(); if (!locked) onOpen(world); }}
-          aria-label={`${busy ? worldActionLabel(busy) : 'Open'} ${world.name}`}
+          aria-label={`${busy ? worldActionLabel(busy) : openLabel} ${world.name}`}
           title={RENDER_STATE_COPY[state].detail}
         >
           {busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} fill="currentColor" />}

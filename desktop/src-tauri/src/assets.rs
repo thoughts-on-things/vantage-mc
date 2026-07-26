@@ -95,10 +95,16 @@ fn serve(stream: TcpStream, root: Arc<RwLock<Option<PathBuf>>>) {
     let mut reader = BufReader::new(stream);
     let mut writer = BufWriter::new(write_half);
 
-    for _ in 0..MAX_KEEP_ALIVE_REQUESTS {
-        let Some(request) = read_request(&mut reader) else {
+    for index in 0..MAX_KEEP_ALIVE_REQUESTS {
+        let Some(mut request) = read_request(&mut reader) else {
             return;
         };
+        // Recycling the connection is this end's decision, so the last
+        // response on it says `Connection: close` instead of leaving the
+        // client to discover a socket that went away.
+        if index + 1 == MAX_KEEP_ALIVE_REQUESTS {
+            request.keep_alive = false;
+        }
         let head = request.method == "HEAD";
         let response = if request.method != "GET" && !head {
             respond_text(&mut writer, 405, "method not allowed", head, &request)

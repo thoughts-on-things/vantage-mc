@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef } from 'react';
-import { ArrowLeft } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, Camera, FolderOpen, LoaderCircle, X } from 'lucide-react';
 import {
   BiomeLayer,
   DepthSlider,
@@ -9,22 +9,35 @@ import {
   SettingsPanel,
   useVantage,
   VantageViewer,
+  type VantageEngine,
 } from 'vantage-mc/react';
-import { saveWorldThumbnail, type SystemProfile, type WorldInfo } from './bridge.js';
-import { compactNumber, sourceLabel } from './lib/format.js';
+import { revealPath, saveMapImage, saveWorldThumbnail, type SystemProfile } from './bridge.js';
+import type { ViewerTarget } from './hooks/useLibrary.js';
+import { compactNumber, imageFileStem, sourceLabel, userFacingError } from './lib/format.js';
 import { selectRenderProfile, type RenderProfile } from './lib/renderProfile.js';
 import type { DesktopSettings } from './settings.js';
 
-export default function ViewerScreen({ world, manifestUrl, settings, system, hasThumbnail, onThumbnail, onBack }: {
-  world: WorldInfo;
-  manifestUrl: string;
+/** How long a save confirmation stays on screen. */
+const TOAST_MS = 7000;
+
+interface Toast {
+  message: string;
+  path?: string;
+  failed?: boolean;
+}
+
+export default function ViewerScreen({ target, settings, system, onThumbnail, onBack }: {
+  target: ViewerTarget;
   settings: DesktopSettings;
   system: SystemProfile;
-  hasThumbnail: boolean;
   onThumbnail: (dataUrl: string) => void;
   onBack: () => void;
 }) {
+  const { world, manifestUrl, captureThumbnail } = target;
   const profile = useMemo(() => selectRenderProfile(settings.performanceMode, system.logicalCores), [settings.performanceMode, system.logicalCores]);
+  const [viewer, setViewer] = useState<VantageEngine | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<Toast | null>(null);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -36,6 +49,28 @@ export default function ViewerScreen({ world, manifestUrl, settings, system, has
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onBack]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), TOAST_MS);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  // The library's own screenshot button downloads through the browser, which a
+  // WebView turns into a download prompt. Saving through the native host puts
+  // the full-resolution PNG straight into the pictures folder instead.
+  const saveImage = useCallback(async () => {
+    if (!viewer || saving) return;
+    setSaving(true);
+    try {
+      const saved = await saveMapImage(imageFileStem(world.name), viewer.screenshot());
+      setToast({ message: `Saved ${saved.name}`, path: saved.path });
+    } catch (reason) {
+      setToast({ message: userFacingError(reason), failed: true });
+    } finally {
+      setSaving(false);
+    }
+  }, [saving, viewer, world.name]);
 
   return (
     <div className="viewer-screen">
@@ -51,13 +86,16 @@ export default function ViewerScreen({ world, manifestUrl, settings, system, has
         className="desktop-viewer"
         loading={<ViewerLoader worldName={world.name} profile={profile.name} />}
       >
-        <ThumbnailCapture worldPath={world.path} hasThumbnail={hasThumbnail} onThumbnail={onThumbnail} />
+        <ViewerHandle onViewer={setViewer} />
+        {captureThumbnail && (
+          <ThumbnailCapture worldPath={world.path} hasThumbnail={Boolean(world.thumbnailUrl)} onThumbnail={onThumbnail} />
+        )}
         <Reticle />
         <DepthSlider />
         <BiomeLayer legend hover />
         <LightPanel />
         <SettingsPanel />
-        <MapNav />
+        <MapNav screenshot={false} />
         <ViewerTelemetry profile={profile} />
       </VantageViewer>
       <div className="viewer-toolbar glass-panel">
@@ -66,9 +104,34 @@ export default function ViewerScreen({ world, manifestUrl, settings, system, has
         </button>
         <span className="toolbar-rule" />
         <div><strong>{world.name}</strong><small>{sourceLabel(world.source)} · local render</small></div>
+        <span className="toolbar-rule" />
+        <button className="toolbar-action" onClick={() => void saveImage()} disabled={!viewer || saving} aria-label="Save this view as an image">
+          {saving ? <LoaderCircle className="spin" size={16} /> : <Camera size={16} />} Save image
+        </button>
       </div>
+      {toast && (
+        <div className={`viewer-toast glass-panel${toast.failed ? ' failed' : ''}`} role="status" aria-live="polite">
+          <span>{toast.message}</span>
+          {toast.path && (
+            <button onClick={() => void revealPath(toast.path!).catch(() => {})} aria-label="Show the saved image in its folder">
+              <FolderOpen size={14} /> Show file
+            </button>
+          )}
+          <button className="toast-close" onClick={() => setToast(null)} aria-label="Dismiss"><X size={14} /></button>
+        </div>
+      )}
     </div>
   );
+}
+
+/** Lifts the viewer instance out of the provider so the toolbar can use it. */
+function ViewerHandle({ onViewer }: { onViewer: (viewer: VantageEngine | null) => void }) {
+  const { viewer } = useVantage();
+  useEffect(() => {
+    onViewer(viewer ?? null);
+    return () => onViewer(null);
+  }, [onViewer, viewer]);
+  return null;
 }
 
 function ThumbnailCapture({ worldPath, hasThumbnail, onThumbnail }: {

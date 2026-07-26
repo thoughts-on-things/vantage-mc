@@ -1,24 +1,31 @@
 import { useState } from 'react';
-import { Box, ChevronRight, Compass, Cpu, FolderSearch, ImageIcon, LoaderCircle, Sparkles, Trash2 } from 'lucide-react';
+import { Box, ChevronRight, Compass, Cpu, FolderOpen, FolderSearch, History, ImageIcon, LoaderCircle, RefreshCw, Sparkles, Trash2 } from 'lucide-react';
 import type { RenderProgress, WorldInfo } from '../bridge.js';
-import { actionHint, phaseCopy, sourceLabel, type WorldAction, type WorldActionKind } from '../lib/format.js';
+import { actionHint, phaseCopy, renderAge, sourceLabel, type WorldAction, type WorldActionKind } from '../lib/format.js';
+import { renderState, RENDER_STATE_COPY } from '../lib/library.js';
+import type { DesktopSettings } from '../settings.js';
 import { WorldArt } from './WorldCard.js';
 
-export function WorldDetail({ world, progress, action, cancelling, onOpen, onCancel, onRegenerateThumbnail, onResetRender }: {
+export function WorldDetail({ world, settings, progress, action, cancelling, onOpen, onRerender, onCancel, onRegenerateThumbnail, onResetRender, onReveal }: {
   world: WorldInfo | null;
+  settings: DesktopSettings;
   progress: RenderProgress | null;
   action: WorldAction | null;
   cancelling: boolean;
   onOpen: () => void;
+  onRerender: () => void;
   onCancel: () => void;
   onRegenerateThumbnail: () => void;
   onResetRender: () => void;
+  onReveal: () => void;
 }) {
   if (!world) return <aside className="world-detail empty"><Compass size={28} /><p>Select a world to see its details.</p></aside>;
 
   const activeProgress = progress?.worldPath === world.path && !['done', 'failed'].includes(progress.phase) ? progress : null;
   const actionKind = action?.path === world.path ? action.kind : null;
   const rendering = actionKind === 'rendering';
+  const state = renderState(world, settings);
+  const outdated = state === 'outdated' || state === 'settings';
 
   return (
     <aside className="world-detail">
@@ -33,10 +40,17 @@ export function WorldDetail({ world, progress, action, cancelling, onOpen, onCan
         <div><Cpu size={16} /><span><small>Data version</small><b>{world.dataVersion || 'Unknown'}</b></span></div>
         <div><FolderSearch size={16} /><span><small>Found via</small><b>{sourceLabel(world.source)}</b></span></div>
       </div>
-      <div className="detail-note">
-        <Sparkles size={16} />
-        <p><b>{world.cached ? 'Your render is ready.' : 'Built locally, stays local.'}</b> Vantage reads your save without modifying it.</p>
-      </div>
+      {world.cached ? (
+        <div className={`detail-note${outdated ? ' warn' : ''}`}>
+          {outdated ? <History size={16} /> : <Sparkles size={16} />}
+          <p><b>{outdated ? 'Render is behind this world.' : `Rendered ${renderAge(world.renderedAtMs)}.`}</b> {RENDER_STATE_COPY[state].detail}</p>
+        </div>
+      ) : (
+        <div className="detail-note">
+          <Sparkles size={16} />
+          <p><b>Built locally, stays local.</b> Vantage reads your save without modifying it.</p>
+        </div>
+      )}
       {actionKind === 'opening' ? (
         <IndeterminateProgress
           title="Opening GPU viewer"
@@ -59,7 +73,15 @@ export function WorldDetail({ world, progress, action, cancelling, onOpen, onCan
             {world.cached ? <><Compass size={18} /> Explore world</> : <><Sparkles size={18} /> Render this world</>}
             <ChevronRight size={18} />
           </button>
-          {world.cached && <RenderTools onRegenerateThumbnail={onRegenerateThumbnail} onResetRender={onResetRender} />}
+          {world.cached && (
+            <RenderTools
+              outdated={outdated}
+              onRerender={onRerender}
+              onRegenerateThumbnail={onRegenerateThumbnail}
+              onResetRender={onResetRender}
+              onReveal={onReveal}
+            />
+          )}
         </>
       )}
       <p className="shortcut-hint">{actionKind ? actionHint(actionKind) : 'Double-click a rendered world to open it instantly.'}</p>
@@ -102,7 +124,13 @@ function RenderProgressPanel({ progress, cancelling, onCancel }: {
   );
 }
 
-function RenderTools({ onRegenerateThumbnail, onResetRender }: { onRegenerateThumbnail: () => void; onResetRender: () => void }) {
+function RenderTools({ outdated, onRerender, onRegenerateThumbnail, onResetRender, onReveal }: {
+  outdated: boolean;
+  onRerender: () => void;
+  onRegenerateThumbnail: () => void;
+  onResetRender: () => void;
+  onReveal: () => void;
+}) {
   const [confirming, setConfirming] = useState(false);
   if (confirming) {
     return (
@@ -114,7 +142,9 @@ function RenderTools({ onRegenerateThumbnail, onResetRender }: { onRegenerateThu
   }
   return (
     <div className="render-tools" aria-label="Render maintenance">
+      <button className={outdated ? 'accent' : ''} onClick={onRerender}><RefreshCw size={14} /> Re-render</button>
       <button onClick={onRegenerateThumbnail}><ImageIcon size={14} /> Regenerate preview</button>
+      <button onClick={onReveal}><FolderOpen size={14} /> Show save folder</button>
       <button onClick={() => setConfirming(true)}><Trash2 size={14} /> Reset render</button>
     </div>
   );

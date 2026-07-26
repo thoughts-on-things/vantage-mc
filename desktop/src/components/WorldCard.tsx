@@ -1,18 +1,22 @@
 import { memo, type CSSProperties } from 'react';
-import { Check, LoaderCircle, Play } from 'lucide-react';
+import { Check, History, LoaderCircle, Play, SlidersHorizontal } from 'lucide-react';
 import type { WorldInfo } from '../bridge.js';
 import { loadViewer } from '../hooks/useLibrary.js';
 import { relativeTime, sourceLabel, worldActionLabel, type WorldActionKind } from '../lib/format.js';
+import { renderState, RENDER_STATE_COPY } from '../lib/library.js';
+import type { DesktopSettings } from '../settings.js';
 
-export const WorldCard = memo(function WorldCard({ world, index, selected, busy, locked, onSelect, onOpen }: {
+export const WorldCard = memo(function WorldCard({ world, index, settings, selected, busy, locked, onSelect, onOpen }: {
   world: WorldInfo;
   index: number;
+  settings: DesktopSettings;
   selected: boolean;
   busy: WorldActionKind | null;
   locked: boolean;
   onSelect: (path: string) => void;
   onOpen: (world: WorldInfo) => void;
 }) {
+  const state = renderState(world, settings);
   return (
     <article
       className={`world-card world-tone-${index % 4}${selected ? ' selected' : ''}${busy ? ' busy' : ''}${locked ? ' locked' : ''}`}
@@ -39,7 +43,9 @@ export const WorldCard = memo(function WorldCard({ world, index, selected, busy,
       <div className="world-art">
         <WorldArt world={world} />
         <div className="world-art-shade" />
-        {world.cached && <span className="ready-badge"><Check size={12} /> rendered</span>}
+        {state === 'ready' && <span className="ready-badge"><Check size={12} /> rendered</span>}
+        {state === 'outdated' && <span className="ready-badge stale"><History size={12} /> played since</span>}
+        {state === 'settings' && <span className="ready-badge stale"><SlidersHorizontal size={12} /> settings changed</span>}
         {!world.thumbnailUrl && !busy && (
           <span className="thumbnail-state">
             {world.iconUrl ? 'Minecraft icon · open for preview' : world.cached ? 'Open for real preview' : 'Preview after render'}
@@ -51,6 +57,7 @@ export const WorldCard = memo(function WorldCard({ world, index, selected, busy,
           disabled={locked}
           onClick={(event) => { event.stopPropagation(); if (!locked) onOpen(world); }}
           aria-label={`${busy ? worldActionLabel(busy) : 'Open'} ${world.name}`}
+          title={RENDER_STATE_COPY[state].detail}
         >
           {busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} fill="currentColor" />}
         </button>

@@ -62,6 +62,39 @@ export function relativeTime(timestamp: number): string {
   return `Played ${new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(timestamp)}`;
 }
 
+/** "3 days ago" style age for a render, in the past tense the UI reads in. */
+export function renderAge(timestamp: number | null): string {
+  if (!timestamp) return 'Unknown date';
+  const minutes = Math.max(1, Math.floor((Date.now() - timestamp) / 60_000));
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(timestamp);
+}
+
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
+
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  // Sizes are scanned, not audited: one decimal below 10 units, none above.
+  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${BYTE_UNITS[unit]}`;
+}
+
+/** File-name stem for an exported map image, in the user's local time. */
+export function imageFileStem(worldName: string, date = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const stamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+  return `${worldName} ${stamp}`;
+}
+
 const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
 
 export function compactNumber(value: number): string {

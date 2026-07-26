@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { LoaderCircle } from 'lucide-react';
-import { LibraryScreen } from './components/LibraryScreen.js';
+import { AppShell } from './components/AppShell.js';
 import { loadViewer, useLibrary } from './hooks/useLibrary.js';
 import { loadSettings, saveSettings, type DesktopSettings } from './settings.js';
 
@@ -12,22 +12,20 @@ export function App() {
 
   useEffect(() => saveSettings(settings), [settings]);
 
-  const { selected, manifestUrl } = library;
-  if (library.screen === 'viewer' && selected && manifestUrl) {
+  const { viewer } = library;
+  if (viewer) {
     return (
       <Suspense fallback={<div className="viewer-loading"><LoaderCircle className="spin" /><span>Starting GPU viewer</span></div>}>
         <ViewerScreen
-          world={selected}
-          manifestUrl={manifestUrl}
+          target={viewer}
           settings={settings}
           system={library.system}
-          hasThumbnail={Boolean(selected.thumbnailUrl)}
-          onThumbnail={(thumbnailUrl) => library.updateWorldThumbnail(selected.path, thumbnailUrl)}
+          onThumbnail={(thumbnailUrl) => library.updateWorldThumbnail(viewer.world.path, thumbnailUrl)}
           onBack={library.closeViewer}
         />
       </Suspense>
     );
   }
 
-  return <LibraryScreen library={library} settings={settings} onSettingsChange={setSettings} />;
+  return <AppShell library={library} settings={settings} onSettingsChange={setSettings} />;
 }

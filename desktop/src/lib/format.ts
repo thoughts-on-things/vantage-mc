@@ -65,7 +65,11 @@ export function relativeTime(timestamp: number): string {
 /** "3 days ago" style age for a render, in the past tense the UI reads in. */
 export function renderAge(timestamp: number | null): string {
   if (!timestamp) return 'Unknown date';
-  const minutes = Math.max(1, Math.floor((Date.now() - timestamp) / 60_000));
+  const elapsed = Date.now() - timestamp;
+  // Filesystem clocks can run ahead of the system clock. Calling a future
+  // render "1 min ago" is misleading, so keep it at the present boundary.
+  if (elapsed <= 0) return 'just now';
+  const minutes = Math.max(1, Math.floor(elapsed / 60_000));
   if (minutes < 60) return `${minutes} min ago`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;

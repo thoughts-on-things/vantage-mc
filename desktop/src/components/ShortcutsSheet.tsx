@@ -77,7 +77,7 @@ export function ShortcutsSheet({ onClose }: { onClose: () => void }) {
             </section>
           ))}
         </div>
-        <footer className="settings-foot"><span><i /> Shortcuts pause while a world is rendering</span><button className="primary-button compact" onClick={onClose}>Done</button></footer>
+        <footer className="settings-foot"><span><i /> World and navigation shortcuts pause while rendering</span><button className="primary-button compact" onClick={onClose}>Done</button></footer>
       </section>
     </div>
   );

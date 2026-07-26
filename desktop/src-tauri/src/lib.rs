@@ -89,7 +89,11 @@ impl From<&DesktopSettings> for CacheSignature {
 /// `rename_all_fields`, without which the frontend reads `manifestUrl` off a
 /// payload that spelled it `manifest_url`.
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "status")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "status"
+)]
 enum CacheOpen {
     Ready {
         manifest_url: String,

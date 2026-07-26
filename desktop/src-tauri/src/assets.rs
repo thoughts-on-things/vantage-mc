@@ -88,6 +88,14 @@ impl AssetServer {
     /// Points the endpoint at a completed render and returns its manifest URL.
     pub fn open(&self, root: PathBuf) -> Result<RenderReady, String> {
         let canonical = root.canonicalize().map_err(|error| error.to_string())?;
+        if self
+            .roots
+            .library
+            .as_ref()
+            .is_some_and(|library| !canonical.starts_with(library) || canonical == *library)
+        {
+            return Err("The render is outside Vantage's renders directory.".into());
+        }
         if !canonical.join("manifest.json").is_file() {
             return Err("The render has no manifest.json".into());
         }
@@ -549,6 +557,25 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&library).unwrap();
+    }
+
+    #[test]
+    fn open_refuses_a_render_outside_the_library_root() {
+        let scratch = std::env::temp_dir().join(format!(
+            "vantage-endpoint-boundary-{}-{}",
+            std::process::id(),
+            renders::now_ms()
+        ));
+        let library = scratch.join("renders");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("manifest.json"), b"{}").unwrap();
+
+        let server = AssetServer::start(Some(library)).unwrap();
+        assert!(server.open(outside).is_err());
+
+        std::fs::remove_dir_all(&scratch).unwrap();
     }
 
     fn get(target: &str) -> Request {

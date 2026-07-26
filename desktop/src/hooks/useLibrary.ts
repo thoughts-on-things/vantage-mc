@@ -206,7 +206,10 @@ export function useLibrary(settings: DesktopSettings): LibraryController {
           biomeBlend: settingsRef.current.biomeBlend,
         },
       });
-      setViewer({ world: target, manifestUrl: ready.manifestUrl, captureThumbnail: true });
+      // The render invalidated the old preview above. Pass the same state to
+      // the viewer so ThumbnailCapture cannot mistake the stale URL on the
+      // caller's snapshot for a preview of the newly rendered map.
+      setViewer({ world: { ...target, thumbnailUrl: null }, manifestUrl: ready.manifestUrl, captureThumbnail: true });
     } catch (reason) {
       setProgress(null);
       if (!cancelledRender.current) setError(userFacingError(reason));

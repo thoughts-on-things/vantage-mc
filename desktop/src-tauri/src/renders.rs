@@ -163,11 +163,23 @@ pub fn resolve(root: &Path, id: &str) -> Result<PathBuf, String> {
     if !is_render_id(id) {
         return Err("Unknown render.".into());
     }
-    let path = root.join(id);
-    if !path.join(MANIFEST_FILE).is_file() {
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| "The renders directory is unavailable.".to_string())?;
+    let canonical = root
+        .join(id)
+        .canonicalize()
+        .map_err(|_| "That render is no longer on disk.".to_string())?;
+    // A valid-looking id can still name a symlink or junction. Resolve it
+    // before any caller opens or deletes the directory, then enforce the same
+    // containment guarantee advertised by the UI.
+    if canonical == canonical_root || !canonical.starts_with(&canonical_root) {
+        return Err("That render is outside Vantage's renders directory.".into());
+    }
+    if !canonical.join(MANIFEST_FILE).is_file() {
         return Err("That render is no longer on disk.".into());
     }
-    Ok(path)
+    Ok(canonical)
 }
 
 /// Total bytes and file count below `path`.
@@ -378,7 +390,10 @@ mod tests {
         fs::create_dir_all(root.join(&id)).unwrap();
         fs::write(root.join(&id).join(MANIFEST_FILE), b"{}").unwrap();
 
-        assert_eq!(resolve(&root, &id).unwrap(), root.join(&id));
+        assert_eq!(
+            resolve(&root, &id).unwrap(),
+            root.join(&id).canonicalize().unwrap()
+        );
         assert!(resolve(&root, "../secrets").is_err());
         assert!(resolve(&root, "not-hex-at-all!").is_err());
         assert!(resolve(&root, &render_id("C:\\saves\\Other")).is_err());

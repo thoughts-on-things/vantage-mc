@@ -76,8 +76,8 @@ export function loadLibraryView(): LibraryView {
   try {
     const saved = JSON.parse(localStorage.getItem(VIEW_KEY) ?? '{}') as Partial<LibraryView>;
     return {
-      sort: saved.sort && saved.sort in SORT_LABELS ? saved.sort : DEFAULT_VIEW.sort,
-      filter: saved.filter && saved.filter in FILTER_LABELS ? saved.filter : DEFAULT_VIEW.filter,
+      sort: typeof saved.sort === 'string' && Object.hasOwn(SORT_LABELS, saved.sort) ? saved.sort : DEFAULT_VIEW.sort,
+      filter: typeof saved.filter === 'string' && Object.hasOwn(FILTER_LABELS, saved.filter) ? saved.filter : DEFAULT_VIEW.filter,
     };
   } catch {
     return DEFAULT_VIEW;

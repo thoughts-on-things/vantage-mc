@@ -456,7 +456,11 @@ fn reset_world_render(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<(), String> {
-    let output = cache_path(&app, &path)?;
+    let root = renders_root(&app)?;
+    let id = renders::render_id(&path);
+    let Some(output) = renders::resolve_existing(&root, &id)? else {
+        return Ok(());
+    };
     remove_render(&state, &output)
 }
 

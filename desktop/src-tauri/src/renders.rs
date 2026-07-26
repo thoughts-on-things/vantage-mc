@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -160,26 +161,40 @@ pub fn list(root: &Path, thumbnail: impl Fn(&str, &Path) -> Option<String>) -> V
 /// directory names this app generates, so anything else is rejected before it
 /// can reach the filesystem.
 pub fn resolve(root: &Path, id: &str) -> Result<PathBuf, String> {
+    let canonical = resolve_existing(root, id)?
+        .ok_or_else(|| "That render is no longer on disk.".to_string())?;
+    if !canonical.join(MANIFEST_FILE).is_file() {
+        return Err("That render is no longer on disk.".into());
+    }
+    Ok(canonical)
+}
+
+/// Resolves an existing render directory without requiring a finished
+/// manifest. Reset uses this form so deleting an interrupted render stays
+/// idempotent while still refusing symlinks or junctions that leave `root`.
+pub fn resolve_existing(root: &Path, id: &str) -> Result<Option<PathBuf>, String> {
     if !is_render_id(id) {
         return Err("Unknown render.".into());
     }
+    canonical_existing_child(root, &root.join(id))
+}
+
+fn canonical_existing_child(root: &Path, candidate: &Path) -> Result<Option<PathBuf>, String> {
     let canonical_root = root
         .canonicalize()
         .map_err(|_| "The renders directory is unavailable.".to_string())?;
-    let canonical = root
-        .join(id)
-        .canonicalize()
-        .map_err(|_| "That render is no longer on disk.".to_string())?;
+    let canonical = match candidate.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
     // A valid-looking id can still name a symlink or junction. Resolve it
     // before any caller opens or deletes the directory, then enforce the same
     // containment guarantee advertised by the UI.
     if canonical == canonical_root || !canonical.starts_with(&canonical_root) {
         return Err("That render is outside Vantage's renders directory.".into());
     }
-    if !canonical.join(MANIFEST_FILE).is_file() {
-        return Err("That render is no longer on disk.".into());
-    }
-    Ok(canonical)
+    Ok(Some(canonical))
 }
 
 /// Total bytes and file count below `path`.
@@ -398,5 +413,27 @@ mod tests {
         assert!(resolve(&root, "not-hex-at-all!").is_err());
         assert!(resolve(&root, &render_id("C:\\saves\\Other")).is_err());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn unfinished_and_missing_render_paths_resolve_safely() {
+        let parent = scratch("render-boundary");
+        let root = parent.join("renders");
+        let outside = parent.join("outside");
+        let id = render_id("C:\\saves\\Partial");
+        fs::create_dir_all(root.join(&id)).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        assert_eq!(
+            resolve_existing(&root, &id).unwrap(),
+            Some(root.join(&id).canonicalize().unwrap())
+        );
+        assert_eq!(
+            resolve_existing(&root, &render_id("C:\\saves\\Absent")).unwrap(),
+            None
+        );
+        assert!(canonical_existing_child(&root, &outside).is_err());
+
+        fs::remove_dir_all(&parent).unwrap();
     }
 }

@@ -156,6 +156,7 @@ export function useLibrary(settings: DesktopSettings): LibraryController {
 
   const refreshRenders = useCallback(async () => {
     setRendersLoading(true);
+    setError(null);
     try {
       setRenders(await listRenders());
     } catch (reason) {

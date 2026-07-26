@@ -508,6 +508,9 @@ fn open_render(
 #[tauri::command]
 fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
     let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err("That folder is no longer on disk.".into());
+    }
     let owned = [renders_root(&app), exports_dir(&app)];
     let inside_owned = target.canonicalize().is_ok_and(|target| {
         owned.iter().flatten().any(|root| {

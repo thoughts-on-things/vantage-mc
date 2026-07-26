@@ -105,8 +105,10 @@ function comparator(sort: SortMode): (left: WorldInfo, right: WorldInfo) => numb
   if (sort === 'rendered') {
     // Rendered worlds first, newest render first; unrendered worlds keep their
     // recently-played order at the bottom rather than being shuffled.
-    return (left, right) =>
-      (right.renderedAtMs ?? 0) - (left.renderedAtMs ?? 0) || right.lastPlayedMs - left.lastPlayedMs;
+    return (left, right) => {
+      const renderedOrder = Number(left.renderedAtMs === null) - Number(right.renderedAtMs === null);
+      return renderedOrder || (right.renderedAtMs ?? 0) - (left.renderedAtMs ?? 0) || right.lastPlayedMs - left.lastPlayedMs;
+    };
   }
   return (left, right) => right.lastPlayedMs - left.lastPlayedMs;
 }

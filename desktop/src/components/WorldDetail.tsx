@@ -45,7 +45,7 @@ export function WorldDetail({ world, settings, progress, action, cancelling, onO
       {world.cached ? (
         <div className={`detail-note${outdated ? ' warn' : ''}`}>
           {outdated ? <History size={16} /> : <Sparkles size={16} />}
-          <p><b>{outdated ? 'Render is behind this world.' : `Rendered ${renderAge(world.renderedAtMs)}.`}</b> {RENDER_STATE_COPY[state].detail}</p>
+          <p><b>{outdated ? 'Render needs rebuilding.' : `Rendered ${renderAge(world.renderedAtMs)}.`}</b> {RENDER_STATE_COPY[state].detail}</p>
         </div>
       ) : (
         <div className="detail-note">

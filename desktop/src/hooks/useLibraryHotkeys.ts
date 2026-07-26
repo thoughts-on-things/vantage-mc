@@ -40,16 +40,21 @@ export function useLibraryHotkeys({
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing = target?.matches('input, textarea, select, [contenteditable="true"]');
+      // An aria-modal sheet owns the keyboard while it is open. In
+      // particular, Ctrl+K must not pull focus into the search field behind
+      // the dialog; only Escape is allowed to leave the sheet.
+      if (sheetOpen) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeSheet();
+        }
+        return;
+      }
       if (((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'k') || (event.key === '/' && !typing)) {
         if (actionRef.current) return;
         event.preventDefault();
         searchRef.current?.focus();
         searchRef.current?.select();
-        return;
-      }
-      if (event.key === 'Escape' && sheetOpen) {
-        event.preventDefault();
-        closeSheet();
         return;
       }
       if ((event.ctrlKey || event.metaKey) && (event.key === '1' || event.key === '2')) {
@@ -58,7 +63,7 @@ export function useLibraryHotkeys({
         goTo(event.key === '1' ? 'library' : 'renders');
         return;
       }
-      if (event.key === '?' && !typing && !sheetOpen) {
+      if (event.key === '?' && !typing) {
         event.preventDefault();
         openShortcuts();
         return;

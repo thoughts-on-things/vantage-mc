@@ -135,8 +135,8 @@ function ViewerChrome({ world, profile, onBack }: {
   return (
     <>
       <div className="viewer-toolbar glass-panel">
-        <button className="toolbar-back" onClick={onBack} aria-label="Return to world library">
-          <ArrowLeft size={17} /> Library <kbd>Esc</kbd>
+        <button className="toolbar-back" onClick={onBack} aria-label="Return to previous screen">
+          <ArrowLeft size={17} /> Back <kbd>Esc</kbd>
         </button>
         <span className="toolbar-rule" />
         <div className="toolbar-world"><strong>{world.name}</strong><small>{sourceLabel(world.source)} · local render</small></div>

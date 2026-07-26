@@ -56,10 +56,10 @@ impl Tracker {
             let _ = window.center();
         }
         if let Ok(mut slot) = self.restored_box.lock() {
-            *slot = Some(WindowBox {
-                maximized: false,
-                ..saved
-            });
+            // Centering deliberately rejects `saved` coordinates. Remember
+            // the geometry that actually landed on screen so a close without
+            // a move/resize event repairs the persisted state permanently.
+            *slot = Some(restored_geometry(saved, measure(window)));
         }
         if saved.maximized {
             let _ = window.maximize();
@@ -95,6 +95,13 @@ impl Tracker {
             let _ = fs::write(path, bytes);
         }
     }
+}
+
+fn restored_geometry(saved: WindowBox, measured: Option<WindowBox>) -> WindowBox {
+    measured.unwrap_or(WindowBox {
+        maximized: false,
+        ..saved
+    })
 }
 
 fn measure(window: &WebviewWindow) -> Option<WindowBox> {
@@ -191,6 +198,22 @@ mod tests {
     #[test]
     fn an_unknown_display_layout_trusts_the_stored_box() {
         assert!(visible_on(&boxed(-4000, -4000), &[]));
+    }
+
+    #[test]
+    fn measured_restore_geometry_replaces_rejected_saved_coordinates() {
+        let mut saved = boxed(4000, 0);
+        saved.maximized = true;
+        let measured = boxed(320, 180);
+
+        assert_eq!(restored_geometry(saved, Some(measured)), measured);
+        assert_eq!(
+            restored_geometry(saved, None),
+            WindowBox {
+                maximized: false,
+                ..saved
+            }
+        );
     }
 
     #[test]

@@ -224,11 +224,13 @@ fn respond_file(
     let Some(canonical) = resolve_file(&relative, roots) else {
         return respond_text(writer, 404, "not found", head, request);
     };
-    let Ok(mut file) = File::open(&canonical) else {
-        return respond_text(writer, 500, "read failed", head, request);
+    let mut file = match File::open(&canonical) {
+        Ok(file) => file,
+        Err(error) => return respond_file_error(writer, &error, head, request),
     };
-    let Ok(meta) = file.metadata() else {
-        return respond_text(writer, 500, "read failed", head, request);
+    let meta = match file.metadata() {
+        Ok(meta) => meta,
+        Err(error) => return respond_file_error(writer, &error, head, request),
     };
 
     let etag = entity_tag(&meta);
@@ -254,6 +256,19 @@ fn respond_file(
         io::copy(&mut file, writer)?;
     }
     Ok(())
+}
+
+fn respond_file_error(
+    writer: &mut impl Write,
+    error: &io::Error,
+    head: bool,
+    request: &Request,
+) -> io::Result<()> {
+    if error.kind() == io::ErrorKind::NotFound {
+        respond_text(writer, 404, "not found", head, request)
+    } else {
+        respond_text(writer, 500, "read failed", head, request)
+    }
 }
 
 fn respond_text(

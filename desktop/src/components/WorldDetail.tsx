@@ -78,6 +78,7 @@ export function WorldDetail({ world, settings, progress, action, cancelling, onO
           {world.cached && (
             <RenderTools
               outdated={outdated}
+              locked={Boolean(action)}
               onRerender={onRerender}
               onRegenerateThumbnail={onRegenerateThumbnail}
               onResetRender={onResetRender}
@@ -126,8 +127,9 @@ function RenderProgressPanel({ progress, cancelling, onCancel }: {
   );
 }
 
-function RenderTools({ outdated, onRerender, onRegenerateThumbnail, onResetRender, onReveal }: {
+function RenderTools({ outdated, locked, onRerender, onRegenerateThumbnail, onResetRender, onReveal }: {
   outdated: boolean;
+  locked: boolean;
   onRerender: () => void;
   onRegenerateThumbnail: () => void;
   onResetRender: () => void;
@@ -138,16 +140,16 @@ function RenderTools({ outdated, onRerender, onRegenerateThumbnail, onResetRende
     return (
       <div className="reset-confirm" role="group" aria-label="Confirm render reset">
         <div><Trash2 size={15} /><p><b>Reset this render?</b><span>The map and preview will be deleted. The original world is never changed.</span></p></div>
-        <span><button onClick={() => setConfirming(false)}>Keep render</button><button className="danger" onClick={onResetRender}>Reset render</button></span>
+        <span><button onClick={() => setConfirming(false)} disabled={locked}>Keep render</button><button className="danger" onClick={onResetRender} disabled={locked}>Reset render</button></span>
       </div>
     );
   }
   return (
     <div className="render-tools" aria-label="Render maintenance">
-      <button className={outdated ? 'accent' : ''} onClick={onRerender}><RefreshCw size={14} /> Re-render</button>
-      <button onClick={onRegenerateThumbnail}><ImageIcon size={14} /> Regenerate preview</button>
-      <button onClick={onReveal}><FolderOpen size={14} /> Show save folder</button>
-      <button onClick={() => setConfirming(true)}><Trash2 size={14} /> Reset render</button>
+      <button className={outdated ? 'accent' : ''} onClick={onRerender} disabled={locked}><RefreshCw size={14} /> Re-render</button>
+      <button onClick={onRegenerateThumbnail} disabled={locked}><ImageIcon size={14} /> Regenerate preview</button>
+      <button onClick={onReveal} disabled={locked}><FolderOpen size={14} /> Show save folder</button>
+      <button onClick={() => setConfirming(true)} disabled={locked}><Trash2 size={14} /> Reset render</button>
     </div>
   );
 }

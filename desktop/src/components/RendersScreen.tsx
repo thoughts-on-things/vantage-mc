@@ -55,7 +55,7 @@ export function RendersScreen({ library, settings }: { library: LibraryControlle
               key={entry.id}
               entry={entry}
               settings={settings}
-              busy={action?.path === entry.id ? action.kind : null}
+              busy={action && (action.path === entry.id || action.path === entry.worldPath) ? action.kind : null}
               locked={locked}
               onOpen={() => void openRenderEntry(entry)}
               onReveal={() => void reveal(entry.path)}

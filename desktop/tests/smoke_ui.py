@@ -6,6 +6,8 @@ from playwright.sync_api import sync_playwright
 SHOT = Path(os.environ.get("VANTAGE_UI_SCREENSHOT", Path(tempfile.gettempdir()) / "vantage-library.png"))
 SETTINGS_SHOT = SHOT.with_name(f"{SHOT.stem}-settings{SHOT.suffix}")
 RESET_SHOT = SHOT.with_name(f"{SHOT.stem}-reset-confirmation{SHOT.suffix}")
+RENDERS_SHOT = SHOT.with_name(f"{SHOT.stem}-renders{SHOT.suffix}")
+SHORTCUTS_SHOT = SHOT.with_name(f"{SHOT.stem}-shortcuts{SHOT.suffix}")
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
@@ -35,6 +37,30 @@ with sync_playwright() as p:
     selected_after = page.locator(".world-detail h2").inner_text()
     assert selected_before != selected_after
 
+    # A world played after its render is flagged, not silently served stale.
+    stale_card = page.locator(".world-card", has=page.locator(".ready-badge.stale"))
+    assert stale_card.count() == 1
+    assert "played since" in stale_card.locator(".ready-badge.stale").inner_text().lower()
+    stale_card.click()
+    assert page.get_by_role("button", name="Re-render").is_visible()
+    assert "played after its render" in page.locator(".detail-note.warn").inner_text()
+
+    # Filters and sorting narrow the grid and are remembered.
+    page.get_by_role("button", name="Not rendered", exact=True).click()
+    page.wait_for_function("document.querySelectorAll('.world-card:not(.skeleton)').length === 1")
+    assert page.locator(".ready-badge").count() == 0
+    page.get_by_role("button", name="Rendered", exact=True).click()
+    page.wait_for_function("document.querySelectorAll('.world-card:not(.skeleton)').length === 1")
+    assert page.locator(".ready-badge").count() == 1
+    page.get_by_label("Sort worlds").select_option("name")
+    saved_view = page.evaluate("JSON.parse(localStorage.getItem('vantage.desktop.library-view.v1'))")
+    assert saved_view == {"sort": "name", "filter": "rendered"}
+    page.get_by_role("button", name="All", exact=True).click()
+    page.wait_for_function("document.querySelectorAll('.world-card:not(.skeleton)').length === 2")
+    assert page.locator(".world-card h3").first.inner_text() == "Copper Hills"
+    page.get_by_label("Sort worlds").select_option("recent")
+    page.wait_for_function("document.querySelector('.world-card h3').textContent === 'Green Valley'")
+
     page.get_by_role("button", name="Settings").click()
     page.get_by_role("heading", name="Settings").wait_for()
     assert "logical CPU threads detected" in page.locator(".host-card b").inner_text()
@@ -50,6 +76,33 @@ with sync_playwright() as p:
     page.keyboard.press("Escape")
     assert page.get_by_role("heading", name="Settings").count() == 0
     assert page.get_by_role("button", name="Settings").evaluate("el => el === document.activeElement")
+
+    # Turning off a geometry setting re-labels every render baked with the old
+    # one: opening it now rebuilds, and the badge says so before the click.
+    settings_badge = page.locator(".world-card", has=page.locator(".ready-badge.stale"))
+    assert "settings changed" in settings_badge.locator(".ready-badge.stale").inner_text().lower()
+
+    # Renders manager: disk accounting, orphan flagging, confirmed deletion.
+    page.keyboard.press("Control+2")
+    page.get_by_role("heading", name="Your renders").wait_for()
+    page.wait_for_function("document.querySelectorAll('.render-row').length === 2")
+    assert "MB" in page.locator(".renders-summary b").first.inner_text()
+    assert page.locator(".tag.warn").count() == 1
+    page.screenshot(path=str(RENDERS_SHOT), full_page=True)
+    page.get_by_role("button", name="Delete render of Old Survival").click()
+    confirm_delete = page.get_by_role("group", name="Confirm deleting Old Survival")
+    confirm_delete.wait_for()
+    confirm_delete.get_by_role("button", name="Delete render").click()
+    page.wait_for_function("document.querySelectorAll('.render-row').length === 1")
+
+    # The shortcut sheet opens from the keyboard and closes with Escape.
+    page.keyboard.press("?")
+    page.get_by_role("heading", name="Shortcuts").wait_for()
+    page.screenshot(path=str(SHORTCUTS_SHOT), full_page=True)
+    page.keyboard.press("Escape")
+    assert page.get_by_role("heading", name="Shortcuts").count() == 0
+    page.keyboard.press("Control+1")
+    page.get_by_role("heading", name="Your worlds").wait_for()
 
     # Regression: two play clicks in the same event cycle must claim exactly
     # one action and lock every conflicting control before the native call ends.
@@ -99,4 +152,6 @@ with sync_playwright() as p:
     print(f"screenshot={SHOT}")
     print(f"settings_screenshot={SETTINGS_SHOT}")
     print(f"reset_screenshot={RESET_SHOT}")
+    print(f"renders_screenshot={RENDERS_SHOT}")
+    print(f"shortcuts_screenshot={SHORTCUTS_SHOT}")
     browser.close()

@@ -162,6 +162,13 @@ jobs:
         working-directory: desktop/src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
+      # The host owns the render bookkeeping, the loopback tile endpoint, and
+      # the window-state math — all unit tested, none of it exercised by a
+      # compile alone.
+      - name: Test native host
+        working-directory: desktop/src-tauri
+        run: cargo test --lib
+
       # Exercise Tauri's production path and the bundled Zig sidecar without
       # spending CI time creating installers; releases build both installers.
       - name: Build desktop app

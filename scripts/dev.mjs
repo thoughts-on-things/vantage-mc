@@ -177,6 +177,7 @@ if (mode === 'setup') {
   runChecked(npm, npmArgs(['run', 'ci']), join(root, 'desktop'), 'Checking the desktop frontend…');
   runChecked('cargo', ['fmt', '--check'], join(root, 'desktop', 'src-tauri'), 'Checking Rust formatting…');
   runChecked('cargo', ['clippy', '--all-targets', '--', '-D', 'warnings'], join(root, 'desktop', 'src-tauri'), 'Linting the native host and Zig sidecar…');
+  runChecked('cargo', ['test', '--lib'], join(root, 'desktop', 'src-tauri'), 'Running native host tests…');
   console.log(`\n${ansi('92', 'All checks passed.')}\n`);
 } else {
   fail(`Unknown development mode: ${mode}`);

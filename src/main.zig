@@ -2196,10 +2196,12 @@ const LiveServer = struct {
     /// Cheap change gate for the focus file: `{size, mtime}`.
     focus_stamp: ?[2]u64 = null,
     focus_complained: bool = false,
-    /// Interactive fetches waiting on a bake permit. Prebake workers check
-    /// this before taking a slot, so a viewer never queues behind background
-    /// work for longer than one in-flight bake.
-    interactive_waiting: std.atomic.Value(usize) = .init(0),
+    /// Interactive fetches using the live-tile path. This is incremented
+    /// before they take the state mutex: prebake's O(tiles * focus points)
+    /// candidate scan holds that same mutex, so counting only at the bake
+    /// permit would hide the request precisely while it was blocked. Prebake
+    /// workers check this both between bakes and during long candidate scans.
+    interactive_demand: std.atomic.Value(usize) = .init(0),
     /// Prebake focus fallback (the spawn tile) when nothing was requested yet.
     centre_tx: i32 = 0,
     centre_tz: i32 = 0,
@@ -2647,6 +2649,15 @@ fn liveTile(
     validator: ?[]const u8,
 ) !TileBody {
     const key = world.packChunk(tx, tz);
+    // Publish interactive demand before acquireSnapshot takes the state lock.
+    // In particular, this lets a world-wide prebake candidate scan notice and
+    // yield to the request instead of making the request invisible until
+    // after that scan. Keep the claim through the bake as well: a free arena
+    // is not useful if newly-started background bakes immediately consume the
+    // CPU and I/O it needs to finish.
+    _ = self.interactive_demand.fetchAdd(1, .acq_rel);
+    defer _ = self.interactive_demand.fetchSub(1, .acq_rel);
+
     const snapshot = self.acquireSnapshot();
     defer if (snapshot) |current| self.releaseSnapshot(current);
     const regions = if (snapshot) |current| current.loaded else self.sh.loaded;
@@ -2682,11 +2693,7 @@ fn liveTile(
         self.ready.waitUncancelable(self.sh.io, &self.mutex);
     }
 
-    // Viewer-driven bakes take priority over prebake: the waiting count keeps
-    // background workers off the slot queue while any request is in line.
-    _ = self.interactive_waiting.fetchAdd(1, .acq_rel);
     self.bake_slots.waitUncancelable(self.sh.io);
-    _ = self.interactive_waiting.fetchSub(1, .acq_rel);
     defer self.bake_slots.post(self.sh.io);
 
     var res: TileResult = .{};
@@ -2711,7 +2718,7 @@ fn liveTile(
 fn prebakeLoop(self: *LiveServer) void {
     const io = self.sh.io;
     while (true) {
-        if (self.interactive_waiting.load(.acquire) > 0) {
+        if (self.interactive_demand.load(.acquire) > 0) {
             std.Io.sleep(io, std.Io.Duration.fromMilliseconds(25), .awake) catch {};
             continue;
         }
@@ -2734,12 +2741,25 @@ fn prebakeOne(self: *LiveServer) bool {
     const regions = if (snapshot) |current| current.loaded else self.sh.loaded;
 
     self.mutex.lockUncancelable(io);
+    // A viewer can arrive after prebakeLoop's check but before this worker
+    // takes the mutex. Do not start a full catalog scan in that window.
+    if (self.interactive_demand.load(.acquire) > 0) {
+        self.mutex.unlock(io);
+        return true;
+    }
     var focus_buf: [MAX_FOCUS_POINTS + 1][2]i32 = undefined;
     const focus = focusLocked(self, &focus_buf);
     var best_key: ?u64 = null;
     var best_revision: u64 = 0;
     var best_d: i64 = std.math.maxInt(i64);
-    for (keys) |key| {
+    for (keys, 0..) |key, i| {
+        // Multi-focus ranking made this locked scan substantially longer in
+        // 0.10.0. Poll periodically so a request that arrived mid-scan waits
+        // for at most a small batch rather than the rest of a large world.
+        if (i & 255 == 0 and self.interactive_demand.load(.acquire) > 0) {
+            self.mutex.unlock(io);
+            return true;
+        }
         const revision = if (snapshot) |current| current.tile_revisions.get(key).? else 0;
         if (self.baked.get(key)) |cached| if (cached.revision == revision) continue;
         if (self.baking.contains(key)) continue;
@@ -2756,6 +2776,12 @@ fn prebakeOne(self: *LiveServer) bool {
         self.mutex.unlock(io);
         return false;
     };
+    // Close the last race between the final periodic poll and publishing a
+    // background bake. The viewer owns the next scheduling decision now.
+    if (self.interactive_demand.load(.acquire) > 0) {
+        self.mutex.unlock(io);
+        return true;
+    }
     self.baking.put(key, {}) catch {
         self.mutex.unlock(io);
         return false;

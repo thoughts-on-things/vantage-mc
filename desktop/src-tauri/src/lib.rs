@@ -568,6 +568,12 @@ pub fn run() {
             if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
                 app.state::<AppState>().window.restore(&window);
             }
+            // Windows start hidden so a remembered box is applied before the
+            // first frame; showing every window (not just the main one) keeps
+            // the app visible even if that label ever changes.
+            for (_, window) in app.webview_windows() {
+                let _ = window.show();
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

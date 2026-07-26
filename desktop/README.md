@@ -39,15 +39,19 @@ Frontend layout:
 - `src/hooks/useLibrary.ts` — all library state and world actions. One world
   action runs at a time; the lock lives in a ref so same-tick double clicks
   cannot claim it twice.
-- `src/components/` — presentational pieces (library screen, world cards,
-  detail panel, settings sheet).
-- `src/lib/` — pure helpers: formatting and the performance-mode profiles
-  shared by the Zig bake and the GPU viewer.
+- `src/components/` — presentational pieces (app shell, library screen, world
+  cards, detail panel, renders manager, settings and shortcut sheets).
+- `src/lib/` — pure helpers: formatting, the render-state/sort/filter rules for
+  the library, and the performance-mode profiles shared by the Zig bake and the
+  GPU viewer.
 - `src/styles.css` — the design tokens (color ramp, type scale, radii) and all
   component styles; rules never hardcode grays.
 
 Rust host layout: `lib.rs` holds the Tauri commands and state, `assets.rs` the
-loopback tile endpoint (responses stream from disk), `sidecar.rs` the
+loopback tile endpoint (responses stream from disk over keep-alive connections
+and carry ETags), `renders.rs` the bookkeeping for generated renders,
+`native.rs` the small OS integrations (PNG payloads, image exports, revealing a
+folder), `window_state.rs` the remembered window box, and `sidecar.rs` the
 line-delimited protocol parsing.
 
 ## Desktop rendering
@@ -76,11 +80,66 @@ thumbnail beside the cached render. The library prefers that real preview over
 Minecraft's often-stale `icon.png`; re-rendering invalidates it so the next
 viewer load captures the new terrain.
 
-Rendered worlds expose two maintenance actions in the detail panel.
-**Regenerate preview** removes only the cached thumbnail and opens the existing
-map to capture a fresh one. **Reset render** removes the complete generated map,
-signature, and thumbnail after confirmation. Both operations are restricted to
-Vantage's hashed cache directory and never modify the source Minecraft save.
+Rendered worlds expose four maintenance actions in the detail panel.
+**Re-render** rebuilds the map from the current save. **Regenerate preview**
+removes only the cached thumbnail and opens the existing map to capture a fresh
+one. **Show save folder** opens the world in the OS file manager. **Reset
+render** removes the complete generated map, record, and thumbnail after
+confirmation. Every destructive operation is restricted to Vantage's hashed
+cache directory and never modifies the source Minecraft save.
+
+## Keeping renders honest
+
+Each render records the world it came from, its name, and when it was baked.
+The library compares that timestamp against the save's `LastPlayed` and the
+current detail settings, so a world is labelled before it is opened:
+
+- **rendered** — the map matches the save and the current settings.
+- **played since** — the world was played after the render; re-render to pick
+  up the new chunks.
+- **settings changed** — the render was baked with different geometry settings,
+  so opening it rebuilds instead of showing something the settings no longer
+  describe.
+
+The library grid can be filtered (all / rendered / not rendered) and sorted by
+recently played, name, or most recently rendered. Both choices persist.
+
+## Renders manager
+
+The **Renders** screen lists everything Vantage has generated on this PC with
+its size on disk, file count, bake date, and detail settings, plus the total
+disk usage. A render whose save has been deleted is flagged as a missing world
+and can still be opened — the map is self-contained — or deleted to reclaim the
+space. Deletion resolves the hashed render id inside Vantage's own renders
+directory; ids are the only handle the frontend can pass back, and any other
+shape is refused before it reaches the filesystem.
+
+## Native integration
+
+- The window remembers its size, position, and maximized state between
+  launches, and falls back to centering when the stored box no longer lands on
+  a connected monitor.
+- Renders drive the Windows taskbar progress bar, so a minimized Vantage still
+  shows how far along a bake is.
+- **Save image** in the viewer toolbar writes the full-resolution canvas to
+  `Pictures/Vantage` and offers to reveal it. The library's browser-download
+  screenshot button is hidden in the desktop app, where a WebView would turn it
+  into a download prompt.
+- Folder-revealing commands accept only world saves, Vantage's own renders, and
+  its export folder.
+- No helper process may flash a terminal over the app. Release builds are
+  GUI-subsystem binaries, the Zig sidecar is spawned by the shell plugin with
+  `CREATE_NO_WINDOW`, and the file-manager helpers are started the same way
+  with their stdio detached.
+
+## Tile endpoint
+
+The loopback endpoint keeps HTTP/1.1 connections alive across the hundreds of
+tile fetches a pan produces, and answers every request with an ETag built from
+the file's size and modification time. Responses are `no-cache` rather than the
+previous `no-store`, so the WebView keeps them and revalidates with
+`If-None-Match`: a tile that has not been rebaked comes back as an empty `304`
+instead of being re-read from disk and re-sent on every revisit.
 
 ## Development
 

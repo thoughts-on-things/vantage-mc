@@ -103,6 +103,7 @@ function RenderRow({ entry, settings, busy, locked, onOpen, onReveal, onDelete }
             <>
               <span className="tag">{entry.settings.fullCaves ? 'full caves' : 'surface only'}</span>
               <span className="tag">{entry.settings.smoothLighting ? 'smooth light' : 'flat light'}</span>
+              <span className="tag">{entry.settings.allDimensions ? 'all dimensions' : 'overworld only'}</span>
               {!matchesSettings && <span className="tag">rebuilds on open</span>}
             </>
           )}

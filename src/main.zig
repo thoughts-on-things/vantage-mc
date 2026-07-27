@@ -24,6 +24,7 @@ const texture = @import("texture.zig");
 const biome = @import("biome.zig");
 const lang = @import("lang.zig");
 const world = @import("world.zig");
+const dimension = @import("dimension.zig");
 const lowres = @import("lowres.zig");
 const extract = @import("extract.zig");
 const serve = @import("serve.zig");
@@ -84,9 +85,14 @@ fn printUsage() void {
         \\usage:
         \\  vantage render  <world-save-dir> [--assets <dir>] [--out <dir>] [--tile-chunks <n>]
         \\                  [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
+        \\                  [--dimension all|overworld|nether|end|<list>] [--ceiling <y>|keep]
         \\                  [--threads <n>] [--memory <MiB>] [--gz <1..12>]
         \\      Render the whole populated world as streamable tiles + manifest.json
         \\      (default out: web/public). --radius caps to a window around spawn.
+        \\      Every dimension the save has is rendered: the overworld at the root,
+        \\      the nether and the end in their own directories, indexed by world.json.
+        \\      --ceiling moves the nether's roof cut (default 104), which is what
+        \\      opens the map into the caverns instead of showing the bedrock lid.
         \\      Missing assets are extracted automatically from your newest client jar.
         \\  vantage serve   [render-dir] [--port <n>] [--host <addr>] [--open]
         \\      View a render in your browser — a local web server with the viewer
@@ -94,11 +100,13 @@ fn printUsage() void {
         \\      browser; --host 0.0.0.0 shares the map on your local network.
         \\  vantage live    <world-save-dir> [--out <dir>] [--tile-chunks <n>] [--radius <chunks>]
         \\                  [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
+        \\                  [--dimension <name>] [--ceiling <y>|keep]
         \\                  [--threads <n>] [--memory <MiB>] [--gz <1..12>] [--port <n>] [--host <addr>] [--open]
         \\                  [--prebake on|off]
         \\      Open a world in the browser NOW — no full pre-render. Every tile is
         \\      listed up front and baked on demand as it scrolls into view, caching
         \\      into --out (default web/public) so panning back is instant.
+        \\      Streams one dimension per session (--dimension, default overworld).
         \\      --prebake on also bakes the rest of the world in the background.
         \\  vantage server  <world-save-dir> [live render flags] [--port <n>] [--host <addr>]
         \\                  [--token-env <name>] [--allow-origin <origin>] [--max-connections <n>]
@@ -187,21 +195,72 @@ fn parseLightQuality(args: []const []const u8) error{InvalidArgument}!mesh.Light
     return .smooth;
 }
 
-/// Scan args for `--caves full|<y>` (default `55`). Faces
-/// below this world Y that only look into dark (sky-light-0) cells are culled —
-/// they are invisible from any above-ground view and dominate tile size on
-/// modern worlds. `full` keeps every cave: tiles grow, but the viewer's
-/// depth-slice cave view has real geometry to reveal (the manifest gains
-/// `"caves": true` so the UI knows to offer it). `off` is an alias of `full`
-/// kept for old scripts.
-fn parseCaveY(args: []const []const u8) error{InvalidArgument}!?i32 {
+/// `--caves full|<y>`: faces below this world Y that only look into dark
+/// (sky-light-0) cells are culled — they are invisible from any above-ground
+/// view and dominate tile size on modern worlds. `full` keeps every cave: tiles
+/// grow, but the viewer's depth-slice cave view has real geometry to reveal
+/// (the manifest gains `"caves": true` so the UI knows to offer it). `off` is
+/// an alias of `full` kept for old scripts.
+const CaveSetting = union(enum) { full, horizon: i32 };
+
+/// Scan args for `--caves`. Null means the flag was absent, so each dimension
+/// applies its own default (`dimension.Profile.default_cave_y`) — the overworld
+/// culls below y=55, the end and the nether never do.
+fn parseCaveY(args: []const []const u8) error{InvalidArgument}!?CaveSetting {
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
         if (!std.mem.eql(u8, args[i], "--caves")) continue;
-        if (std.mem.eql(u8, args[i + 1], "full") or std.mem.eql(u8, args[i + 1], "off")) return null;
-        return std.fmt.parseInt(i32, args[i + 1], 10) catch badValue("--caves", args[i + 1], "full|<y>");
+        if (std.mem.eql(u8, args[i + 1], "full") or std.mem.eql(u8, args[i + 1], "off")) return .full;
+        const y = std.fmt.parseInt(i32, args[i + 1], 10) catch return badValue("--caves", args[i + 1], "full|<y>");
+        return CaveSetting{ .horizon = y };
     }
-    return 55;
+    return null;
+}
+
+/// The cave-culling horizon for one dimension: the `--caves` value when given,
+/// else the dimension's own default. Ignored entirely by `open_volume`
+/// dimensions, where reachability decides and every visible cave is kept.
+fn caveHorizonFor(dim: dimension.Profile, setting: ?CaveSetting) ?i32 {
+    if (dim.visibility == .open_volume) return null;
+    const s = setting orelse return dim.default_cave_y;
+    return switch (s) {
+        .full => null,
+        // A depth only means something where there are caves under it. The end
+        // has none — its islands float — so an overworld horizon would cull
+        // their undersides instead of a cave system. Dimensions that declare no
+        // horizon of their own keep every face whatever the flag says.
+        .horizon => |y| if (dim.default_cave_y == null) null else y,
+    };
+}
+
+/// Scan args for `--dimension <list>` (default: every dimension the save has).
+/// Values name dimensions the way people already do — `nether`, `the_end`,
+/// `minecraft:overworld`, `DIM-1` — comma-separated, or `all`. Returns null for
+/// "everything", so the common case needs no flag at all.
+fn parseDimensionArg(args: []const []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--dimension") and !std.mem.eql(u8, args[i], "--dimensions")) continue;
+        if (std.ascii.eqlIgnoreCase(args[i + 1], "all")) return null;
+        return args[i + 1];
+    }
+    return null;
+}
+
+/// The nether's roof cut (see `dimension.Profile.ceiling_cut`): `--ceiling <y>`
+/// moves it, `--ceiling keep` renders the bedrock lid as it is. Null leaves the
+/// dimension's own default.
+const CeilingOverride = union(enum) { keep, at: i32 };
+
+fn parseCeiling(args: []const []const u8) error{InvalidArgument}!?CeilingOverride {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--ceiling")) continue;
+        if (std.mem.eql(u8, args[i + 1], "keep") or std.mem.eql(u8, args[i + 1], "off")) return .keep;
+        const y = std.fmt.parseInt(i32, args[i + 1], 10) catch return badValue("--ceiling", args[i + 1], "keep|<y>");
+        return CeilingOverride{ .at = y };
+    }
+    return null;
 }
 
 /// Scan args for `--threads <n>`. Null means "not given" — the memory planner
@@ -475,7 +534,7 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     const maps = biome.Colormaps.load(a, init.io, assets);
     const data_root = dataRootFromAssets(a, assets);
     var reg = biome.Registry.init(a, init.io, data_root);
-    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, try parseLightQuality(args), try parseBiomeBlend(args), null, try parseCaveY(args), 0, null);
+    const built = try mesh.buildTextured(a, g, resolver, &builder, maps, &reg, try parseLightQuality(args), try parseBiomeBlend(args), null, .{ .sky_light = caveHorizonFor(dimension.overworld, try parseCaveY(args)) }, 0, null);
     const arr = try builder.finish();
 
     // Resolve human-readable biome names from the language file for the legend.
@@ -565,11 +624,12 @@ fn dataRootFromAssets(a: std.mem.Allocator, assets: []const u8) []const u8 {
     return std.fmt.allocPrint(a, "{s}data/minecraft", .{p[0 .. p.len - suffix.len]}) catch "";
 }
 
-/// A world located and indexed: its region directory + extracted assets, the
+/// One dimension of a world, located and indexed: its region directory, the
 /// region location tables (payloads stream per tile), the populated-chunk set,
 /// spawn, and the centre chunk the `--radius` cap and spawn-outward order pivot
 /// on. Shared by `render` (batch) and `live` (on-demand).
 const WorldLoad = struct {
+    dim: dimension.Profile,
     region_dir: []const u8,
     assets: []const u8,
     loaded: []const world.LoadedRegion,
@@ -580,26 +640,13 @@ const WorldLoad = struct {
     centre_cz: i32,
 };
 
-/// Locate a world's region dir + assets (auto-discovering/auto-extracting
-/// assets when not passed) and index it — the setup `render` and `live` share.
-/// Returns a `WorldLoad` with `bounds.count == 0` for an empty world; callers
-/// decide how to report that.
-fn resolveWorld(init: std.process.Init, a: std.mem.Allocator, save: []const u8, assets_opt: ?[]const u8) !WorldLoad {
-    const region_dir = (try world.findRegionDir(a, init.io, save)) orelse {
-        std.debug.print(
-            \\no Minecraft region files found under:
-            \\  {s}
-            \\Point me at a world save folder (the one with level.dat), e.g.
-            \\  ~/Library/Application Support/minecraft/saves/<World>
-            \\
-        , .{save});
-        return error.NoRegions;
-    };
-
+/// Locate the extracted assets, auto-discovering a local Minecraft (and
+/// extracting from its newest client jar) when `--assets` wasn't passed.
+fn resolveAssets(init: std.process.Init, a: std.mem.Allocator, assets_opt: ?[]const u8) ![]const u8 {
+    if (assets_opt) |assets| return assets;
     const home = init.environ_map.get("HOME") orelse
         init.environ_map.get("USERPROFILE") orelse ""; // Windows has no HOME
-    const assets = assets_opt orelse (try findAssets(a, init.io, home)) orelse
-        (try autoExtract(init, a, home)) orelse {
+    return (try findAssets(a, init.io, home)) orelse (try autoExtract(init, a, home)) orelse {
         std.debug.print(
             \\no extracted assets found, and no Minecraft installation to extract from.
             \\Point `vantage extract` at any client jar first:
@@ -608,16 +655,83 @@ fn resolveWorld(init: std.process.Init, a: std.mem.Allocator, save: []const u8, 
         , .{});
         return error.NoAssets;
     };
+}
 
-    std.debug.print("world:   {s}\nassets:  {s}\n", .{ region_dir, assets });
+/// The dimensions of `save` that `--dimension` asked for, in render order
+/// (overworld first). A save with no region files anywhere is an error; a
+/// request for a dimension the save doesn't have says which ones it does.
+fn resolveDimensions(
+    init: std.process.Init,
+    a: std.mem.Allocator,
+    save: []const u8,
+    spec: ?[]const u8,
+) ![]dimension.Found {
+    const found = try dimension.discover(a, init.io, save);
+    if (found.len == 0) {
+        std.debug.print(
+            \\no Minecraft region files found under:
+            \\  {s}
+            \\Point me at a world save folder (the one with level.dat), e.g.
+            \\  ~/Library/Application Support/minecraft/saves/<World>
+            \\
+        , .{save});
+        return error.NoRegions;
+    }
+    const want = spec orelse return found;
 
-    const loaded = try world.loadRegions(a, init.io, region_dir);
+    var selected: std.ArrayList(dimension.Found) = .empty;
+    var it = std.mem.splitScalar(u8, want, ',');
+    while (it.next()) |raw| {
+        const name = std.mem.trim(u8, raw, " ");
+        if (name.len == 0) continue;
+        const hit = matchDimension(found, name) orelse {
+            std.debug.print("this world has no dimension '{s}'. It has:\n", .{name});
+            for (found) |f| std.debug.print("  {s}  ({s})\n", .{ f.profile.id, f.region_dir });
+            return error.InvalidArgument;
+        };
+        for (selected.items) |s| {
+            if (std.mem.eql(u8, s.profile.id, hit.profile.id)) break;
+        } else try selected.append(a, hit);
+    }
+    if (selected.items.len == 0) return error.InvalidArgument;
+    return selected.toOwnedSlice(a);
+}
+
+/// Match one `--dimension` value against the discovered set: by resource id,
+/// by output slug, or by the friendly/folder aliases `dimension.builtinFor`
+/// understands.
+fn matchDimension(found: []const dimension.Found, name: []const u8) ?dimension.Found {
+    const builtin = dimension.builtinFor(name);
+    for (found) |f| {
+        if (std.ascii.eqlIgnoreCase(f.profile.id, name)) return f;
+        if (f.profile.slug.len > 0 and std.ascii.eqlIgnoreCase(f.profile.slug, name)) return f;
+        if (builtin) |b| {
+            if (std.mem.eql(u8, f.profile.id, b.id)) return f;
+        }
+    }
+    return null;
+}
+
+/// Index one dimension: read its region location tables, take the populated
+/// bounds/chunk set, and pick the centre that `--radius` and the spawn-outward
+/// tile order pivot on. `overworld_spawn` comes from the save's level.dat; each
+/// dimension maps it to its own frame (see `dimension.spawnFor`). Returns a
+/// `WorldLoad` with `bounds.count == 0` for an empty dimension; callers decide
+/// how to report that.
+fn loadDimension(
+    a: std.mem.Allocator,
+    io: std.Io,
+    found: dimension.Found,
+    assets: []const u8,
+    overworld_spawn: ?[3]i32,
+) !WorldLoad {
+    const loaded = try world.loadRegions(a, io, found.region_dir);
     const bounds = world.populatedBounds(loaded);
     const populated = if (bounds.count == 0)
         std.AutoHashMap(u64, void).init(a)
     else
         try world.populatedChunks(a, loaded);
-    const spawn = world.readSpawn(a, init.io, save);
+    const spawn = dimension.spawnFor(found.profile, overworld_spawn);
 
     // The optional --radius cap and spawn-outward order centre on the spawn
     // point when known (that's where the interesting builds are), else the
@@ -626,7 +740,8 @@ fn resolveWorld(init: std.process.Init, a: std.mem.Allocator, save: []const u8, 
     const centre_cz: i32 = if (spawn) |s| @divFloor(s[2], 16) else @divFloor(bounds.min_cz + bounds.max_cz, 2);
 
     return .{
-        .region_dir = region_dir,
+        .dim = found.profile,
+        .region_dir = found.region_dir,
         .assets = assets,
         .loaded = loaded,
         .bounds = bounds,
@@ -635,6 +750,31 @@ fn resolveWorld(init: std.process.Init, a: std.mem.Allocator, save: []const u8, 
         .centre_cx = centre_cx,
         .centre_cz = centre_cz,
     };
+}
+
+/// Locate + index exactly one dimension — the setup `live` and `server` share,
+/// which stream a single dimension per session (`--dimension`, default the
+/// overworld).
+fn resolveWorld(
+    init: std.process.Init,
+    a: std.mem.Allocator,
+    save: []const u8,
+    assets_opt: ?[]const u8,
+    spec: ?[]const u8,
+) !WorldLoad {
+    const dims = try resolveDimensions(init, a, save, spec);
+    if (dims.len > 1 and spec != null) {
+        std.debug.print("this command streams one dimension at a time; pass a single --dimension\n", .{});
+        return error.InvalidArgument;
+    }
+    const assets = try resolveAssets(init, a, assets_opt);
+    const chosen = dims[0]; // discovery orders the overworld first
+    if (dims.len > 1) std.debug.print(
+        "note:    this save has {d} dimensions; streaming {s} (pass --dimension to pick another)\n",
+        .{ dims.len, chosen.profile.id },
+    );
+    std.debug.print("world:   {s}\nassets:  {s}\n", .{ chosen.region_dir, assets });
+    return loadDimension(a, init.io, chosen, assets, world.readSpawn(a, init.io, save));
 }
 
 /// The tiles containing at least one populated chunk (within `--radius` of the
@@ -752,6 +892,9 @@ pub const RenderOptions = struct {
     save_dir: []const u8,
     out_dir: []const u8,
     full_caves: bool = false,
+    /// Which dimensions to render, in `--dimension` syntax ("nether",
+    /// "overworld,the_end"). Null renders every dimension the save has.
+    dimensions: ?[]const u8 = null,
 };
 
 /// Typed, in-process render entry point shared by the desktop app and future
@@ -762,7 +905,7 @@ pub fn renderWorld(
     options: RenderOptions,
     progress: *RenderProgress,
 ) !void {
-    var args: [5][]const u8 = undefined;
+    var args: [7][]const u8 = undefined;
     var len: usize = 0;
     args[len] = options.save_dir;
     len += 1;
@@ -774,6 +917,12 @@ pub fn renderWorld(
         args[len] = "--caves";
         len += 1;
         args[len] = "full";
+        len += 1;
+    }
+    if (options.dimensions) |dims| {
+        args[len] = "--dimension";
+        len += 1;
+        args[len] = dims;
         len += 1;
     }
     progress.setPhase(.scanning);
@@ -788,6 +937,31 @@ pub fn runRender(init: std.process.Init, a: std.mem.Allocator, args: []const []c
     return renderWorldArgs(init, a, args, null);
 }
 
+/// Everything `render` parsed from the command line, minus the world itself —
+/// the same knobs apply to every dimension of the save.
+const RenderSettings = struct {
+    out_dir: []const u8,
+    tile_chunks: i32,
+    radius: i32,
+    gz_level: i32,
+    quality: mesh.LightQuality,
+    blend_biomes: bool,
+    /// `--caves`, for the dimensions whose visibility is decided by sky light.
+    /// Null = not given, so each dimension uses its own default.
+    caves: ?CaveSetting,
+    ceiling: ?CeilingOverride,
+    requested_threads: ?usize,
+    memory_budget: usize,
+};
+
+/// What one finished dimension contributes to the world index.
+const DimSummary = struct {
+    profile: dimension.Profile,
+    tiles: usize,
+    bytes: u64,
+    spawn: ?[3]i32,
+};
+
 fn renderWorldArgs(
     init: std.process.Init,
     a: std.mem.Allocator,
@@ -797,37 +971,43 @@ fn renderWorldArgs(
     if (args.len < 1) return usage();
     const save = args[0];
     var assets_opt: ?[]const u8 = null;
-    var out_dir: []const u8 = "web/public";
-    var tile_chunks: i32 = 8; // tile span in chunks (128×128 blocks)
-    var radius: i32 = 0; // optional cap: only tiles within ±radius chunks of spawn/centre (0 = whole world)
-    // Level 7 is the measured Pareto point for quantized tiles: much less CPU
-    // than 9 for only a small payload increase. Users can still choose 1..12.
-    var gz_level: i32 = 7;
-    const quality = try parseLightQuality(args);
-    const blend_biomes = try parseBiomeBlend(args);
-    const cave_y = try parseCaveY(args);
-    const requested_threads = try parseThreads(args);
-    const memory_budget = bakeMemoryBudget(try parseMemoryMiB(args));
+    var settings: RenderSettings = .{
+        .out_dir = "web/public",
+        .tile_chunks = 8, // tile span in chunks (128×128 blocks)
+        .radius = 0, // optional cap: only tiles within ±radius chunks of spawn/centre (0 = whole world)
+        // Level 7 is the measured Pareto point for quantized tiles: much less CPU
+        // than 9 for only a small payload increase. Users can still choose 1..12.
+        .gz_level = 7,
+        .quality = try parseLightQuality(args),
+        .blend_biomes = try parseBiomeBlend(args),
+        .caves = try parseCaveY(args),
+        .ceiling = try parseCeiling(args),
+        .requested_threads = try parseThreads(args),
+        .memory_budget = bakeMemoryBudget(try parseMemoryMiB(args)),
+    };
+    const dimension_spec = parseDimensionArg(args);
     var argi: usize = 1;
     while (argi < args.len) : (argi += 1) {
         const arg = args[argi];
         if (std.mem.eql(u8, arg, "--assets")) {
             assets_opt = try flagValue(args, &argi);
         } else if (std.mem.eql(u8, arg, "--out")) {
-            out_dir = try flagValue(args, &argi);
+            settings.out_dir = try flagValue(args, &argi);
         } else if (std.mem.eql(u8, arg, "--tile-chunks")) {
             const v = try flagValue(args, &argi);
             const n = std.fmt.parseInt(i32, v, 10) catch return badValue("--tile-chunks", v, "1..32");
-            tile_chunks = std.math.clamp(n, 1, 32);
+            settings.tile_chunks = std.math.clamp(n, 1, 32);
         } else if (std.mem.eql(u8, arg, "--radius")) {
             const v = try flagValue(args, &argi);
-            radius = std.fmt.parseInt(i32, v, 10) catch return badValue("--radius", v, "<chunks>");
+            settings.radius = std.fmt.parseInt(i32, v, 10) catch return badValue("--radius", v, "<chunks>");
         } else if (std.mem.eql(u8, arg, "--gz")) {
             const v = try flagValue(args, &argi);
             const n = std.fmt.parseInt(i32, v, 10) catch return badValue("--gz", v, "1..12");
-            gz_level = std.math.clamp(n, 1, 12);
+            settings.gz_level = std.math.clamp(n, 1, 12);
         } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
-            std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "--memory"))
+            std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads") or
+            std.mem.eql(u8, arg, "--memory") or std.mem.eql(u8, arg, "--ceiling") or
+            std.mem.eql(u8, arg, "--dimension") or std.mem.eql(u8, arg, "--dimensions"))
         {
             // Parsed by their dedicated scanners above; skip the value here.
             argi += 1;
@@ -837,28 +1017,104 @@ fn renderWorldArgs(
         }
     }
 
-    const wl = try resolveWorld(init, a, save, assets_opt);
-    if (wl.bounds.count == 0) {
+    const dims = try resolveDimensions(init, a, save, dimension_spec);
+    const assets = try resolveAssets(init, a, assets_opt);
+    const overworld_spawn = world.readSpawn(a, init.io, save);
+    std.debug.print("assets:  {s}\n", .{assets});
+
+    // Index every selected dimension first: the region tables are small, and
+    // knowing the whole tile count up front lets one progress bar (and the
+    // desktop app's) span the entire render instead of restarting per world.
+    var loads: std.ArrayList(WorldLoad) = .empty;
+    var tile_sets: std.ArrayList([]u64) = .empty;
+    var total_tiles: usize = 0;
+    for (dims) |found| {
+        const wl = try loadDimension(a, init.io, found, assets, overworld_spawn);
+        if (wl.bounds.count == 0) {
+            std.debug.print("{s}: no populated chunks, skipped\n", .{found.profile.id});
+            continue;
+        }
+        // The tiles that contain at least one populated chunk, sorted
+        // spawn-outward. Sparse worlds (exploration trails across hundreds of
+        // regions) stay proportional to what exists, not to the bounding box.
+        const keys = try enumerateTilesSpawnOutward(a, wl.populated, settings.radius, wl.centre_cx, wl.centre_cz, settings.tile_chunks);
+        try loads.append(a, wl);
+        try tile_sets.append(a, keys);
+        total_tiles += keys.len;
+    }
+    if (loads.items.len == 0) {
         std.debug.print("no populated chunks found.\n", .{});
         return;
     }
+    if (observer) |p| p.beginTiles(total_tiles);
+
+    // One progress root for the whole render: std.Progress allows a single
+    // root per process, and a save's dimensions bake one after another.
+    const root = std.Progress.start(init.io, .{ .root_name = "vantage render" });
+    defer root.end();
+
+    var summaries: std.ArrayList(DimSummary) = .empty;
+    var done_before: usize = 0;
+    for (loads.items, tile_sets.items) |wl, keys| {
+        if (loads.items.len > 1) std.debug.print("\n── {s} ──\n", .{wl.dim.label});
+        const summary = try renderDimension(init, a, wl, keys, settings, root, observer, done_before);
+        try summaries.append(a, summary);
+        done_before += keys.len;
+    }
+
+    // The world index ties the dimensions together for the viewer's switcher.
+    // Written even for a single dimension, so adding one later doesn't change
+    // how a deployed viewer finds them.
+    const index = try buildWorldIndex(a, summaries.items);
+    try atomicWrite(init.io, a, settings.out_dir, "world.json", index);
+    if (summaries.items.len > 1) {
+        std.debug.print("\nworld:   {d} dimensions in {s}/world.json\n", .{ summaries.items.len, settings.out_dir });
+        for (summaries.items) |s| {
+            const rel = if (s.profile.slug.len == 0) "manifest.json" else s.profile.slug;
+            std.debug.print("  {s: <12} {d} tiles · {d:.1} MB → {s}/{s}\n", .{
+                s.profile.label,
+                s.tiles,
+                @as(f64, @floatFromInt(s.bytes)) / (1024.0 * 1024.0),
+                settings.out_dir,
+                rel,
+            });
+        }
+    }
+}
+
+/// Render one dimension into its own output directory: tiles, LOD pyramid,
+/// texture atlas and manifest. `done_before` offsets this dimension's tile
+/// progress into the whole-render count the observer reports.
+fn renderDimension(
+    init: std.process.Init,
+    a: std.mem.Allocator,
+    wl: WorldLoad,
+    tile_keys: []const u64,
+    settings: RenderSettings,
+    root: std.Progress.Node,
+    observer: ?*RenderProgress,
+    done_before: usize,
+) !DimSummary {
     const loaded = wl.loaded;
     const bounds = wl.bounds;
     const spawn = wl.spawn;
     const assets = wl.assets;
+    const tile_chunks = settings.tile_chunks;
+    const gz_level = settings.gz_level;
+    // A dimension with a ceiling renders below its roof cut; `--ceiling`
+    // overrides both the cut and (with `keep`) the whole idea.
+    var dim = wl.dim;
+    if (settings.ceiling) |override| dim.ceiling_cut = switch (override) {
+        .keep => null,
+        .at => |y| y,
+    };
+    const cave_y = caveHorizonFor(dim, settings.caves);
+    const out_dir = try dimension.outputDir(a, settings.out_dir, dim);
 
-    // The tiles that contain at least one populated chunk, sorted spawn-outward.
-    // Sparse worlds (exploration trails across hundreds of regions) stay
-    // proportional to what exists, not to the bounding box.
-    const tile_keys = try enumerateTilesSpawnOutward(a, wl.populated, radius, wl.centre_cx, wl.centre_cz, tile_chunks);
-
-    std.debug.print("regions: {d} files · {d} populated chunks · extent {d}×{d} chunks · {d} tiles of {d}×{d} chunks\n", .{
-        loaded.len,    bounds.count, bounds.spanX(), bounds.spanZ(),
-        tile_keys.len, tile_chunks,  tile_chunks,
+    std.debug.print("world:   {s}\nregions: {d} files · {d} populated chunks · extent {d}×{d} chunks · {d} tiles of {d}×{d} chunks\n", .{
+        wl.region_dir,  loaded.len,    bounds.count, bounds.spanX(),
+        bounds.spanZ(), tile_keys.len, tile_chunks,  tile_chunks,
     });
-    if (observer) |p| {
-        p.beginTiles(tile_keys.len);
-    }
 
     // ---- parallel tile rendering --------------------------------------------
     // Workers pull tile indices from an atomic counter; each renders into its
@@ -867,10 +1123,10 @@ fn renderWorldArgs(
     // set per thread (each worker keeps a reusable arena).
     const cpu_count = std.Thread.getCpuCount() catch 4;
     const worker_bytes = estimatedTileWorkingSet(tile_chunks);
-    const thread_count = bakeWorkerCount(cpu_count, tile_keys.len, requested_threads, memory_budget, worker_bytes);
+    const thread_count = bakeWorkerCount(cpu_count, tile_keys.len, settings.requested_threads, settings.memory_budget, worker_bytes);
     std.debug.print("bakes:   {d} concurrent · {d} MiB budget · ~{d} MiB/worker\n", .{
         thread_count,
-        memory_budget / MiB,
+        settings.memory_budget / MiB,
         worker_bytes / MiB,
     });
 
@@ -891,10 +1147,11 @@ fn renderWorldArgs(
     // parallel each tile meshes single-threaded; a one-worker render lets each
     // tile use every core.
     const sh = try setupShared(init.io, a, assets, loaded, .{
+        .dim = dim,
         .tile_chunks = tile_chunks,
         .out_dir = out_dir,
-        .quality = quality,
-        .blend_biomes = blend_biomes,
+        .quality = settings.quality,
+        .blend_biomes = settings.blend_biomes,
         .cave_y = cave_y,
         .gz_level = gz_level,
         .mesh_threads = if (thread_count > 1) 1 else 0,
@@ -904,8 +1161,6 @@ fn renderWorldArgs(
     var manifest_tiles: std.ArrayList(TileEntry) = .empty;
     const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
 
-    const root = std.Progress.start(init.io, .{ .root_name = "vantage render" });
-    defer root.end();
     const tiles_node = root.start("rendering tiles", tile_keys.len);
 
     const t0 = std.Io.Timestamp.now(init.io, .awake);
@@ -933,6 +1188,7 @@ fn renderWorldArgs(
         .plain_progress = plain_progress,
         .progress = tiles_node,
         .observer = observer,
+        .done_before = done_before,
     };
 
     // Progressive render: a background thread republishes manifest.json (and the
@@ -941,6 +1197,7 @@ fn renderWorldArgs(
     var flush_ctx: FlushCtx = .{
         .io = init.io,
         .out_dir = out_dir,
+        .dim = dim,
         .live = &live,
         .builder = &sh.builder,
         .world_mutex = &sh.world_mutex,
@@ -1067,6 +1324,7 @@ fn renderWorldArgs(
     try writeAtlas(init.io, a, out_dir, arr);
 
     const manifest = try buildManifest(a, .{
+        .dim = dim,
         .tile_chunks = tile_chunks,
         .spawn = spawn,
         .biomes = sh.world_display.items,
@@ -1112,12 +1370,18 @@ fn renderWorldArgs(
         total_tris,
         total_fluid_verts,
         out_dir,
-        out_dir,
+        settings.out_dir, // serve the render root: it carries every dimension
     });
     if (stale_removed > 0) std.debug.print("cleanup: removed {d} stale tile file(s) from a previous render\n", .{stale_removed});
     std.debug.print("timings: wall {d}ms on {d} thread(s) · cpu: read {d}ms · light {d}ms · geometry {d}ms · write {d}ms\n", .{
         t0.durationTo(t_end).toMilliseconds(), thread_count, read_ms, light_ms, mesh_ms, write_ms,
     });
+    return .{
+        .profile = dim,
+        .tiles = manifest_tiles.items.len,
+        .bytes = total_bytes + lowres_bytes,
+        .spawn = spawn,
+    };
 }
 
 /// Mutex-guarded view of a non-thread-safe allocator (the run arena), for
@@ -1182,6 +1446,7 @@ const Live = struct {
 const FlushCtx = struct {
     io: std.Io,
     out_dir: []const u8,
+    dim: dimension.Profile = dimension.overworld,
     live: *Live,
     builder: *texture.Builder,
     world_mutex: *std.Io.Mutex,
@@ -1255,6 +1520,7 @@ fn flushOnce(fc: *FlushCtx, a: std.mem.Allocator) !void {
     fc.world_mutex.unlock(fc.io);
 
     const manifest = try buildManifest(a, .{
+        .dim = fc.dim,
         .tile_chunks = fc.tile_chunks,
         .spawn = fc.spawn,
         .biomes = biomes,
@@ -1302,6 +1568,9 @@ const Shared = struct {
     base: std.mem.Allocator,
     sa: std.mem.Allocator = undefined,
     loaded: []const world.LoadedRegion,
+    /// The dimension being baked: its roof cut, how invisible geometry is
+    /// found, and the light defaults the lowres colour maps shade with.
+    dim: dimension.Profile,
     tile_chunks: i32,
     out_dir: []const u8,
     quality: mesh.LightQuality,
@@ -1331,10 +1600,25 @@ const Shared = struct {
     world_raw: std.ArrayList([]const u8) = .empty,
     world_display: std.ArrayList([]const u8) = .empty,
     world_biome_ids: std.StringHashMap(u16) = undefined,
+
+    /// How this dimension's hidden geometry is found (see `mesh.CaveMode`).
+    fn caveMode(self: *const Shared) mesh.CaveMode {
+        return switch (self.dim.visibility) {
+            .sky_light => .{ .sky_light = self.cave_y },
+            .open_volume => .open_volume,
+        };
+    }
+
+    /// The light defaults the viewer will apply, so lowres colour maps shade
+    /// like the hires terrain they sit under.
+    fn shading(self: *const Shared) lowres.Shading {
+        return .{ .ambient = self.dim.ambient, .daylight = self.dim.daylight };
+    }
 };
 
 /// Per-render knobs for `setupShared` (everything not derived from the world).
 const SharedConfig = struct {
+    dim: dimension.Profile = dimension.overworld,
     tile_chunks: i32,
     out_dir: []const u8,
     quality: mesh.LightQuality,
@@ -1355,6 +1639,7 @@ fn setupShared(io: std.Io, a: std.mem.Allocator, assets: []const u8, loaded: []c
         .io = io,
         .base = a,
         .loaded = loaded,
+        .dim = cfg.dim,
         .tile_chunks = cfg.tile_chunks,
         .out_dir = cfg.out_dir,
         .quality = cfg.quality,
@@ -1398,6 +1683,9 @@ const RenderCtx = struct {
     plain_progress: bool,
     progress: std.Progress.Node,
     observer: ?*RenderProgress,
+    /// Tiles finished by earlier dimensions of this render — the observer
+    /// counts one bar across the whole save, not one per dimension.
+    done_before: usize = 0,
 };
 
 /// One tile's outcome, written only by the worker that owns the slot.
@@ -1447,7 +1735,7 @@ fn tileWorker(ctx: *RenderCtx) void {
         }
         ctx.progress.completeOne();
         const done = ctx.done.fetchAdd(1, .monotonic) + 1;
-        if (ctx.observer) |p| p.setCompleted(done);
+        if (ctx.observer) |p| p.setCompleted(ctx.done_before + done);
         if (ctx.plain_progress) {
             // ~1% steps (every tile on small worlds) keeps the line count
             // bounded no matter how many tiles a world has.
@@ -1502,8 +1790,12 @@ fn bakeTileFromRegions(
     const cz1 = (tz + 1) * tile_chunks;
 
     const t_r0 = std.Io.Timestamp.now(io, .awake);
-    const g = try world.assembleWindow(ta, io, regions, cx0, cz0, cx1, cz1, &res.stats, null);
+    var g = try world.assembleWindow(ta, io, regions, cx0, cz0, cx1, cz1, &res.stats, null);
     res.read_ms = t_r0.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
+    // The nether's lid comes off before anything else touches the grid, so the
+    // roof is never lit, meshed, or colour-mapped — the cut saves work rather
+    // than costing it (see dimension.Profile.ceiling_cut).
+    if (sh.dim.ceiling_cut) |cut| grid.trimTop(&g, cut);
     if (g.ids.len == 0) return;
 
     // Remap this grid's interned biome ids onto the world-level table so every
@@ -1551,7 +1843,7 @@ fn bakeTileFromRegions(
     if (interior.x0 >= interior.x1 or interior.z0 >= interior.z1) return;
 
     const t_m0 = std.Io.Timestamp.now(io, .awake);
-    const built = try mesh.buildTextured(ta, g2, sh.resolver, &sh.builder, sh.maps, &sh.reg, sh.quality, sh.blend_biomes, interior, sh.cave_y, sh.mesh_threads, null);
+    const built = try mesh.buildTextured(ta, g2, sh.resolver, &sh.builder, sh.maps, &sh.reg, sh.quality, sh.blend_biomes, interior, sh.caveMode(), sh.mesh_threads, null);
     res.light_ms = built.light_ms;
     res.mesh_ms = t_m0.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() - built.light_ms;
     if (built.solid.vertex_count == 0 and built.fluid.vertex_count == 0) return;
@@ -1565,7 +1857,7 @@ fn bakeTileFromRegions(
     // world tile count.
     if (keep_cmap) {
         const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
-        const cmap = try lowres.buildColorMap(ta, g2, interior, &sh.surf_colors, @intCast(bx0), @intCast(bz0), @intCast(tile_blocks));
+        const cmap = try lowres.buildColorMap(ta, g2, interior, &sh.surf_colors, @intCast(bx0), @intCast(bz0), @intCast(tile_blocks), sh.shading());
         try writeColorMapCache(io, ta, sh.lod_cache_dir.?, 0, tx, tz, cmap);
     }
 
@@ -1767,6 +2059,9 @@ fn buildLowresPyramid(
 }
 
 const ManifestInput = struct {
+    /// Which dimension this manifest describes, and how the viewer should light
+    /// and fog it (see the `dimension` and `atmosphere` keys).
+    dim: dimension.Profile = dimension.overworld,
     tile_chunks: i32,
     spawn: ?[3]i32,
     /// Biome display names, id-indexed (index 0 = the "" no-data sentinel).
@@ -1906,6 +2201,26 @@ fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     try out.print(a, "{{\n  \"format\": 6,\n  \"tileChunks\": {d},\n  \"tileBlocks\": {d},\n  \"maxSectionVerts\": {d},\n  \"textures\": \"terrain.vtexarr\",\n  \"textureLayers\": {d},\n", .{
         m.tile_chunks, m.tile_chunks * 16, m.max_section_verts, m.texture_layers,
     });
+    // Which dimension this is, and the look that makes it read as that
+    // dimension: the viewer takes its sky, fog and light floor from here, so a
+    // nether map arrives crimson and dim without the page configuring anything.
+    try out.appendSlice(a, "  \"dimension\": { \"id\": ");
+    try appendJsonString(a, &out, m.dim.id);
+    try out.appendSlice(a, ", \"slug\": ");
+    try appendJsonString(a, &out, if (m.dim.slug.len == 0) "overworld" else m.dim.slug);
+    try out.appendSlice(a, ", \"label\": ");
+    try appendJsonString(a, &out, m.dim.label);
+    try out.print(a, ", \"kind\": \"{s}\" }},\n", .{@tagName(m.dim.kind)});
+    try out.print(
+        a,
+        "  \"atmosphere\": {{ \"skyTop\": [{d}, {d}, {d}], \"skyHorizon\": [{d}, {d}, {d}], \"fog\": [{d}, {d}, {d}], \"ambient\": {d:.3}, \"daylight\": {d:.3} }},\n",
+        .{
+            m.dim.sky_top[0],     m.dim.sky_top[1],     m.dim.sky_top[2],
+            m.dim.sky_horizon[0], m.dim.sky_horizon[1], m.dim.sky_horizon[2],
+            m.dim.fog[0],         m.dim.fog[1],         m.dim.fog[2],
+            m.dim.ambient,        m.dim.daylight,
+        },
+    );
     if (m.rendering) try out.appendSlice(a, "  \"rendering\": true,\n");
     if (m.dynamic) try out.appendSlice(a, "  \"dynamic\": true,\n");
     if (m.progress) |p| try out.print(a, "  \"progress\": {{ \"done\": {d}, \"total\": {d} }},\n", .{ p[0], p[1] });
@@ -1949,6 +2264,36 @@ fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     return out.toOwnedSlice(a);
 }
 
+/// Serialize `world.json` — the dimension index for the viewer's switcher.
+///
+/// Each entry points at a *self-contained* manifest (its own tiles, LOD
+/// pyramid and texture atlas), so nothing here is load-bearing: a viewer handed
+/// `the_nether/manifest.json` directly still works, and an old viewer that only
+/// knows about `manifest.json` keeps rendering the overworld at the root.
+fn buildWorldIndex(a: std.mem.Allocator, dims: []const DimSummary) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "{\n  \"format\": 1,\n  \"dimensions\": [\n");
+    for (dims, 0..) |d, i| {
+        try out.appendSlice(a, "    { \"id\": ");
+        try appendJsonString(a, &out, d.profile.id);
+        try out.appendSlice(a, ", \"slug\": ");
+        try appendJsonString(a, &out, if (d.profile.slug.len == 0) "overworld" else d.profile.slug);
+        try out.appendSlice(a, ", \"label\": ");
+        try appendJsonString(a, &out, d.profile.label);
+        try out.print(a, ", \"kind\": \"{s}\", \"manifest\": ", .{@tagName(d.profile.kind)});
+        const manifest_path = if (d.profile.slug.len == 0)
+            "manifest.json"
+        else
+            try std.fmt.allocPrint(a, "{s}/manifest.json", .{d.profile.slug});
+        try appendJsonString(a, &out, manifest_path);
+        try out.print(a, ", \"tiles\": {d}, \"bytes\": {d}", .{ d.tiles, d.bytes });
+        if (d.spawn) |s| try out.print(a, ", \"spawn\": {{ \"x\": {d}, \"y\": {d}, \"z\": {d} }}", .{ s[0], s[1], s[2] });
+        try out.print(a, " }}{s}\n", .{if (i + 1 < dims.len) "," else ""});
+    }
+    try out.appendSlice(a, "  ]\n}\n");
+    return out.toOwnedSlice(a);
+}
+
 fn appendJsonString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
     try out.append(a, '"');
     for (s) |ch| switch (ch) {
@@ -1966,13 +2311,66 @@ fn appendJsonString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8
     try out.append(a, '"');
 }
 
-test "parseCaveY: full/off disable culling, a number sets the horizon" {
-    try std.testing.expectEqual(@as(?i32, 55), try parseCaveY(&.{}));
-    try std.testing.expectEqual(@as(?i32, null), try parseCaveY(&.{ "--caves", "full" }));
-    try std.testing.expectEqual(@as(?i32, null), try parseCaveY(&.{ "--caves", "off" }));
-    try std.testing.expectEqual(@as(?i32, 40), try parseCaveY(&.{ "--caves", "40" }));
+test "the cave horizon follows --caves, then the dimension's own default" {
+    // No flag: each dimension decides. The overworld culls its caves; the
+    // nether culls by reachability instead; the end keeps every face so island
+    // undersides survive.
+    try std.testing.expectEqual(@as(?i32, 55), caveHorizonFor(dimension.overworld, try parseCaveY(&.{})));
+    try std.testing.expectEqual(@as(?i32, null), caveHorizonFor(dimension.nether, try parseCaveY(&.{})));
+    try std.testing.expectEqual(@as(?i32, null), caveHorizonFor(dimension.end, try parseCaveY(&.{})));
+
+    // `full`/`off` keep everything, a number sets the horizon.
+    try std.testing.expectEqual(@as(?i32, null), caveHorizonFor(dimension.overworld, try parseCaveY(&.{ "--caves", "full" })));
+    try std.testing.expectEqual(@as(?i32, null), caveHorizonFor(dimension.overworld, try parseCaveY(&.{ "--caves", "off" })));
+    try std.testing.expectEqual(@as(?i32, 40), caveHorizonFor(dimension.overworld, try parseCaveY(&.{ "--caves", "40" })));
+    // A reachability-culled dimension ignores the flag either way.
+    try std.testing.expectEqual(@as(?i32, null), caveHorizonFor(dimension.nether, try parseCaveY(&.{ "--caves", "40" })));
+    // So does the end: a horizon there would cut the islands, not caves. This
+    // is the desktop app's default path — it always passes an explicit depth.
+    try std.testing.expectEqual(@as(?i32, null), caveHorizonFor(dimension.end, try parseCaveY(&.{ "--caves", "55" })));
     // The reject path (`--caves deep`) prints its complaint to stderr, which
     // `zig build test` treats as failure — covered by manual CLI use instead.
+}
+
+test "buildManifest describes the dimension and its atmosphere" {
+    const a = std.testing.allocator;
+    const json = try buildManifest(a, .{
+        .dim = dimension.nether,
+        .tile_chunks = 8,
+        .spawn = null,
+        .biomes = &.{""},
+        .tiles = &.{.{ .tx = 0, .tz = 0, .bytes = 1 }},
+    });
+    defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\": \"minecraft:the_nether\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"slug\": \"the_nether\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"kind\": \"nether\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"atmosphere\"") != null);
+    // The overworld still names itself, so a viewer can label it without
+    // special-casing the render root.
+    const ow = try buildManifest(a, .{
+        .tile_chunks = 8,
+        .spawn = null,
+        .biomes = &.{""},
+        .tiles = &.{.{ .tx = 0, .tz = 0, .bytes = 1 }},
+    });
+    defer a.free(ow);
+    try std.testing.expect(std.mem.indexOf(u8, ow, "\"slug\": \"overworld\"") != null);
+}
+
+test "buildWorldIndex points at each dimension's own manifest" {
+    // Arena-allocated like the render run it serializes from (slug paths are
+    // interned into the same arena as the JSON).
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    const json = try buildWorldIndex(a, &.{
+        .{ .profile = dimension.overworld, .tiles = 4, .bytes = 100, .spawn = .{ 1, 2, 3 } },
+        .{ .profile = dimension.nether, .tiles = 2, .bytes = 50, .spawn = null },
+    });
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"manifest\": \"manifest.json\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"manifest\": \"the_nether/manifest.json\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"spawn\": { \"x\": 1, \"y\": 2, \"z\": 3 }") != null);
 }
 
 test "buildManifest carries caves + yRange for the depth slider" {
@@ -2966,6 +3364,7 @@ fn liveManifest(self: *LiveServer, arena: std.mem.Allocator) ![]const u8 {
     self.sh.world_mutex.unlock(io);
 
     return buildManifest(arena, .{
+        .dim = self.sh.dim,
         .tile_chunks = self.sh.tile_chunks,
         .spawn = self.spawn,
         .biomes = biomes,
@@ -3035,7 +3434,11 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     var prebake: bool = server_mode;
     const quality = try parseLightQuality(args);
     const blend_biomes = try parseBiomeBlend(args);
-    const cave_y = try parseCaveY(args);
+    const requested_caves = try parseCaveY(args);
+    const ceiling = try parseCeiling(args);
+    // These stream one dimension per session (the manifest and tile paths are
+    // per-world); `--dimension` picks which, defaulting to the overworld.
+    const dimension_spec = parseDimensionArg(args);
     const requested_threads = try parseThreads(args);
     const memory_budget = if (server_mode)
         serverBakeMemoryBudget(try parseMemoryMiB(args))
@@ -3090,7 +3493,9 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
                 prebake = false;
             } else return badValue("--prebake", v, "on|off");
         } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
-            std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "--memory"))
+            std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads") or
+            std.mem.eql(u8, arg, "--memory") or std.mem.eql(u8, arg, "--ceiling") or
+            std.mem.eql(u8, arg, "--dimension") or std.mem.eql(u8, arg, "--dimensions"))
         {
             argi += 1; // value parsed by the dedicated scanners above
         } else if (std.mem.startsWith(u8, arg, "-")) {
@@ -3127,11 +3532,17 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         }
     }
 
-    const wl = try resolveWorld(init, a, save, assets_opt);
+    const wl = try resolveWorld(init, a, save, assets_opt, dimension_spec);
     if (wl.bounds.count == 0) {
         std.debug.print("no populated chunks found.\n", .{});
         return;
     }
+    var dim = wl.dim;
+    if (ceiling) |override| dim.ceiling_cut = switch (override) {
+        .keep => null,
+        .at => |y| y,
+    };
+    const cave_y = caveHorizonFor(dim, requested_caves);
     const tile_keys = try enumerateTilesSpawnOutward(a, wl.populated, radius, wl.centre_cx, wl.centre_cz, tile_chunks);
 
     std.debug.print("regions: {d} files · {d} populated chunks · {d} tiles of {d}×{d} chunks — baked on demand\n", .{
@@ -3148,6 +3559,7 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     });
 
     const sh = try setupShared(init.io, a, wl.assets, wl.loaded, .{
+        .dim = dim,
         .tile_chunks = tile_chunks,
         .out_dir = out_dir,
         .quality = quality,

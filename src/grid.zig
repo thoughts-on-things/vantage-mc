@@ -406,6 +406,32 @@ pub fn buildGrid(arena: std.mem.Allocator, loaded: []const chunk.Chunk, stats: *
     return grid;
 }
 
+/// Drop everything at or above world Y `cut` — the nether's bedrock roof and
+/// the sealed crust beneath it, which otherwise render as a lid over the whole
+/// dimension (see `dimension.Profile.ceiling_cut`).
+///
+/// This is a pure truncation, not a rewrite: the grid is indexed
+/// `(y*sz + z)*sx + x`, so Y is the outermost axis and every slab above the cut
+/// is a contiguous tail of each array. Cutting before the light pass means the
+/// removed volume is never lit, meshed, or colour-mapped, and the columns below
+/// see open sky at the cut plane — the "roof taken off" view, for less work
+/// than rendering the lid would have cost.
+pub fn trimTop(g: *Grid, cut: i32) void {
+    if (g.sy == 0) return;
+    const rel: i64 = @as(i64, cut) - g.min_y;
+    if (rel >= @as(i64, @intCast(g.sy))) return; // the cut is above this grid
+    const new_sy: usize = if (rel <= 0) 0 else @intCast(rel);
+    const layer = g.sx * g.sz;
+    g.ids = g.ids[0 .. new_sy * layer];
+    if (g.light.len > 0) g.light = g.light[0 .. new_sy * layer];
+    g.sy = new_sy;
+    // Biome cells are 4 blocks tall: keep the cell that contains the last kept
+    // block row, so `biomeAt` still resolves for every remaining block.
+    const new_bsy = @min(g.bsy, (new_sy + BIOME_STEP - 1) / BIOME_STEP);
+    if (g.biome_ids.len > 0) g.biome_ids = g.biome_ids[0 .. new_bsy * g.bsx * g.bsz];
+    g.bsy = new_bsy;
+}
+
 pub fn decodeChunk(arena: std.mem.Allocator, reg: region.Region, cx: u5, cz: u5) !?chunk.Chunk {
     const raw = (try reg.rawChunk(cx, cz)) orelse return null;
     const nbt_bytes = try region.decompress(arena, raw);
@@ -448,6 +474,38 @@ test "all-air chunks build an empty grid" {
     var chunks = [_]chunk.Chunk{.{ .x = 0, .z = 0, .sections = &sections, .data_version = 3465 }};
     const g = try buildGrid(a, &chunks, &stats);
     try std.testing.expectEqual(@as(usize, 0), g.ids.len);
+}
+
+test "trimTop cuts the ceiling off a grid, blocks and biomes together" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    var stats: Stats = .{};
+    var names = [_][]const u8{"minecraft:netherrack"};
+    var no_states = [_][]const u8{""};
+    var biome_names = [_][]const u8{"minecraft:nether_wastes"};
+    var sections = [_]chunk.Section{
+        .{ .y = 0, .names = &names, .states = &no_states, .indices = &.{}, .biome_names = &biome_names },
+        .{ .y = 1, .names = &names, .states = &no_states, .indices = &.{}, .biome_names = &biome_names },
+        .{ .y = 2, .names = &names, .states = &no_states, .indices = &.{}, .biome_names = &biome_names },
+    };
+    var chunks = [_]chunk.Chunk{.{ .x = 0, .z = 0, .sections = &sections, .data_version = 3465 }};
+    var g = try buildGrid(a, &chunks, &stats);
+    try std.testing.expectEqual(@as(usize, 48), g.sy);
+
+    trimTop(&g, 20);
+    try std.testing.expectEqual(@as(usize, 20), g.sy);
+    try std.testing.expectEqual(@as(usize, 20 * 16 * 16), g.ids.len);
+    // The block below the cut survives; the cut plane and above read as air.
+    try std.testing.expectEqual(@as(u16, 1), g.at(0, 19, 0));
+    try std.testing.expectEqual(AIR, g.at(0, 20, 0));
+    // Biomes stay resolvable for every remaining block row (20 rows = 5 cells).
+    try std.testing.expectEqual(@as(usize, 5), g.bsy);
+    try std.testing.expect(g.biomeAt(0, 19, 0) != 0);
+
+    // A cut above the grid leaves it untouched.
+    trimTop(&g, 999);
+    try std.testing.expectEqual(@as(usize, 20), g.sy);
 }
 
 test "empty grid reads as air everywhere" {

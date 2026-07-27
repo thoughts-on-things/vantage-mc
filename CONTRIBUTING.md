@@ -57,6 +57,25 @@ To render something you need assets extracted from a Minecraft client jar
 (`just extract <client.jar>`, any 1.18+ version) and a world save. See the
 [README](./README.md#quick-start).
 
+### A world with every dimension
+
+Most saves lying around are overworld-only: the nether and the end have no
+region files until a player actually goes there, so there is usually nothing to
+develop dimension rendering against. This writes a synthetic one — real Anvil
+region files, no Mojang world data:
+
+```sh
+node scripts/make-fixture-world.mjs --out .vantage-dev/fixture --chunks 12
+zig-out/bin/vantage render .vantage-dev/fixture --out web/public
+```
+
+The nether has a bedrock roof and floor, 3D-noise caverns, a lava sea, ceiling
+glowstone, biome patches and a nether-brick bridge; the end has a lens-shaped
+main island with obsidian spires, outer islands and chorus plants over the
+void. It is deterministic (same flags, same bytes), so it is a fair thing to
+measure against. `--chunks 32` gives a bigger one that exercises the LOD
+pyramid and is a reasonable performance test.
+
 ### Web package
 
 ```sh

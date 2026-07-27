@@ -3,6 +3,7 @@ import { ArrowLeft, Camera, FolderOpen, Keyboard, LoaderCircle, X } from 'lucide
 import {
   BiomeLayer,
   DepthSlider,
+  DimensionPicker,
   LightPanel,
   MapNav,
   Reticle,
@@ -33,13 +34,15 @@ export default function ViewerScreen({ target, settings, system, onThumbnail, on
   onThumbnail: (dataUrl: string) => void;
   onBack: () => void;
 }) {
-  const { world, manifestUrl, captureThumbnail } = target;
+  const { world, manifestUrl, worldUrl, captureThumbnail } = target;
   const profile = useMemo(() => selectRenderProfile(settings.performanceMode, system.logicalCores), [settings.performanceMode, system.logicalCores]);
 
   return (
     <div className="viewer-screen">
       <VantageViewer
-        world={manifestUrl}
+        // The dimension index when the render has one (the nether and the end
+        // travel with it); older renders open straight from their manifest.
+        world={worldUrl ?? manifestUrl}
         view="orbit"
         urlState={false}
         antialias
@@ -53,7 +56,9 @@ export default function ViewerScreen({ target, settings, system, onThumbnail, on
         {/* The chrome lives inside the viewer so it can read live engine state
             and travel with the root into fullscreen. Everything the library's
             own components own — the bottom nav, the side panels — is left to
-            them; the desktop only occupies the top-left corner. */}
+            them; the desktop only occupies the top-left corner, and the
+            dimension switch rides in the toolbar rather than floating over the
+            map, where it would collide with it. */}
         <ViewerChrome world={world} profile={profile} onBack={onBack} />
         {captureThumbnail && (
           <ThumbnailCapture worldPath={world.path} hasThumbnail={Boolean(world.thumbnailUrl)} onThumbnail={onThumbnail} />
@@ -74,7 +79,7 @@ function ViewerChrome({ world, profile, onBack }: {
   profile: RenderProfile;
   onBack: () => void;
 }) {
-  const { viewer, status, info } = useVantage();
+  const { viewer, status, info, dimensions } = useVantage();
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   const [shortcuts, setShortcuts] = useState(false);
@@ -143,6 +148,14 @@ function ViewerChrome({ world, profile, onBack }: {
           <strong>{world.name}</strong>
           <small>{world.source === 'render' ? 'saved local render' : `${sourceLabel(world.source)} · local render`}</small>
         </div>
+        {/* Renders that carry the nether and the end switch from here; a
+            single-dimension render renders nothing, rule included. */}
+        {dimensions.length > 1 && (
+          <>
+            <span className="toolbar-rule" />
+            <DimensionPicker className="toolbar-dims" />
+          </>
+        )}
         <span className="toolbar-rule toolbar-status-rule" />
         <div className="toolbar-status" aria-live="polite">
           <span className={ready ? 'live-dot' : 'live-dot pending'} />

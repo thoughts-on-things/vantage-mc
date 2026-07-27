@@ -15,13 +15,30 @@ export {
   type SurfaceMap,
 } from './tile.js';
 export { parseTextureArray, type DecodedTextureArray, type TextureAnimation } from './texture.js';
-export { parseManifest, tileKey, type WorldManifest, type ManifestTile, type LowresLevel } from './manifest.js';
+export {
+  parseManifest,
+  tileKey,
+  type WorldManifest,
+  type ManifestTile,
+  type LowresLevel,
+  type ManifestDimension,
+  type ManifestAtmosphere,
+} from './manifest.js';
+export {
+  parseWorldIndex,
+  isWorldIndex,
+  pickDimension,
+  resolveManifestPath,
+  type WorldIndex,
+  type WorldDimension,
+} from './world.js';
 export {
   worldFromUrl,
   worldFromHttp,
   worldFromVantageServer,
   worldFromDirectory,
   worldFromFiles,
+  worldFromIndexEntry,
   type WorldSource,
   type WorldFetch,
   type WorldConditionalFetch,

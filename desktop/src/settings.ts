@@ -5,6 +5,8 @@ export interface DesktopSettings {
   fullCaves: boolean;
   smoothLighting: boolean;
   biomeBlend: boolean;
+  /** Render the nether and the end alongside the overworld. */
+  allDimensions: boolean;
 }
 
 export const DEFAULT_SETTINGS: DesktopSettings = {
@@ -12,6 +14,7 @@ export const DEFAULT_SETTINGS: DesktopSettings = {
   fullCaves: true,
   smoothLighting: true,
   biomeBlend: true,
+  allDimensions: true,
 };
 
 const STORAGE_KEY = 'vantage.desktop.settings.v1';
@@ -25,6 +28,7 @@ export function loadSettings(): DesktopSettings {
       fullCaves: typeof saved.fullCaves === 'boolean' ? saved.fullCaves : DEFAULT_SETTINGS.fullCaves,
       smoothLighting: typeof saved.smoothLighting === 'boolean' ? saved.smoothLighting : DEFAULT_SETTINGS.smoothLighting,
       biomeBlend: typeof saved.biomeBlend === 'boolean' ? saved.biomeBlend : DEFAULT_SETTINGS.biomeBlend,
+      allDimensions: typeof saved.allDimensions === 'boolean' ? saved.allDimensions : DEFAULT_SETTINGS.allDimensions,
     };
   } catch {
     return DEFAULT_SETTINGS;

@@ -67,8 +67,16 @@ struct DesktopSettings {
     full_caves: bool,
     smooth_lighting: bool,
     biome_blend: bool,
+    /// Render the nether and the end too. Default on: a save is all three
+    /// dimensions, and skipping them is the exception.
+    #[serde(default = "default_true")]
+    all_dimensions: bool,
     #[serde(default)]
     thread_count: Option<usize>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl From<&DesktopSettings> for CacheSignature {
@@ -77,6 +85,7 @@ impl From<&DesktopSettings> for CacheSignature {
             full_caves: settings.full_caves,
             smooth_lighting: settings.smooth_lighting,
             biome_blend: settings.biome_blend,
+            all_dimensions: settings.all_dimensions,
         }
     }
 }
@@ -97,6 +106,8 @@ impl From<&DesktopSettings> for CacheSignature {
 enum CacheOpen {
     Ready {
         manifest_url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        world_url: Option<String>,
         output_path: String,
     },
     Stale {
@@ -108,6 +119,7 @@ impl From<RenderReady> for CacheOpen {
     fn from(ready: RenderReady) -> Self {
         Self::Ready {
             manifest_url: ready.manifest_url,
+            world_url: ready.world_url,
             output_path: ready.output_path,
         }
     }
@@ -384,6 +396,10 @@ fn render_args(world: &str, output: &Path, settings: &DesktopSettings) -> Vec<St
         "--biome-blend".to_string(),
         if settings.biome_blend { "on" } else { "off" }.to_string(),
     ];
+    // Every dimension the save has is the default; the setting narrows it.
+    if !settings.all_dimensions {
+        args.extend(["--dimension".to_string(), "overworld".to_string()]);
+    }
     if let Some(threads) = settings.thread_count.filter(|threads| *threads > 0) {
         args.extend(["--threads".to_string(), threads.to_string()]);
     }
@@ -689,6 +705,7 @@ mod tests {
             full_caves: false,
             smooth_lighting: true,
             biome_blend: false,
+            all_dimensions: true,
             thread_count: Some(6),
         };
         let args = render_args("C:\\saves\\World", Path::new("C:\\out"), &settings);
@@ -717,13 +734,25 @@ mod tests {
     fn cache_open_serializes_the_keys_the_frontend_reads() {
         let ready = serde_json::to_value(CacheOpen::from(RenderReady {
             manifest_url: "http://127.0.0.1:8000/manifest.json".into(),
+            world_url: Some("http://127.0.0.1:8000/world.json".into()),
             output_path: "C:\\renders\\abc".into(),
         }))
         .unwrap();
         assert_eq!(ready["status"], "ready");
         assert_eq!(ready["manifestUrl"], "http://127.0.0.1:8000/manifest.json");
+        assert_eq!(ready["worldUrl"], "http://127.0.0.1:8000/world.json");
         assert_eq!(ready["outputPath"], "C:\\renders\\abc");
         assert!(ready.get("manifest_url").is_none(), "{ready}");
+
+        // A render without dimensions omits the key entirely, so the frontend's
+        // `worldUrl ?? manifestUrl` falls back instead of fetching "undefined".
+        let single = serde_json::to_value(CacheOpen::from(RenderReady {
+            manifest_url: "http://127.0.0.1:8000/manifest.json".into(),
+            world_url: None,
+            output_path: "C:\\renders\\abc".into(),
+        }))
+        .unwrap();
+        assert!(single.get("worldUrl").is_none(), "{single}");
 
         let stale = serde_json::to_value(CacheOpen::Stale {
             reason: "settings changed".into(),

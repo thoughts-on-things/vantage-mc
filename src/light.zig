@@ -90,6 +90,88 @@ pub fn compute(arena: std.mem.Allocator, g: grid.Grid, occluder: []const bool, e
     for (g.light, sky, blk) |*out, s, b| out.* = (s << 4) | b;
 }
 
+/// Mark every cell reachable from *outside* this grid window through
+/// non-occluding cells — the visibility test for dimensions where sky light
+/// can't answer it.
+///
+/// The nether and the end have no sky light anywhere, so the overworld's "is
+/// this cell lit?" cave cull would either drop the whole dimension or keep
+/// every sealed pocket in it. Reachability is the honest question instead: a
+/// face is invisible exactly when the cell it looks into is walled off from
+/// everywhere a camera could be.
+///
+/// Seeding runs over all six faces of the window, not just the top. That makes
+/// the result conservative in the way tiling requires: a pocket is culled only
+/// when it is enclosed *within this window*, and anything enclosed within the
+/// window is genuinely enclosed in the world too — a passage to the rest of the
+/// world would have to cross the boundary, where it would have been seeded. So
+/// neighbouring tiles never disagree about a shared face.
+///
+/// The queue is exact-sized (each cell is enqueued at most once) so a big
+/// nether tile can't grow it through doubling reallocations inside the arena.
+pub fn computeOpen(arena: std.mem.Allocator, g: grid.Grid, occluder: []const bool) ![]bool {
+    const n = g.sx * g.sy * g.sz;
+    const open = try arena.alloc(bool, n);
+    @memset(open, false);
+    if (n == 0) return open;
+
+    const queue = try arena.alloc(u32, n);
+    var tail: usize = 0;
+
+    // Seed: every non-occluding cell on the window's shell.
+    var y: usize = 0;
+    while (y < g.sy) : (y += 1) {
+        const on_y_face = y == 0 or y == g.sy - 1;
+        var z: usize = 0;
+        while (z < g.sz) : (z += 1) {
+            const on_z_face = z == 0 or z == g.sz - 1;
+            var x: usize = 0;
+            while (x < g.sx) : (x += 1) {
+                if (!on_y_face and !on_z_face and x != 0 and x != g.sx - 1) {
+                    // Interior of the slab: jump straight to its far edge.
+                    x = g.sx - 2;
+                    continue;
+                }
+                const idx = g.index(x, y, z);
+                if (occluder[g.ids[idx]] or open[idx]) continue;
+                open[idx] = true;
+                queue[tail] = @intCast(idx);
+                tail += 1;
+            }
+        }
+    }
+
+    // Flood 6-connected through non-occluding cells.
+    var head: usize = 0;
+    while (head < tail) : (head += 1) {
+        const idx = queue[head];
+        const x = idx % g.sx;
+        const rem = idx / g.sx;
+        const zc = rem % g.sz;
+        const yc = rem / g.sz;
+        inline for (.{
+            .{ -1, 0, 0 }, .{ 1, 0, 0 },
+            .{ 0, -1, 0 }, .{ 0, 1, 0 },
+            .{ 0, 0, -1 }, .{ 0, 0, 1 },
+        }) |d| {
+            const nx = @as(isize, @intCast(x)) + d[0];
+            const ny = @as(isize, @intCast(yc)) + d[1];
+            const nz = @as(isize, @intCast(zc)) + d[2];
+            if (nx >= 0 and ny >= 0 and nz >= 0 and
+                nx < g.sx and ny < g.sy and nz < g.sz)
+            {
+                const nidx = g.index(@intCast(nx), @intCast(ny), @intCast(nz));
+                if (!open[nidx] and !occluder[g.ids[nidx]]) {
+                    open[nidx] = true;
+                    queue[tail] = @intCast(nidx);
+                    tail += 1;
+                }
+            }
+        }
+    }
+    return open;
+}
+
 /// Enqueue the sky frontier: every open-to-sky cell (`sky == MAX`) that has at
 /// least one in-bounds neighbour which is *not* open (an occluder or a shaded
 /// cell below a roof). Those are the only cells that need to propagate light
@@ -278,6 +360,69 @@ test "block light radiates from an emitter and is blocked by walls" {
     try std.testing.expectEqual(@as(u8, 14), blkOf(g, 0));
     try std.testing.expectEqual(@as(u8, 13), blkOf(g, 1));
     try std.testing.expectEqual(@as(u8, 10), blkOf(g, 4));
+}
+
+test "computeOpen keeps reachable air and culls a sealed pocket" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+
+    // 5×5×5 of stone with two single-cell voids: one at the window edge
+    // (reachable from outside), one fully enclosed in the middle.
+    const s: usize = 5;
+    var ids = [_]u16{1} ** (s * s * s);
+    const names = [_][]const u8{ "", "minecraft:netherrack" };
+    const g: grid.Grid = .{
+        .sx = s,
+        .sy = s,
+        .sz = s,
+        .min_x = 0,
+        .min_y = 0,
+        .min_z = 0,
+        .ids = &ids,
+        .names = @constCast(&names),
+    };
+    ids[g.index(0, 2, 2)] = 0; // opens onto the -x face
+    ids[g.index(2, 2, 2)] = 0; // sealed on all six sides
+
+    const occluder = [_]bool{ false, true };
+    const open = try computeOpen(a, g, &occluder);
+    try std.testing.expect(open[g.index(0, 2, 2)]);
+    try std.testing.expect(!open[g.index(2, 2, 2)]);
+    try std.testing.expect(!open[g.index(1, 2, 2)]); // solid rock is never open
+
+    // Punch a tunnel from the sealed pocket to the boundary: now it is visible.
+    ids[g.index(1, 2, 2)] = 0;
+    const open2 = try computeOpen(a, g, &occluder);
+    try std.testing.expect(open2[g.index(2, 2, 2)]);
+}
+
+test "computeOpen floods a cavern far deeper than light reaches" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+
+    // A 40-block-deep shaft: sky light would die out after 15 steps, which is
+    // why the nether needs reachability rather than brightness.
+    const sy: usize = 40;
+    var ids = [_]u16{1} ** (3 * sy * 3);
+    const names = [_][]const u8{ "", "minecraft:netherrack" };
+    const g: grid.Grid = .{
+        .sx = 3,
+        .sy = sy,
+        .sz = 3,
+        .min_x = 0,
+        .min_y = 0,
+        .min_z = 0,
+        .ids = &ids,
+        .names = @constCast(&names),
+    };
+    for (0..sy) |y| ids[g.index(1, y, 1)] = 0;
+
+    const occluder = [_]bool{ false, true };
+    const open = try computeOpen(a, g, &occluder);
+    try std.testing.expect(open[g.index(1, 0, 1)]);
+    try std.testing.expect(open[g.index(1, sy - 1, 1)]);
 }
 
 test "water attenuates the sky-light column so the seabed darkens with depth" {

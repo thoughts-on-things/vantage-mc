@@ -15,6 +15,7 @@ import {
   type TileSource,
   type TileStats,
   type ViewMode,
+  type WorldDimension,
   type WorldSource,
 } from '../three/index.js';
 import { VantageContext, type VantageContextValue, type VantageStatus } from './context.js';
@@ -74,6 +75,8 @@ interface LiveState {
   biomeLayerEnabled: boolean;
   highlightedBiome: number | null;
   hoveredBiome: number | null;
+  dimensions: WorldDimension[];
+  dimension: WorldDimension | null;
 }
 
 const INITIAL: LiveState = {
@@ -84,6 +87,8 @@ const INITIAL: LiveState = {
   biomeLayerEnabled: false,
   highlightedBiome: null,
   hoveredBiome: null,
+  dimensions: [],
+  dimension: null,
 };
 
 export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(function VantageViewer(props, ref) {
@@ -155,6 +160,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
         });
       }),
       v.on('biomes', (biomes) => setS((p) => ({ ...p, biomes }))),
+      v.on('dimension', ({ dimensions, current }) => setS((p) => ({ ...p, dimensions, dimension: current }))),
       v.on('hover', (id) => setS((p) => (p.hoveredBiome === id ? p : { ...p, hoveredBiome: id }))),
       v.on('biomelayer', ({ enabled, highlight }) =>
         setS((p) => ({ ...p, biomeLayerEnabled: enabled, highlightedBiome: highlight })),
@@ -214,6 +220,8 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
       biomeLayerEnabled: s.biomeLayerEnabled,
       highlightedBiome: s.highlightedBiome,
       hoveredBiome: s.hoveredBiome,
+      dimensions: s.dimensions,
+      dimension: s.dimension,
     }),
     [engine, s],
   );

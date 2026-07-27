@@ -33,6 +33,11 @@ pub struct CacheSignature {
     pub full_caves: bool,
     pub smooth_lighting: bool,
     pub biome_blend: bool,
+    /// Whether the nether and the end were rendered alongside the overworld.
+    /// Absent in records written before dimension support, which covered the
+    /// overworld only — exactly what `false` means.
+    #[serde(default)]
+    pub all_dimensions: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -296,7 +301,8 @@ mod tests {
             CacheSignature {
                 full_caves: true,
                 smooth_lighting: false,
-                biome_blend: true
+                biome_blend: true,
+                all_dimensions: false,
             }
         );
         assert!(record.world_path.is_none());
@@ -311,6 +317,7 @@ mod tests {
                 full_caves: true,
                 smooth_lighting: false,
                 biome_blend: true,
+                all_dimensions: false,
             },
             world_path: None,
             world_name: None,
@@ -337,6 +344,7 @@ mod tests {
             full_caves: false,
             smooth_lighting: true,
             biome_blend: false,
+            all_dimensions: true,
         };
         RenderRecord::new(signature, "C:\\saves\\World", "World")
             .write(&dir)
@@ -366,6 +374,7 @@ mod tests {
                 full_caves: true,
                 smooth_lighting: true,
                 biome_blend: true,
+                all_dimensions: true,
             },
             "C:\\saves\\Ready",
             "Ready",

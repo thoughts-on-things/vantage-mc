@@ -31,6 +31,8 @@ export const loadViewer = () => import('../ViewerScreen.js');
 export interface ViewerTarget {
   world: WorldInfo;
   manifestUrl: string;
+  /** The dimension index, when the render has one (see RenderReady). */
+  worldUrl?: string;
   /** False for renders opened without their save, which have no cache to write. */
   captureThumbnail: boolean;
 }
@@ -205,12 +207,13 @@ export function useLibrary(settings: DesktopSettings): LibraryController {
           fullCaves: settingsRef.current.fullCaves,
           smoothLighting: settingsRef.current.smoothLighting,
           biomeBlend: settingsRef.current.biomeBlend,
+          allDimensions: settingsRef.current.allDimensions,
         },
       });
       // The render invalidated the old preview above. Pass the same state to
       // the viewer so ThumbnailCapture cannot mistake the stale URL on the
       // caller's snapshot for a preview of the newly rendered map.
-      setViewer({ world: { ...target, thumbnailUrl: null }, manifestUrl: ready.manifestUrl, captureThumbnail: true });
+      setViewer({ world: { ...target, thumbnailUrl: null }, manifestUrl: ready.manifestUrl, worldUrl: ready.worldUrl, captureThumbnail: true });
     } catch (reason) {
       setProgress(null);
       if (!cancelledRender.current) setError(userFacingError(reason));
@@ -229,7 +232,7 @@ export function useLibrary(settings: DesktopSettings): LibraryController {
     try {
       const [outcome] = await Promise.all([openCachedWorld(target.path, settingsRef.current), loadViewer()]);
       if (outcome.status === 'ready') {
-        setViewer({ world: target, manifestUrl: outcome.manifestUrl, captureThumbnail: true });
+        setViewer({ world: target, manifestUrl: outcome.manifestUrl, worldUrl: outcome.worldUrl, captureThumbnail: true });
         return;
       }
       // The cached map cannot answer for the current settings; rebuild it while
@@ -271,7 +274,7 @@ export function useLibrary(settings: DesktopSettings): LibraryController {
       updateAction(target.path, 'opening');
       const [outcome] = await Promise.all([openCachedWorld(target.path, settingsRef.current), loadViewer()]);
       if (outcome.status === 'ready') {
-        setViewer({ world: { ...target, thumbnailUrl: null }, manifestUrl: outcome.manifestUrl, captureThumbnail: true });
+        setViewer({ world: { ...target, thumbnailUrl: null }, manifestUrl: outcome.manifestUrl, worldUrl: outcome.worldUrl, captureThumbnail: true });
         return;
       }
       await renderClaimedWorld(target);
@@ -307,7 +310,7 @@ export function useLibrary(settings: DesktopSettings): LibraryController {
     setError(null);
     try {
       const [ready] = await Promise.all([openRender(entry.id), loadViewer()]);
-      setViewer({ world: worldFromRender(entry), manifestUrl: ready.manifestUrl, captureThumbnail: false });
+      setViewer({ world: worldFromRender(entry), manifestUrl: ready.manifestUrl, worldUrl: ready.worldUrl, captureThumbnail: false });
     } catch (reason) {
       setError(userFacingError(reason));
     } finally {

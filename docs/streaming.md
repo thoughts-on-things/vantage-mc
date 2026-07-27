@@ -32,6 +32,18 @@ writes their parent, and deletes the previous level. The bulk retained heap
 therefore depends on tile size and admitted concurrency; only compact manifest
 and coordinate metadata continue to scale with world area.
 
+Dimensions bake one after another into one process, sharing the model resolver,
+texture atlas and biome tables but never their tile arenas — so a save's nether
+and end cost the same peak memory as its overworld, not three times it. Two
+dimension-specific passes bound their own work as well. The nether's roof cut
+truncates each tile's grid before the light flood runs, so the sealed crust is
+never lit, meshed or colour-mapped; and where sky light cannot answer "can this
+be seen?" (the nether, the end), one reachability flood over the tile window
+answers it instead — an exact-sized queue, four bytes per cell, seeded from the
+window's shell so neighbouring tiles always agree about a shared face. On a
+12×12-chunk nether it removed 36% of the vertices and 37% of the bytes against
+keeping every face.
+
 The live server applies the same bake semaphore. A keyed in-flight set also
 coalesces concurrent requests for the same tile: one request bakes while the
 others wait for the cached result. Under `--prebake` (the multiplayer server's

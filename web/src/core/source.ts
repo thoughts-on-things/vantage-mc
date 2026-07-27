@@ -167,6 +167,31 @@ export function worldFromVantageServer(endpoint: string, options: VantageServerO
   return worldFromHttp(manifest, options);
 }
 
+/**
+ * One dimension of a multi-dimension render, as its own world source.
+ *
+ * A render writes each dimension into its own sub-directory with a
+ * self-contained manifest, so switching dimensions is just re-rooting the paths
+ * — the same HTTP endpoint, directory handle or file list keeps serving them.
+ * `manifestPath` comes from `world.json` and is confined to the index's own
+ * directory by {@link parseWorldIndex}.
+ */
+export async function worldFromIndexEntry(source: WorldSource, manifestPath: string): Promise<WorldSource> {
+  const slash = manifestPath.lastIndexOf('/');
+  const prefix = slash < 0 ? '' : manifestPath.slice(0, slash + 1);
+  const bytes = await source.fetch(manifestPath);
+  const manifest: unknown = JSON.parse(new TextDecoder().decode(bytes));
+  const under = (path: string) => prefix + normalizePath(path);
+  return {
+    manifest,
+    label: prefix.length === 0 ? source.label : `${source.label}/${prefix.slice(0, -1)}`,
+    fetch: (path, signal) => source.fetch(under(path), signal),
+    ...(source.fetchConditional
+      ? { fetchConditional: (path, etag, signal) => source.fetchConditional!(under(path), etag, signal) }
+      : {}),
+  };
+}
+
 /** A world in a local directory picked with the File System Access API
  *  (`window.showDirectoryPicker()`, Chromium) — reads `manifest.json` from the
  *  directory root and resolves tile paths through subdirectory handles on

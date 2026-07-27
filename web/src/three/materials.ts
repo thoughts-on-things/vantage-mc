@@ -576,6 +576,21 @@ export function createLowresMaterial(terrain: THREE.ShaderMaterial): THREE.Shade
 }
 
 /**
+ * Repaint a sky dome built by {@link createSky} — how a dimension switch turns
+ * the overworld's blue gradient into the nether's crimson murk or the end's
+ * near-black void. Colours are linear-ish sRGB triples in 0..1.
+ */
+export function setSkyColors(
+  sky: THREE.Mesh,
+  top: readonly [number, number, number],
+  horizon: readonly [number, number, number],
+): void {
+  const u = (sky.material as THREE.ShaderMaterial).uniforms;
+  (u['uTop']!.value as THREE.Vector3).set(...(top as [number, number, number]));
+  (u['uHorizon']!.value as THREE.Vector3).set(...(horizon as [number, number, number]));
+}
+
+/**
  * A camera-locked gradient sky dome (depth-test off, drawn first) so the
  * background reads as sky from any zoom, with the horizon matching the fog.
  * Keep it centred on the camera each frame (`sky.position.copy(camera.position)`).

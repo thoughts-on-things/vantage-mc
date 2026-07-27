@@ -142,8 +142,12 @@ export const CSS = `
 .vtg-nav {
   position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
   display: flex; align-items: center; gap: 6px; padding: 6px;
+  /* On a phone the cluster is wider than the screen; it scrolls inside its own
+     glass rather than running off the edge. */
+  max-width: calc(100% - 32px); overflow-x: auto; scrollbar-width: none;
   animation: vtg-rise 0.4s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
+.vtg-nav::-webkit-scrollbar { display: none; }
 .vtg-navbtn {
   width: 30px; height: 30px; flex: none; display: grid; place-items: center;
   border-radius: 9px; border: 1px solid transparent; background: transparent;
@@ -156,7 +160,7 @@ export const CSS = `
 .vtg-navbtn-text { width: auto; min-width: 30px; padding: 0 8px; font: 700 11px var(--vtg-mono); letter-spacing: 0.03em; }
 .vtg-navbtn.vtg-on { background: var(--vtg-accent); border-color: var(--vtg-accent); color: #07101f; }
 .vtg-navbtn.vtg-on:hover { background: var(--vtg-accent); color: #07101f; }
-.vtg-nav-sep { width: 1px; align-self: stretch; margin: 4px 2px; background: var(--vtg-line); }
+.vtg-nav-sep { width: 1px; flex: none; align-self: stretch; margin: 4px 2px; background: var(--vtg-line); }
 
 .vtg-compass {
   position: relative; width: 34px; height: 34px; flex: none; border-radius: 50%;
@@ -171,7 +175,7 @@ export const CSS = `
 .vtg-compass .vtg-cn { fill: var(--vtg-dim); font: 700 6px var(--vtg-sans); }
 
 .vtg-coords {
-  display: flex; align-items: center; gap: 8px; padding: 0 10px 0 6px;
+  display: flex; align-items: center; gap: 8px; padding: 0 10px 0 6px; flex: none;
   font: 11px var(--vtg-mono); color: var(--vtg-muted); font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -234,6 +238,66 @@ export const CSS = `
 .vtg-depth-close svg { width: 13px; height: 13px; display: block; }
 @keyframes vtg-rise-y { from { opacity: 0; transform: translate(-8px, -50%); } to { opacity: 1; transform: translate(0, -50%); } }
 
+/* --- dimension picker ------------------------------------------------------ */
+.vtg-dims {
+  position: absolute; display: flex; align-items: center; gap: 3px; padding: 4px;
+  /* Many dimensions (a data-pack world) scroll rather than push the row past
+     the viewport edge; the bar keeps its own scrollbar out of the way. */
+  max-width: calc(100% - 32px); overflow-x: auto; scrollbar-width: none;
+  /* The centred variant carries its own translate, so it opts out of the
+     shared rise animation's transform rather than fighting it. */
+  animation: vtg-fade 0.4s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.vtg-dims::-webkit-scrollbar { display: none; }
+.vtg-dims-tc { top: 16px; left: 50%; transform: translateX(-50%); }
+.vtg-dims-tl { top: 16px; left: 16px; }
+.vtg-dims-tr { top: 16px; right: 16px; }
+.vtg-dims-bl { bottom: 16px; left: 16px; }
+.vtg-dims-br { bottom: 16px; right: 16px; }
+@keyframes vtg-fade { from { opacity: 0; } to { opacity: 1; } }
+.vtg-dim-btn {
+  /* Each dimension carries a restrained accent of its own — the glyph wears it
+     when idle, the whole pill when current. */
+  --vtg-k: var(--vtg-accent);
+  display: flex; align-items: center; gap: 7px; padding: 5px 11px; flex: none;
+  border-radius: 9px; border: 1px solid transparent; background: transparent;
+  font: 600 11px var(--vtg-sans); letter-spacing: 0.03em; color: var(--vtg-muted);
+  cursor: pointer; white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.vtg-dim-btn.vtg-k-nether { --vtg-k: #ff8b4a; }
+.vtg-dim-btn.vtg-k-end { --vtg-k: #b39bff; }
+.vtg-dim-btn.vtg-k-custom { --vtg-k: #6fd6bd; }
+.vtg-dim-btn:hover:not(:disabled) { background: rgba(132, 170, 230, 0.14); color: var(--vtg-text); border-color: var(--vtg-line); }
+.vtg-dim-btn:active:not(:disabled) { background: rgba(91, 155, 255, 0.26); }
+.vtg-dim-btn.vtg-on { background: var(--vtg-k); border-color: var(--vtg-k); color: #07101f; }
+.vtg-dim-btn.vtg-on:hover { background: var(--vtg-k); color: #07101f; }
+.vtg-dim-btn:disabled { opacity: 0.38; cursor: default; }
+.vtg-dim-btn:focus-visible { outline: 2px solid var(--vtg-accent); outline-offset: 1px; }
+.vtg-dim-btn.vtg-on:focus-visible { outline-color: var(--vtg-text); }
+/* Fixed slot so swapping glyph → spinner never resizes the pill. */
+.vtg-dim-ico { width: 15px; height: 15px; flex: none; display: grid; place-items: center; color: var(--vtg-k); }
+.vtg-dim-ico svg { width: 15px; height: 15px; display: block; }
+.vtg-dim-btn.vtg-on .vtg-dim-ico { color: inherit; }
+.vtg-dim-spin {
+  width: 11px; height: 11px; border-radius: 50%; border: 1.6px solid currentColor;
+  border-top-color: transparent; animation: vtg-spin 0.7s linear infinite;
+}
+@keyframes vtg-spin { to { transform: rotate(360deg); } }
+/* Tight viewports: only the current dimension keeps its name, the rest stay
+   glyphs — the row still reads, and it stops crowding the corner panels. */
+@media (max-width: 900px) {
+  .vtg-dim-btn { padding: 6px 8px; }
+  .vtg-dim-btn:not(.vtg-on) .vtg-dim-label { display: none; }
+}
+/* Phone width: both top corners are taken, so the row joins the bottom stack,
+   sitting just above the navigation cluster. */
+@media (max-width: 640px) {
+  .vtg-dims-tc, .vtg-dims-tl, .vtg-dims-tr, .vtg-dims-bl, .vtg-dims-br {
+    top: auto; bottom: 64px; left: 50%; right: auto; transform: translateX(-50%);
+  }
+}
+
 /* --- centre reticle (navigation reference) -------------------------------- */
 .vtg-reticle {
   position: absolute; left: 50%; top: 50%; width: 30px; height: 30px;
@@ -257,6 +321,26 @@ export const CSS = `
 @keyframes vtg-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .vtg-nav { animation-name: vtg-rise-x; }
 @keyframes vtg-rise-x { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+/* --- keyboard focus -------------------------------------------------------- */
+/* One ring for every control, drawn only for keyboard users. */
+.vtg-navbtn:focus-visible,
+.vtg-compass:focus-visible,
+.vtg-depth-close:focus-visible,
+.vtg-toggle:focus-visible,
+.vtg-seg button:focus-visible {
+  outline: 2px solid var(--vtg-accent); outline-offset: 1px;
+}
+.vtg-navbtn.vtg-on:focus-visible, .vtg-toggle.vtg-on:focus-visible { outline-color: var(--vtg-text); }
+
+/* --- reduced motion -------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .vtg-panel, .vtg-nav, .vtg-dims, .vtg-depth { animation: none; }
+  .vtg-slider input[type=range]::-webkit-slider-thumb:hover { transform: none; }
+  /* The spinner still has to read as "working", so it breathes instead of turns. */
+  .vtg-dim-spin { animation: vtg-pulse 1.4s ease-in-out infinite; }
+}
+@keyframes vtg-pulse { 50% { opacity: 0.3; } }
 `;
 
 /** Inject the component stylesheet once. No-op on the server or after the first call. */

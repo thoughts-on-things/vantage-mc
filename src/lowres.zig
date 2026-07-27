@@ -161,13 +161,26 @@ fn isFoliage(name: []const u8) bool {
     return false;
 }
 
-/// Minecraft's lightmap brightness curve (matches the viewer shader), with the
-/// same readability floor so lowres and hires shading agree.
-fn lightAmt(sky: f32) f32 {
-    const l = sky / 15.0;
-    const curve = l / (4.0 - 3.0 * l);
-    return 0.12 + 0.88 * curve;
-}
+/// The viewer's light defaults for this dimension, so a lowres cell and the
+/// hires block under it end up the same brightness. The overworld's daylight
+/// carries the map; in the nether and the end the ambient floor and block light
+/// do, and a sky-only curve would render those dimensions as black plates under
+/// a correctly-lit hires ring.
+pub const Shading = struct {
+    /// Brightness floor at zero light (the viewer's `uAmbient`).
+    ambient: f32 = 0.12,
+    /// How much baked sky light counts (the viewer's `uDay`).
+    daylight: f32 = 1.0,
+
+    /// Minecraft's lightmap brightness curve, matching the terrain shader's
+    /// `bakedLight`: the brighter of scaled sky and block light, eased, then
+    /// lifted off the ambient floor.
+    pub fn amount(self: Shading, sky: f32, block: f32) f32 {
+        const l = @max(sky * self.daylight, block) / 15.0;
+        const curve = l / (4.0 - 3.0 * l);
+        return self.ambient + (1.0 - self.ambient) * curve;
+    }
+};
 
 /// Build the level-0 color map for a tile: one cell per block column over the
 /// FULL tile footprint (`size`² blocks from world (`min_x`,`min_z`)), colored
@@ -183,6 +196,7 @@ pub fn buildColorMap(
     min_x: i32,
     min_z: i32,
     size: u32,
+    shade: Shading,
 ) !ColorMap {
     const n: usize = @as(usize, size) * size;
     const rgb = try arena.alloc(u8, 3 * n);
@@ -210,7 +224,9 @@ pub fn buildColorMap(
                 height[ci] = @intCast(g.min_y + @as(i32, @intCast(y)));
                 const name = g.nameOf(id);
                 const info = colors.reg.lookup(g.biomeNameOf(g.biomeAt(x, y, z)));
-                const sky: f32 = @floatFromInt(g.lightAt(@intCast(x), @as(isize, @intCast(y)) + 1, @intCast(z)) >> 4);
+                const packed_light = g.lightAt(@intCast(x), @as(isize, @intCast(y)) + 1, @intCast(z));
+                const sky: f32 = @floatFromInt(packed_light >> 4);
+                const block: f32 = @floatFromInt(packed_light & 0x0F);
                 var c: [3]f32 = undefined;
 
                 if (isWaterish(name)) {
@@ -278,7 +294,7 @@ pub fn buildColorMap(
                     }
                 }
 
-                const amt = lightAmt(sky);
+                const amt = shade.amount(sky, block);
                 for (0..3) |k| {
                     rgb[3 * ci + k] = @intFromFloat(std.math.clamp(c[k] * amt, 0.0, 1.0) * 255.0);
                 }

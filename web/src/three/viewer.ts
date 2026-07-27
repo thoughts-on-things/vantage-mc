@@ -7,21 +7,27 @@ import * as THREE from 'three';
 import { MapControls, type HeightSampler } from './controls.js';
 import {
   biomePalette,
+  isWorldIndex,
   maybeInflate,
   parseManifest,
   parseTextureArray,
   parseTile,
+  parseWorldIndex,
+  pickDimension,
   summarizeBiomes,
   type BiomeEntry,
   type DecodedTextureArray,
   type DecodedTile,
+  type ManifestAtmosphere,
   type SurfaceMap,
+  type WorldDimension,
   type WorldManifest,
   type WorldSource,
+  worldFromIndexEntry,
   worldFromUrl,
 } from '../core/index.js';
 import { Emitter } from './emitter.js';
-import { createLightmappedMaterial, createLowresMaterial, createSky, createTerrainMaterial, createWaterMaterial, updateTerrainTextures, SKY_HORIZON } from './materials.js';
+import { createLightmappedMaterial, createLowresMaterial, createSky, createTerrainMaterial, createWaterMaterial, setSkyColors, updateTerrainTextures, SKY_HORIZON, SKY_TOP } from './materials.js';
 import { pickBiome } from './pick.js';
 import { buildTerrain } from './terrain.js';
 import { TileManager, type TileStats } from './tiles.js';
@@ -169,6 +175,9 @@ export interface TileInfo {
 interface ViewerEvents extends Record<string, unknown> {
   /** Fired after a tile/world is loaded and framed. */
   load: TileInfo;
+  /** The loaded dimension changed (or a multi-dimension world finished
+   *  loading): the full list, and which one is showing. */
+  dimension: { dimensions: WorldDimension[]; current: WorldDimension | null };
   /** Streaming totals changed (tiles loaded/unloaded). Streamed worlds only. */
   stats: TileStats;
   /** The aggregated biome legend changed as tiles streamed in/out. */
@@ -275,6 +284,15 @@ export class VantageViewer {
   // Streamed-world state (world/manifest mode). `tiles` doubles as the mode flag.
   private tiles: TileManager | null = null;
   private manifest: WorldManifest | null = null;
+
+  // Multi-dimension worlds (world.json): the index, the source it was loaded
+  // from (every dimension re-roots off it), and which one is showing. All null
+  // for a plain single-manifest world.
+  private worldIndex: WorldDimension[] = [];
+  private indexSource: WorldSource | null = null;
+  private currentDimension: WorldDimension | null = null;
+  /** Per-dimension camera hashes, so switching back returns where you were. */
+  private readonly dimensionViews = new Map<string, string>();
   private waterShader: THREE.ShaderMaterial | null = null;
   private lowresShader: THREE.ShaderMaterial | null = null;
   /** Populated world extent (max of X/Z spans), for whole-world zoom limits. */
@@ -320,6 +338,10 @@ export class VantageViewer {
 
   // Live lighting appearance (applied to the shader on load and on change).
   private light: Required<LightSettings> = { ...DEFAULT_LIGHT };
+  /** Light fields the embedder set explicitly (constructor option or
+   *  `setLight`). A dimension's atmosphere fills in the rest, so switching
+   *  worlds re-lights the map without overriding a deliberate choice. */
+  private lightOverrides: LightSettings = {};
   // Live display fidelity (shader uniforms + render scale).
   private display: Required<DisplaySettings> = { ...DEFAULT_DISPLAY };
 
@@ -365,7 +387,10 @@ export class VantageViewer {
       caveGeometry: options.caveGeometry ?? 'auto',
     };
     this.caveMode = this.options.caveGeometry;
-    if (options.light) this.light = { ...this.light, ...options.light };
+    if (options.light) {
+      this.light = { ...this.light, ...options.light };
+      this.lightOverrides = { ...options.light };
+    }
     if (options.display) this.display = { ...this.display, ...options.display };
 
     // MSAA lives on an offscreen target (see buildAA / frame), so the canvas
@@ -453,11 +478,31 @@ export class VantageViewer {
     this.setTile(tile, textures, opts.view ?? this.options.view);
   }
 
-  /** Stream a tiled world render from its `manifest.json`. Tiles load around
-   *  the camera as it moves and unload behind it; the whole world is reachable
+  /** Stream a tiled world render from its `manifest.json` — or from a
+   *  `world.json` index, in which case one of its dimensions is opened and the
+   *  rest become available through {@link setDimension}. Tiles load around the
+   *  camera as it moves and unload behind it; the whole world is reachable
    *  without ever holding more than the streaming budget in memory. */
-  private async loadWorld(world: string | WorldSource, view: ViewMode): Promise<void> {
-    const source = typeof world === 'string' ? await worldFromUrl(world) : world;
+  private async loadWorld(world: string | WorldSource, view: ViewMode, wantSlug?: string): Promise<void> {
+    const opened = typeof world === 'string' ? await worldFromUrl(world) : world;
+    let source = opened;
+    // A world index names the dimensions; the entry we pick re-roots the source
+    // at that dimension's directory and hands back a normal manifest world.
+    if (isWorldIndex(opened.manifest)) {
+      const index = parseWorldIndex(opened.manifest);
+      // A deep link may already name a dimension — honour it before framing so
+      // tiles stream in where the link points, not in the overworld first.
+      const slug = wantSlug ?? (this.options.urlState ? this.hashDimension() : null);
+      const entry = pickDimension(index, slug);
+      source = await worldFromIndexEntry(opened, entry.manifest);
+      this.worldIndex = index.dimensions;
+      this.indexSource = opened;
+      this.currentDimension = entry;
+    } else {
+      this.worldIndex = [];
+      this.indexSource = null;
+      this.currentDimension = null;
+    }
     const manifest = parseManifest(source.manifest);
     const texData = parseTextureArray(await maybeInflate(await source.fetch(manifest.textures)));
 
@@ -520,6 +565,9 @@ export class VantageViewer {
       }
     });
 
+    // The dimension's own sky, fog and light floor, before the first frame —
+    // a nether map should never flash blue.
+    this.applyAtmosphere(manifest.atmosphere);
     this.frameWorld(manifest, view);
     // A deep link overrides the default framing (the home button still returns
     // to the framed view). Applied before seeding so tiles stream in there.
@@ -543,6 +591,7 @@ export class VantageViewer {
       size,
       biomes: this._biomes,
     });
+    this.emitter.emit('dimension', { dimensions: this.worldIndex, current: this.currentDimension });
 
     // Progressive render: poll the manifest and stream tiles in as they bake.
     if (manifest.rendering) {
@@ -551,6 +600,59 @@ export class VantageViewer {
       this.emitProgress(manifest);
       void this.pollProgressive(source, this.tiles);
     }
+  }
+
+  // --- dimensions ------------------------------------------------------------
+
+  /** Every dimension of the loaded world (empty for a single-manifest world). */
+  get dimensions(): WorldDimension[] {
+    return this.worldIndex;
+  }
+
+  /** The dimension currently showing, or null when the world isn't indexed. */
+  get dimension(): WorldDimension | null {
+    return this.currentDimension;
+  }
+
+  /**
+   * Switch to another dimension of the loaded world by slug or resource id.
+   *
+   * Each dimension is a self-contained render, so this is a full world reload —
+   * but the camera you left behind is remembered per dimension, and coming back
+   * returns to it. Resolves once the new world is framed and streaming; a slug
+   * the world doesn't have throws.
+   */
+  async setDimension(slug: string): Promise<void> {
+    const source = this.indexSource;
+    if (!source) throw new Error('vantage: this world has no dimension index');
+    const entry = this.worldIndex.find((d) => d.slug === slug || d.id === slug);
+    if (!entry) throw new Error(`vantage: no dimension "${slug}" in this world`);
+    if (this.currentDimension && entry.slug === this.currentDimension.slug) return;
+    if (this.currentDimension) this.dimensionViews.set(this.currentDimension.slug, this.getViewHash());
+    await this.loadWorld(source, this.options.view, entry.slug);
+    // Restore where the camera was last time this dimension was open.
+    const remembered = this.dimensionViews.get(entry.slug);
+    if (remembered) this.applyViewHash(remembered);
+    this.queueHashWrite();
+  }
+
+  /** Paint the dimension's atmosphere: sky dome, fog colour, and the light
+   *  defaults. Explicit `light` options from the embedder always win — a page
+   *  that set its own ambient/daylight keeps them across dimension switches. */
+  private applyAtmosphere(atmosphere: ManifestAtmosphere | undefined): void {
+    const a = atmosphere;
+    const top = a?.skyTop ?? SKY_TOP;
+    const horizon = a?.skyHorizon ?? SKY_HORIZON;
+    const fog = a?.fog ?? horizon;
+    setSkyColors(this.sky, top, horizon);
+    (this.scene.background as THREE.Color).setRGB(...(horizon as [number, number, number]));
+    if (this.shader) (this.shader.uniforms['uFogColor']!.value as THREE.Vector3).set(...(fog as [number, number, number]));
+    this.light = {
+      ambient: this.lightOverrides.ambient ?? a?.ambient ?? DEFAULT_LIGHT.ambient,
+      daylight: this.lightOverrides.daylight ?? a?.daylight ?? DEFAULT_LIGHT.daylight,
+      exposure: this.lightOverrides.exposure ?? DEFAULT_LIGHT.exposure,
+    };
+    this.needsRender = true;
   }
 
   /** Emit a `progress` event from a manifest (falling back to the tile count
@@ -693,7 +795,13 @@ export class VantageViewer {
       minX = minZ = 0;
       maxX = maxZ = tb;
     }
-    this.bounds.set(new THREE.Vector3(minX, -64, minZ), new THREE.Vector3(maxX, 320, maxZ));
+    // Vertical extent comes from the render when it reports one: the nether
+    // stops at its roof cut and the end at its islands, and zoom limits, the
+    // slice range and the reported world size should all say so rather than
+    // assume the overworld's build limits.
+    const minY = manifest.yRange?.min ?? -64;
+    const maxY = manifest.yRange?.max ?? 320;
+    this.bounds.set(new THREE.Vector3(minX, minY, minZ), new THREE.Vector3(maxX, maxY, maxZ));
     this.worldSpan = Math.max(maxX - minX, maxZ - minZ);
   }
 
@@ -726,6 +834,11 @@ export class VantageViewer {
     }
     const h = this.controls.heightAt?.(pivot.x, pivot.z);
     if (h != null) pivot.y = h + 3;
+    // No tiles have streamed in yet on a cold load, so `heightAt` is usually
+    // null and the pivot is whatever the generator recorded. Keep it inside the
+    // rendered slab: a spawn point above a nether roof cut (or below a
+    // dimension's floor) would frame the first shot inside solid rock.
+    pivot.y = Math.min(Math.max(pivot.y, this.bounds.min.y + 1), this.bounds.max.y - 1);
     this.controls.setView({ position: pivot, distance, rotation: 0, angle, floorY: pivot.y });
     this.framedState = { position: pivot.clone(), distance, rotation: 0, angle, floorY: pivot.y };
 
@@ -978,6 +1091,9 @@ export class VantageViewer {
    *  immediately, no re-bake). */
   setLight(settings: LightSettings): void {
     this.light = { ...this.light, ...settings };
+    // Remember what was chosen deliberately: a dimension switch re-applies the
+    // new dimension's defaults only to the knobs nobody has touched.
+    this.lightOverrides = { ...this.lightOverrides, ...settings };
     this.applyLight();
   }
 
@@ -1045,7 +1161,12 @@ export class VantageViewer {
       return;
     }
     const r = this.sliceRange;
-    this.setSlice(this.lastSliceY ?? Math.round(r.min + (r.max - r.min) * 0.25));
+    // Where the interesting hidden layer sits differs by dimension: overworld
+    // caves are low under a surface world, while the nether IS a cave system
+    // under a thin crust — opening a quarter of the way up would put the plane
+    // under its lava sea and reveal bedrock.
+    const depth = this.manifest?.dimension?.kind === 'nether' ? 0.85 : 0.25;
+    this.setSlice(this.lastSliceY ?? Math.round(r.min + (r.max - r.min) * depth));
   }
 
   /** Push slice state to the shader + scene: clip uniform, ambient floor, and
@@ -1213,22 +1334,34 @@ export class VantageViewer {
 
   // --- URL-hash deep links ----------------------------------------------------
 
-  /** The current view serialized as a `#@x,y,z,dist,rot,tilt[,sliceY]` hash
-   *  fragment — paste-able into any URL serving the same world. The trailing
-   *  component appears only while the cave view is open, so those deep links
-   *  reopen sliced at the same depth. */
+  /** The current view serialized as a `#[dimension]@x,y,z,dist,rot,tilt[,sliceY]`
+   *  hash fragment — paste-able into any URL serving the same world. The
+   *  dimension prefix appears only for multi-dimension worlds, so overworld-only
+   *  links keep their old shape; the trailing component appears only while the
+   *  cave view is open, so those deep links reopen sliced at the same depth. */
   getViewHash(): string {
     const p = this.controls.position;
     const r1 = (v: number) => Math.round(v * 10) / 10;
     const r3 = (v: number) => Math.round(v * 1000) / 1000;
     const slice = this.sliceTarget !== null ? `,${r1(this.sliceTarget)}` : '';
-    return `#@${r1(p.x)},${r1(p.y)},${r1(p.z)},${r1(this.controls.distance)},${r3(this.controls.rotation)},${r3(this.controls.angle)}${slice}`;
+    const dim = this.worldIndex.length > 1 && this.currentDimension ? this.currentDimension.slug : '';
+    return `#${dim}@${r1(p.x)},${r1(p.y)},${r1(p.z)},${r1(this.controls.distance)},${r3(this.controls.rotation)},${r3(this.controls.angle)}${slice}`;
   }
 
-  /** Apply a `#@x,y,z,dist,rot,tilt[,sliceY]` hash to the camera (leading `#`
-   *  optional). Returns whether the hash parsed. */
+  /** The dimension slug in the current URL hash, if it names one. Read before
+   *  a world index picks which dimension to open. */
+  private hashDimension(): string | null {
+    if (typeof window === 'undefined') return null;
+    const m = /^#([a-z0-9._-]+)@/.exec(window.location.hash);
+    return m ? m[1]! : null;
+  }
+
+  /** Apply a `#[dimension]@x,y,z,dist,rot,tilt[,sliceY]` hash to the camera
+   *  (leading `#` optional). The dimension prefix is ignored here — it is
+   *  consumed at load time; this only moves the camera. Returns whether the
+   *  hash parsed. */
   applyViewHash(hash: string): boolean {
-    const m = /^#?@(-?[\d.]+),(-?[\d.]+),(-?[\d.]+),([\d.]+),(-?[\d.]+),(-?[\d.]+)(?:,(-?[\d.]+))?$/.exec(hash);
+    const m = /^#?[a-z0-9._-]*@(-?[\d.]+),(-?[\d.]+),(-?[\d.]+),([\d.]+),(-?[\d.]+),(-?[\d.]+)(?:,(-?[\d.]+))?$/.exec(hash);
     if (!m) return false;
     const [x, y, z, distance, rotation, angle] = m.slice(1, 7).map(Number);
     if (![x, y, z, distance, rotation, angle].every(Number.isFinite)) return false;
@@ -1253,6 +1386,14 @@ export class VantageViewer {
     this.controls.addEventListener('change', onChange);
     const onHash = () => {
       if (window.location.hash === this.lastWrittenHash) return;
+      // A pasted link may point at another dimension: load it, then place the
+      // camera where the link says (setDimension restores its own last view).
+      const slug = this.hashDimension();
+      if (slug && slug !== this.currentDimension?.slug && this.worldIndex.some((d) => d.slug === slug)) {
+        const target = window.location.hash;
+        void this.setDimension(slug).then(() => this.applyViewHash(target));
+        return;
+      }
       this.applyViewHash(window.location.hash);
     };
     window.addEventListener('hashchange', onHash);

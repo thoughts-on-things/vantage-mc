@@ -8,7 +8,7 @@ import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { worldFromVantageServer } from '../src/core/index.js';
 import type { WorldSource } from '../src/core/index.js';
-import { BiomeLayer, DepthSlider, LightPanel, MapNav, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
+import { BiomeLayer, DepthSlider, DimensionPicker, LightPanel, MapNav, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
@@ -76,22 +76,29 @@ function Hud() {
   );
 }
 
-function App({ streamed, serverWorld }: { streamed: boolean; serverWorld?: WorldSource }) {
+/** What the viewer loads: a multi-dimension world index, a single manifest, a
+ *  server world source, or the classic standalone tile. */
+type Entry = 'world' | 'manifest' | 'tile';
+
+function App({ entry, serverWorld }: { entry: Entry; serverWorld?: WorldSource }) {
   // Dev-only: expose the engine for manual poking in the console.
   const ref = (e: import('../src/three/index.js').VantageViewer | null) => {
     (window as unknown as { __vantage?: unknown }).__vantage = e;
   };
-  // Streamed world (manifest.json from `vantage render`) when present; else the
-  // classic single tile (`vantage meshtex`).
+  // A world index (`world.json`, every dimension) when the render has one, else
+  // a single streamed manifest, else the classic single tile (`vantage meshtex`).
   const source = serverWorld
     ? ({ world: serverWorld } as const)
-    : streamed
+    : entry === 'world'
+    ? ({ world: '/world.json' } as const)
+    : entry === 'manifest'
     ? ({ world: '/manifest.json' } as const)
     : ({ tile: '/terrain.vtile', textures: '/terrain.vtexarr' } as const);
   return (
     <VantageViewer ref={ref} {...source} view={view}>
       <Hud />
       <Reticle />
+      <DimensionPicker />
       <BiomeLayer legend hover defaultEnabled={biomeOpen} />
       <LightPanel />
       <SettingsPanel />
@@ -101,15 +108,26 @@ function App({ streamed, serverWorld }: { streamed: boolean; serverWorld?: World
   );
 }
 
-function mount(streamed: boolean, serverWorld?: WorldSource): void {
+function mount(entry: Entry, serverWorld?: WorldSource): void {
   // Survive Vite HMR re-evaluation: reuse the root instead of re-creating it.
   const holder = window as unknown as { __vantageRoot?: ReturnType<typeof createRoot> };
   holder.__vantageRoot ??= createRoot(document.getElementById('root')!);
   holder.__vantageRoot.render(
     <StrictMode>
-      <App streamed={streamed} serverWorld={serverWorld} />
+      <App entry={entry} serverWorld={serverWorld} />
     </StrictMode>,
   );
+}
+
+/** Whether a JSON file sits at `path` — how the viewer decides which entry
+ *  point a render directory offers without fetching a body it may not use. */
+async function hasJson(path: string): Promise<boolean> {
+  try {
+    const r = await fetch(path, { method: 'HEAD' });
+    return r.ok && (r.headers.get('content-type') ?? '').includes('json');
+  } catch {
+    return false;
+  }
 }
 
 if (serverEndpoint) {
@@ -121,7 +139,7 @@ if (serverEndpoint) {
   // process, never placed in the URL. Production launchers should supply their
   // existing session through a same-origin proxy or custom fetch transport.
   void worldFromVantageServer(serverEndpoint, { accessToken }).then(
-    (world) => mount(true, world),
+    (world) => mount('manifest', world),
     (error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       const output = document.createElement('pre');
@@ -131,9 +149,10 @@ if (serverEndpoint) {
     },
   );
 } else {
-  // Prefer the streamed world when a manifest exists next to the demo.
-  void fetch('/manifest.json', { method: 'HEAD' }).then(
-    (r) => mount(r.ok && (r.headers.get('content-type') ?? '').includes('json')),
-    () => mount(false),
-  );
+  // Prefer the whole world (every dimension) when the render has an index,
+  // then a single streamed manifest, then the standalone tile.
+  void (async () => {
+    if (await hasJson('/world.json')) return mount('world');
+    mount((await hasJson('/manifest.json')) ? 'manifest' : 'tile');
+  })();
 }

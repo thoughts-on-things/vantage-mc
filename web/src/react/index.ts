@@ -13,6 +13,7 @@ export { LightPanel, type LightPanelProps } from './LightPanel.js';
 export { SettingsPanel, QUALITY_PRESETS, type SettingsPanelProps, type QualityPreset } from './SettingsPanel.js';
 export { MapNav, type MapNavProps } from './MapNav.js';
 export { DepthSlider, type DepthSliderProps } from './DepthSlider.js';
+export { DimensionPicker, type DimensionPickerProps } from './DimensionPicker.js';
 export { Reticle, type ReticleProps } from './Reticle.js';
 export { useVantage, type VantageContextValue, type VantageStatus } from './context.js';
 export { injectStyles, CSS } from './styles.js';
@@ -29,6 +30,8 @@ export type {
   StreamingSettings,
   BiomeEntry,
   DecodedTile,
+  WorldDimension,
+  WorldIndex,
 } from '../three/index.js';
 
 // Default display settings + the orbit framing angle — value exports.

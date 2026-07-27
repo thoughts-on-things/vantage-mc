@@ -224,13 +224,25 @@ pub const Built = struct {
 /// neighbourhood) for soft gradients. Set at bake time (`--light`).
 pub const LightQuality = enum { flat, smooth };
 
+/// How a bake finds geometry nobody can ever see.
+pub const CaveMode = union(enum) {
+    /// Sky light decides (the overworld): faces below this world Y that look
+    /// into an unlit, waterless cell are dropped. Null keeps every cave and
+    /// enables the viewer's depth slice.
+    sky_light: ?i32,
+    /// Reachability decides (the nether, the end — nothing there has sky
+    /// light): faces looking into a cell that is walled off from outside the
+    /// tile window are dropped, at any height. See `light.computeOpen`.
+    open_volume,
+};
+
 /// Build the textured mesh. `maps` are the biome colormaps and `reg` the
 /// data-pack biome registry used to resolve each tinted face's colour from the
 /// biome at its block position. Water is split into a transparent `fluid` mesh
 /// (see `emitFluid`); everything else goes into the opaque `solid` mesh.
 /// `interior`, if given, meshes only that XZ sub-box — the apron cells outside
 /// it still feed culling/AO/light/biome-blend reads but emit no geometry.
-/// `cave_y` enables cave culling below that world Y (see `MeshCtx.caveCulled`).
+/// `cave` selects how invisible geometry is found (see `MeshCtx.caveCulled`).
 /// `max_threads` caps the internal mesh/greedy parallelism (0 = one thread per
 /// core) — pass 1 when the caller already runs tiles in parallel, so N tile
 /// workers don't each spawn N mesh threads.
@@ -244,7 +256,7 @@ pub fn buildTextured(
     quality: LightQuality,
     blend_biomes: bool,
     interior: ?grid.Interior,
-    cave_y: ?i32,
+    cave: CaveMode,
     max_threads: usize,
     progress: ?std.Progress.Node,
 ) !Built {
@@ -332,6 +344,12 @@ pub fn buildTextured(
     const t_light0 = std.Io.Timestamp.now(resolver.io, .awake);
     const light_node: ?std.Progress.Node = if (progress) |p| p.start("computing light", 0) else null;
     try lighting.compute(arena, g, light_occluder, emission, waterish);
+    // Skyless dimensions replace the "is it lit?" cave test with "can anything
+    // reach it?" — one flood over the same occluder table (see CaveMode).
+    const open: []const bool = switch (cave) {
+        .sky_light => &.{},
+        .open_volume => try lighting.computeOpen(arena, g, light_occluder),
+    };
     if (light_node) |n| n.end();
     const light_ms = t_light0.durationTo(std.Io.Timestamp.now(resolver.io, .awake)).toMilliseconds();
 
@@ -357,7 +375,11 @@ pub fn buildTextured(
         .greedy_faces = greedy_faces,
         .id_pure_greedy = id_pure_greedy,
         .interior = interior orelse grid.Interior.full(g),
-        .cave_y = cave_y,
+        .cave_y = switch (cave) {
+            .sky_light => |y| y,
+            .open_volume => null,
+        },
+        .open = open,
         .atlas = quality == .smooth,
         .has_water = any_water,
         .has_lava = any_lava,
@@ -695,6 +717,12 @@ const MeshCtx = struct {
     /// are always kept, so deep ocean floors survive (sky light attenuates to
     /// 0 under ~15 blocks of water). Null = render everything.
     cave_y: ?i32,
+    /// Reachability mask (`CaveMode.open_volume`, skyless dimensions): one flag
+    /// per grid cell, set when something outside the window can reach it. When
+    /// present it REPLACES the sky-light cave test at every height — a face
+    /// looking into an unreachable cell is invisible wherever it sits. Empty
+    /// for sky-lit dimensions.
+    open: []const bool = &.{},
     /// Lightmap-atlas mode (smooth light): greedy merges ignore light/AO — the
     /// per-block-corner values bake into a per-tile atlas instead of vertices,
     /// so lighting gradients no longer fragment merges. Flat light keeps the
@@ -706,11 +734,25 @@ const MeshCtx = struct {
     has_water: bool = false,
     has_lava: bool = false,
 
-    /// Whether cell (x,y,z) is in the dark below the cave-culling horizon.
+    /// Whether cell (x,y,z) is hidden: unreachable (skyless dimensions), or in
+    /// the dark below the cave-culling horizon (sky-lit ones).
     fn caveDark(ctx: *const MeshCtx, x: isize, y: isize, z: isize) bool {
+        if (ctx.open.len > 0) return !ctx.reachable(x, y, z);
         const cave_y = ctx.cave_y orelse return false;
         if (y < 0 or @as(i64, ctx.g.min_y) + @as(i64, y) >= cave_y) return false;
         return ctx.g.lightAt(x, y, z) >> 4 == 0; // dark = no sky light reaches it
+    }
+
+    /// Openness lookup for `open_volume` bakes. Out-of-window cells count as
+    /// reachable: the mask only proves enclosure INSIDE the window, and a face
+    /// at its edge belongs to the neighbouring tile's interior anyway.
+    fn reachable(ctx: *const MeshCtx, x: isize, y: isize, z: isize) bool {
+        if (x < 0 or y < 0 or z < 0) return true;
+        const ux: usize = @intCast(x);
+        const uy: usize = @intCast(y);
+        const uz: usize = @intCast(z);
+        if (ux >= ctx.g.sx or uy >= ctx.g.sy or uz >= ctx.g.sz) return true;
+        return ctx.open[ctx.g.index(ux, uy, uz)];
     }
 
     /// Whether the face lit by cell (x,y,z) is invisible cave geometry. Faces
@@ -724,7 +766,13 @@ const MeshCtx = struct {
     /// cell gets no sky light and holds no water. The same predicate as
     /// `caveCulled` without the Y horizon — it CLASSIFIES kept faces for the
     /// cave partition (surface prefix vs cave tail) instead of dropping them.
+    ///
+    /// Skyless dimensions have no such split: everything that survived the
+    /// reachability cull IS the map, so it all belongs to the surface prefix.
+    /// Marking it cave-dark would hide the whole nether the moment the viewer
+    /// dropped cave geometry for an above-ground camera.
     fn skyHidden(ctx: *const MeshCtx, x: isize, y: isize, z: isize) bool {
+        if (ctx.open.len > 0) return false;
         if (ctx.g.lightAt(x, y, z) >> 4 != 0) return false;
         return !ctx.waterish[ctx.g.at(x, y, z)];
     }
@@ -998,7 +1046,8 @@ fn buildFaceVis(ctx: *const MeshCtx, alloc: std.mem.Allocator) !FaceVis {
                         const nid = g.at(nx, ny, nz);
                         if (!ctx.id_occluder[nid] and !(ctx.caveDark(nx, ny, nz) and !ctx.waterish[nid])) {
                             mask |= @as(u8, 1) << di;
-                            if (g.lightAt(nx, ny, nz) >> 4 != 0 or ctx.waterish[nid])
+                            // Skyless bakes have no cave tail (see skyHidden).
+                            if (ctx.open.len > 0 or g.lightAt(nx, ny, nz) >> 4 != 0 or ctx.waterish[nid])
                                 sky_mask |= @as(u8, 1) << di;
                         }
                     }

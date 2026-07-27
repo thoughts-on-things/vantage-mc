@@ -1,13 +1,44 @@
 // <DepthSlider> — the cave view's depth gauge: a vertical strip on the left
 // edge that appears while the engine's depth slice is open and drags the cut
 // plane up and down the world's Y range. The track is painted like a core
-// sample (sky → grass → stone → deepslate → bedrock); everything above the
-// thumb is struck through, mirroring what the slice cut away. Landmarks mark
-// sea level and y=0. `[` / `]` nudge the depth; the toggle key (default `c`,
-// shared with <MapNav>'s layers button) opens and closes the view.
+// sample of the dimension it is slicing (the overworld's sky → grass → stone →
+// bedrock, the nether's crust → netherrack → lava, the end's void → endstone);
+// everything above the thumb is struck through, mirroring what the slice cut
+// away. Landmarks mark the dimension's own reference heights. `[` / `]` nudge
+// the depth; the toggle key (default `c`, shared with <MapNav>'s layers button)
+// opens and closes the view.
 
 import { useEffect, useRef, useState } from 'react';
 import { useVantage } from './context.js';
+import type { WorldDimension } from '../three/index.js';
+
+/** The core sample painted into the track, top of the world first, plus the
+ *  landmark heights worth labelling in that dimension. */
+const CORE: Record<WorldDimension['kind'], { gradient: string; marks: { y: number; label: string }[] }> = {
+  overworld: {
+    gradient: 'linear-gradient(180deg, #6f9bce 0%, #6e9150 12%, #6e6f74 48%, #3e424b 76%, #16181d 100%)',
+    marks: [
+      { y: 63, label: 'sea' },
+      { y: 0, label: '0' },
+    ],
+  },
+  nether: {
+    // Roof crust, netherrack, then the lava sea the caverns bottom out in.
+    gradient: 'linear-gradient(180deg, #3a2320 0%, #6b3330 22%, #7a3a38 62%, #b4471d 88%, #d9691f 100%)',
+    marks: [
+      { y: 31, label: 'lava' },
+      { y: 4, label: 'floor' },
+    ],
+  },
+  end: {
+    gradient: 'linear-gradient(180deg, #17131f 0%, #2a2338 34%, #ded8a5 62%, #b8b183 82%, #17131f 100%)',
+    marks: [{ y: 49, label: 'gate' }],
+  },
+  custom: {
+    gradient: 'linear-gradient(180deg, #6f9bce 0%, #6e9150 12%, #6e6f74 48%, #3e424b 76%, #16181d 100%)',
+    marks: [{ y: 0, label: '0' }],
+  },
+};
 
 export interface DepthSliderProps {
   /** Key that toggles the cave view. Default `'c'`; pass `null` to disable. */
@@ -23,7 +54,7 @@ function isTypingTarget(t: EventTarget | null): boolean {
 }
 
 export function DepthSlider({ toggleKey = 'c', step = 4, className }: DepthSliderProps) {
-  const { viewer, info } = useVantage();
+  const { viewer, info, dimension } = useVantage();
   const trackRef = useRef<HTMLDivElement>(null);
   const [sliceY, setSliceY] = useState<number | null>(null);
 
@@ -74,10 +105,10 @@ export function DepthSlider({ toggleKey = 'c', step = 4, className }: DepthSlide
     setFromPointer(e);
   };
 
-  // Landmarks only where they fall inside the baked range.
-  const marks: { y: number; label: string }[] = [];
-  if (63 > min && 63 < max) marks.push({ y: 63, label: 'sea' });
-  if (0 > min && 0 < max) marks.push({ y: 0, label: '0' });
+  // The core sample for whichever dimension is loaded, with only the landmarks
+  // that fall inside its baked range.
+  const core = CORE[dimension?.kind ?? 'overworld'];
+  const marks = core.marks.filter((m) => m.y > min && m.y < max);
 
   return (
     <div className={className ? `vtg-depth vtg-glass ${className}` : 'vtg-depth vtg-glass'} role="group" aria-label="cave view depth">
@@ -102,7 +133,7 @@ export function DepthSlider({ toggleKey = 'c', step = 4, className }: DepthSlide
           else if (e.key === 'ArrowDown') viewer.setSlice(sliceY - 1);
         }}
       >
-        <div className="vtg-depth-track">
+        <div className="vtg-depth-track" style={{ background: core.gradient }}>
           <div className="vtg-depth-cut" style={{ height: `${thumbTop}%` }} />
         </div>
         {marks.map((m) => (

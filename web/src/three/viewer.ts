@@ -221,6 +221,24 @@ function resolveContainer(container: HTMLElement | string): HTMLElement {
   return el;
 }
 
+/** The dimension a render describes itself as when it was opened by its own
+ *  `manifest.json` rather than through a `world.json`. Loading
+ *  `/the_nether/manifest.json` directly is still a nether map, and the depth
+ *  gauge and any dimension-aware chrome need to hear about it. The index-only
+ *  fields carry what the manifest knows: the byte total isn't in it, and the
+ *  manifest path is the one that was just loaded. */
+function dimensionFromManifest(manifest: WorldManifest): WorldDimension | null {
+  const d = manifest.dimension;
+  if (!d) return null;
+  return {
+    ...d,
+    manifest: 'manifest.json',
+    tiles: manifest.tiles.length,
+    bytes: 0,
+    ...(manifest.spawn ? { spawn: manifest.spawn } : {}),
+  };
+}
+
 /** A lightly-smoothed terrain-height lookup over the tile's surface map, for the
  *  controls' terrain-riding pivot. A small 5×5 box (radius 2) takes the edge off
  *  block-to-block canopy noise without lifting the pivot off the surface at
@@ -286,13 +304,19 @@ export class VantageViewer {
   private manifest: WorldManifest | null = null;
 
   // Multi-dimension worlds (world.json): the index, the source it was loaded
-  // from (every dimension re-roots off it), and which one is showing. All null
-  // for a plain single-manifest world.
+  // from (every dimension re-roots off it), and which one is showing. The index
+  // is empty for a plain single-manifest world, but `currentDimension` is still
+  // filled in from the manifest when it names one — opening
+  // `/the_nether/manifest.json` directly is a nether map, and everything
+  // downstream (atmosphere, depth gauge, deep links) should know it.
   private worldIndex: WorldDimension[] = [];
   private indexSource: WorldSource | null = null;
   private currentDimension: WorldDimension | null = null;
   /** Per-dimension camera hashes, so switching back returns where you were. */
   private readonly dimensionViews = new Map<string, string>();
+  /** The view mode the loaded world was framed with — a `load({ view })` may
+   *  differ from the constructor default, and switching dimensions keeps it. */
+  private loadedView: ViewMode = 'orbit';
   private waterShader: THREE.ShaderMaterial | null = null;
   private lowresShader: THREE.ShaderMaterial | null = null;
   /** Populated world extent (max of X/Z spans), for whole-world zoom limits. */
@@ -507,6 +531,7 @@ export class VantageViewer {
       nextIndexSource = opened;
       nextDimension = entry;
     }
+    this.loadedView = view;
     const manifest = parseManifest(source.manifest);
     const texData = parseTextureArray(await maybeInflate(await source.fetch(manifest.textures)));
 
@@ -527,10 +552,13 @@ export class VantageViewer {
     this.waterShader = waterShader;
     this.lowresShader = lowresShader ?? null;
     this.manifest = manifest;
-    // Past the fetches and the parse: this world is the one on screen now.
+    // Past the fetches and the parse: this world is the one on screen now. A
+    // render opened by its own manifest has no index, but the manifest still
+    // says which dimension it covers — enough for the atmosphere, the depth
+    // gauge's core sample, and a deep link that names it.
     this.worldIndex = nextIndex;
     this.indexSource = nextIndexSource;
-    this.currentDimension = nextDimension;
+    this.currentDimension = nextDimension ?? dimensionFromManifest(manifest);
     this.hasAnims = texData.anims.length > 0;
     this.lastTextureLayers = manifest.textureLayers ?? texData.layers;
     this.tile = null;
@@ -644,7 +672,9 @@ export class VantageViewer {
     if (!entry) throw new Error(`vantage: no dimension "${slug}" in this world`);
     if (this.currentDimension && entry.slug === this.currentDimension.slug) return;
     if (this.currentDimension) this.dimensionViews.set(this.currentDimension.slug, this.getViewHash());
-    await this.loadWorld(source, this.options.view, entry.slug);
+    // The mode this world was opened with, not the constructor default — a
+    // consumer that mounted with `view: 'top'` stays flat across a switch.
+    await this.loadWorld(source, this.loadedView, entry.slug);
     // Restore where the camera was last time this dimension was open.
     const remembered = this.dimensionViews.get(entry.slug);
     if (remembered) this.applyViewHash(remembered);

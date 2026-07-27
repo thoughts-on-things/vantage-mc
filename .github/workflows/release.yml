@@ -347,7 +347,7 @@ jobs:
           tagName: ${{ needs.release-please.outputs.tag_name }}
           args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
           retryAttempts: 2
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           uploadWorkflowArtifacts: ${{ github.event_name == 'workflow_dispatch' }}
 

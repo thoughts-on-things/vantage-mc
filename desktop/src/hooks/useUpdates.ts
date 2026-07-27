@@ -38,7 +38,9 @@ export function useUpdates(): UpdatesController {
         setVersion(update.version);
         setPhase('available');
       } catch (error) {
-        console.warn('Update check skipped:', error);
+        // Expected whenever there is no feed to ask (no release yet,
+        // offline, package-manager installs), so production stays quiet.
+        if (import.meta.env.DEV) console.warn('Update check skipped:', error);
       }
     };
     void check();
@@ -63,7 +65,10 @@ export function useUpdates(): UpdatesController {
         setPhase('restarting');
         await relaunchApp();
       } catch (error) {
-        // A failed download leaves the offer in place; the next click retries.
+        // A failed download leaves the offer in place; the next click
+        // retries. Unlike the periodic check this is a user-initiated action
+        // that failed, so it stays logged in production — it is the only
+        // trace when someone reports an update that would not install.
         console.warn('Update failed:', error);
         installingRef.current = false;
         setProgress(null);

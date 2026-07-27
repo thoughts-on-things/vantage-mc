@@ -265,7 +265,7 @@ export interface AppUpdate {
  */
 export async function checkForUpdate(): Promise<AppUpdate | null> {
   if (!inTauri()) {
-    return import.meta.env.VITE_MOCK_UPDATE ? mockUpdate() : null;
+    return import.meta.env.VITE_MOCK_UPDATE === '1' ? mockUpdate() : null;
   }
   const { check } = await import('@tauri-apps/plugin-updater');
   const update = await check();

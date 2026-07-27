@@ -1,19 +1,41 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
+/// The Zig `-Dtarget` for a Cargo target triple. The sidecar always targets an
+/// explicit triple so a cross-arch bundle (an x86_64 macOS build on an arm64
+/// runner) ships the matching binary, and Linux links musl so one static
+/// sidecar runs on any distro's libc.
+fn zig_target(cargo_target: &str) -> String {
+    let arch = cargo_target.split('-').next().expect("target architecture");
+    let os = if cargo_target.contains("windows") {
+        "windows"
+    } else if cargo_target.contains("apple-darwin") {
+        "macos"
+    } else if cargo_target.contains("linux") {
+        "linux-musl"
+    } else {
+        panic!("unsupported desktop target: {cargo_target}")
+    };
+    format!("{arch}-{os}")
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=../../src");
     println!("cargo:rerun-if-changed=../../build.zig");
     println!("cargo:rerun-if-changed=../../build.zig.zon");
 
+    let target = env::var("TARGET").expect("Cargo target triple");
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir")).join("../..");
     let status = Command::new("zig")
-        .args(["build", "-Doptimize=ReleaseFast"])
+        .args([
+            "build",
+            "-Doptimize=ReleaseFast",
+            &format!("-Dtarget={}", zig_target(&target)),
+        ])
         .current_dir(&root)
         .status()
         .expect("Zig 0.16 must be installed to build the Vantage core sidecar");
     assert!(status.success(), "Zig core build failed");
 
-    let target = env::var("TARGET").expect("Cargo target triple");
     let extension = if target.contains("windows") {
         ".exe"
     } else {

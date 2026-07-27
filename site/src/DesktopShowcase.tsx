@@ -6,16 +6,36 @@ import mapBiomes from './assets/render-biomes-v2.png';
 const GITHUB = 'https://github.com/thoughts-on-things/vantage-mc';
 const RELEASES = `${GITHUB}/releases`;
 // Fallback target: the latest-release page always resolves, even before the
-// desktop job has ever run. On mount we upgrade this to the exact signed NSIS
-// installer via the GitHub API (see useLatestInstaller) for a one-click download.
+// desktop job has ever run. On mount we upgrade it to exact asset URLs via the
+// GitHub API (see useLatestDownloads) for one-click downloads.
 const RELEASES_LATEST = `${RELEASES}/latest`;
 const REPO_API = 'https://api.github.com/repos/thoughts-on-things/vantage-mc/releases/latest';
 
-type Installer = { url: string; version: string | null };
+type Downloads = {
+  version: string | null;
+  windows: string;
+  macArm: string;
+  macIntel: string;
+  appImage: string;
+  deb: string;
+  rpm: string;
+};
 
-/** Resolves the latest signed Windows installer (NSIS setup.exe, else MSI). */
-function useLatestInstaller(): Installer {
-  const [installer, setInstaller] = useState<Installer>({ url: RELEASES_LATEST, version: '0.4.0' });
+const PAGE_FALLBACK: Downloads = {
+  version: null,
+  windows: RELEASES_LATEST,
+  macArm: RELEASES_LATEST,
+  macIntel: RELEASES_LATEST,
+  appImage: RELEASES_LATEST,
+  deb: RELEASES_LATEST,
+  rpm: RELEASES_LATEST,
+};
+
+/** Resolves every desktop artifact on the latest release: the signed Windows
+ *  installer, both macOS disk images, and the three Linux packages. Any asset
+ *  a release does not have yet keeps the release-page fallback. */
+function useLatestDownloads(): Downloads {
+  const [downloads, setDownloads] = useState<Downloads>(PAGE_FALLBACK);
   useEffect(() => {
     let live = true;
     fetch(REPO_API, { headers: { Accept: 'application/vnd.github+json' } })
@@ -23,21 +43,29 @@ function useLatestInstaller(): Installer {
       .then((rel: { tag_name?: string; assets?: { name: string; browser_download_url: string }[] } | null) => {
         if (!live || !rel?.assets) return;
         const assets = rel.assets;
-        const win =
-          assets.find((a) => /x64[-_]setup\.exe$/i.test(a.name)) ??
-          assets.find((a) => /\.exe$/i.test(a.name) && /setup/i.test(a.name)) ??
-          assets.find((a) => /x64.*\.msi$/i.test(a.name)) ??
-          assets.find((a) => /\.msi$/i.test(a.name));
-        const version = rel.tag_name?.replace(/^v/, '') ?? null;
-        // Keep the page fallback if this release has no desktop installer yet.
-        setInstaller({ url: win?.browser_download_url ?? RELEASES_LATEST, version });
+        const find = (...patterns: RegExp[]) => {
+          for (const pattern of patterns) {
+            const hit = assets.find((a) => pattern.test(a.name));
+            if (hit) return hit.browser_download_url;
+          }
+          return RELEASES_LATEST;
+        };
+        setDownloads({
+          version: rel.tag_name?.replace(/^v/, '') ?? null,
+          windows: find(/x64[-_]setup\.exe$/i, /setup.*\.exe$/i, /x64.*\.msi$/i, /\.msi$/i),
+          macArm: find(/aarch64\.dmg$/i),
+          macIntel: find(/(x64|x86_64)\.dmg$/i),
+          appImage: find(/\.AppImage$/i),
+          deb: find(/\.deb$/i),
+          rpm: find(/\.rpm$/i),
+        });
       })
       .catch(() => {});
     return () => {
       live = false;
     };
   }, []);
-  return installer;
+  return downloads;
 }
 
 /* ---------- tiny inline icon set (the launcher uses lucide; we don't ship it) ---------- */
@@ -214,12 +242,33 @@ export function DesktopShowcase() {
     else if (/linux|x11/i.test(ua) || p.includes('linux')) setOs('linux');
   }, []);
 
-  const installer = useLatestInstaller();
+  const downloads = useLatestDownloads();
   const step = useRenderLoop(reduced, live);
   const phase = PHASES[step] ?? PHASES[PHASES.length - 1]!;
   const rendering = phase.label !== 'Ready';
-  const detected =
-    os === 'mac' ? 'macOS' : os === 'linux' ? 'Linux' : os === 'win' ? 'Windows' : null;
+  // The lead button follows the visitor's OS; Windows is the fallback for
+  // platforms Vantage does not ship on.
+  const lead =
+    os === 'mac'
+      ? {
+          href: downloads.macArm,
+          label: 'Download for macOS',
+          Icon: AppleIcon,
+          meta: <><code>.dmg</code> · Apple silicon · Intel build in the list</>,
+        }
+      : os === 'linux'
+        ? {
+            href: downloads.appImage,
+            label: 'Download for Linux',
+            Icon: LinuxIcon,
+            meta: <><code>.AppImage</code> · x86-64 · <code>deb</code> &amp; <code>rpm</code> in the list</>,
+          }
+        : {
+            href: downloads.windows,
+            label: 'Download for Windows',
+            Icon: WindowsIcon,
+            meta: <>signed <code>.exe</code> installer · Windows 10 &amp; 11 · 64-bit</>,
+          };
 
   return (
     <section className="desktop-section" id="desktop">
@@ -377,51 +426,55 @@ export function DesktopShowcase() {
       {/* ---------- download panel ---------- */}
       <div className="download reveal">
         <div className="dl-lead">
-          <a className="cta cta-primary dl-btn" href={installer.url} rel="noreferrer">
-            <WindowsIcon size={19} />
-            Download for Windows
+          <a className="cta cta-primary dl-btn" href={lead.href} rel="noreferrer">
+            <lead.Icon size={19} />
+            {lead.label}
             <DownloadIcon size={17} className="dl-btn-arrow" />
           </a>
           <p className="dl-meta">
-            {installer.version ? `v${installer.version} · ` : ''}signed <code>.exe</code> installer · Windows 10 &amp;
-            11 · 64-bit
+            {downloads.version ? `v${downloads.version} · ` : ''}
+            {lead.meta} · updates itself
           </p>
           <p className="dl-detected">
-            {detected && detected !== 'Windows' ? (
-              <>We spotted {detected} — the {detected} build is on the way. </>
-            ) : null}
             <a href={RELEASES} rel="noreferrer">
               All downloads &amp; release notes ↗
             </a>
           </p>
         </div>
 
-        <ul className="dl-platforms" aria-label="Platform availability">
+        <ul className="dl-platforms" aria-label="Platform downloads">
           <li className="dl-plat dl-plat-live">
             <WindowsIcon size={22} />
             <span>
               <b>Windows</b>
-              <small>Available now</small>
+              <small>Signed installer · x64</small>
             </span>
-            <a className="dl-plat-btn" href={installer.url} rel="noreferrer" aria-label="Download for Windows">
+            <a className="dl-plat-btn" href={downloads.windows} rel="noreferrer" aria-label="Download for Windows">
               <DownloadIcon size={16} />
             </a>
           </li>
-          <li className="dl-plat">
+          <li className="dl-plat dl-plat-live">
             <AppleIcon size={22} />
             <span>
               <b>macOS</b>
-              <small>Coming soon</small>
+              <small>Apple silicon &amp; Intel</small>
             </span>
-            <em>soon</em>
+            <span className="dl-plat-links">
+              <a href={downloads.macArm} rel="noreferrer">M-series</a>
+              <a href={downloads.macIntel} rel="noreferrer">Intel</a>
+            </span>
           </li>
-          <li className="dl-plat">
+          <li className="dl-plat dl-plat-live">
             <LinuxIcon size={22} />
             <span>
               <b>Linux</b>
-              <small>Coming soon</small>
+              <small>x86-64</small>
             </span>
-            <em>soon</em>
+            <span className="dl-plat-links">
+              <a href={downloads.appImage} rel="noreferrer">AppImage</a>
+              <a href={downloads.deb} rel="noreferrer">deb</a>
+              <a href={downloads.rpm} rel="noreferrer">rpm</a>
+            </span>
           </li>
         </ul>
       </div>

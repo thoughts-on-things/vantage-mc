@@ -3075,6 +3075,28 @@ h2 em {
 .dl-plat-live > svg { color: var(--lime); }
 .dl-plat-live small { color: var(--lime-dim); }
 
+/* Per-variant text links (macOS arch, Linux package formats). */
+.dl-plat-links {
+  display: flex;
+  gap: 6px;
+}
+
+.dl-plat-links a {
+  padding: 6px 10px;
+  border: 1px solid rgba(175, 221, 59, 0.3);
+  border-radius: 8px;
+  font: 600 12px var(--mono);
+  color: var(--lime-dim);
+  background: rgba(175, 221, 59, 0.06);
+  transition: filter 0.15s ease, transform 0.15s ease;
+}
+
+.dl-plat-links a:hover {
+  filter: brightness(1.2);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+
 .dl-plat-btn {
   display: grid;
   place-items: center;

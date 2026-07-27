@@ -302,9 +302,10 @@ export function DesktopShowcase() {
         No command line. Just <em>your worlds</em>.
       </h2>
       <p className="lede reveal">
-        Vantage Desktop finds every Java world on your PC — across Minecraft, Beacon, Prism, MultiMC,
-        CurseForge and more — then uses the native Zig engine to build a cave-ready map and drops you
-        straight into the 3D viewer. Nothing leaves your machine.
+        Vantage Desktop finds every Java world on your PC — across Minecraft, Prism, MultiMC,
+        CurseForge, Modrinth, GDLauncher and Beacon — then uses the native Zig engine to build a
+        cave-ready map and drops you straight into the 3D viewer. Nothing leaves your machine, and
+        updates install themselves.
       </p>
 
       <div className="studio-stage reveal">
@@ -336,11 +337,18 @@ export function DesktopShowcase() {
                 <button className="active" type="button" tabIndex={-1}>
                   <MapIcon size={16} /> Worlds <span>{WORLDS.length}</span>
                 </button>
-                <button type="button" tabIndex={-1} disabled>
-                  <LayersIcon size={16} /> Renders <em>soon</em>
+                <button type="button" tabIndex={-1}>
+                  <LayersIcon size={16} /> Renders <span>2</span>
                 </button>
               </nav>
               <div className="studio-sidebar-foot">
+                <span className="studio-update">
+                  <DownloadIcon size={11} />
+                  <span>
+                    <b>Update ready</b>
+                    <small>one click · restarts itself</small>
+                  </span>
+                </span>
                 <span className="studio-engine">
                   <i /> <b>Zig core</b>
                   <small>connected</small>

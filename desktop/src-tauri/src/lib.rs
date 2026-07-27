@@ -612,6 +612,8 @@ fn cache_path(app: &tauri::AppHandle, world_path: &str) -> Result<PathBuf, Strin
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // The renders directory backs the library's preview images, so it
             // is created up front: the endpoint canonicalizes that root once

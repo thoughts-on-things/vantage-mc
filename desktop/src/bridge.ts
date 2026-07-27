@@ -240,3 +240,72 @@ export async function onRenderProgress(handler: (progress: RenderProgress) => vo
   if (!inTauri()) return () => {};
   return listen<RenderProgress>('render-progress', (event) => handler(event.payload));
 }
+
+export interface UpdateProgress {
+  downloaded: number;
+  /** Null until the server reports a content length. */
+  total: number | null;
+}
+
+/** A newer Vantage release, ready to download and install. */
+export interface AppUpdate {
+  version: string;
+  install: (onProgress: (progress: UpdateProgress) => void) => Promise<void>;
+}
+
+/**
+ * Asks the release feed for a newer build. Resolves null when this build is
+ * current, and rejects when there is no feed to ask — no release published
+ * yet, offline, or a Linux install that did not come from the AppImage.
+ * Callers treat a rejection like "no update"; it must never reach the UI.
+ *
+ * The plugins are imported lazily so the browser preview (and its mock) never
+ * pulls Tauri-only modules. Set VITE_MOCK_UPDATE=1 to exercise the update UI
+ * in the preview.
+ */
+export async function checkForUpdate(): Promise<AppUpdate | null> {
+  if (!inTauri()) {
+    return import.meta.env.VITE_MOCK_UPDATE ? mockUpdate() : null;
+  }
+  const { check } = await import('@tauri-apps/plugin-updater');
+  const update = await check();
+  if (!update) return null;
+  return {
+    version: update.version,
+    install: async (onProgress) => {
+      let downloaded = 0;
+      let total: number | null = null;
+      await update.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          total = event.data.contentLength ?? null;
+        } else if (event.event === 'Progress') {
+          downloaded += event.data.chunkLength;
+          onProgress({ downloaded, total });
+        } else if (event.event === 'Finished') {
+          onProgress({ downloaded: total ?? downloaded, total });
+        }
+      });
+    },
+  };
+}
+
+/** Restarts into the newly installed build. On Windows the installer already
+ *  closed the app, so this call only returns on macOS and Linux. */
+export async function relaunchApp(): Promise<void> {
+  if (!inTauri()) return;
+  const { relaunch } = await import('@tauri-apps/plugin-process');
+  await relaunch();
+}
+
+function mockUpdate(): AppUpdate {
+  return {
+    version: '9.9.9',
+    install: async (onProgress) => {
+      const total = 48 * 1024 * 1024;
+      for (let step = 0; step <= 24; step += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 90));
+        onProgress({ downloaded: (total / 24) * step, total });
+      }
+    },
+  };
+}

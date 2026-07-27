@@ -32,10 +32,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "nsis",
-      "msi"
-    ],
+    "targets": "all",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -52,6 +49,22 @@
       },
       "nsis": {
         "displayLanguageSelector": false
+      }
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUzMDQ2MjYyQTcyNUZCNTYKUldSVyt5V25ZbUlFNDVUSjJCdndjd3F0VHhKaUo2bExzc3Fqek9QRU1vSVI4S2ZRUTF6Vm1xOFUK",
+      "endpoints": [
+        "https://github.com/thoughts-on-things/vantage-mc/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

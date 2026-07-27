@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import type { LibraryController } from '../hooks/useLibrary.js';
 import { useLibraryHotkeys } from '../hooks/useLibraryHotkeys.js';
+import type { UpdatesController } from '../hooks/useUpdates.js';
 import type { DesktopSettings } from '../settings.js';
 import { LibraryScreen } from './LibraryScreen.js';
 import { RendersScreen } from './RendersScreen.js';
@@ -11,9 +12,10 @@ import { Sidebar } from './Sidebar.js';
 type Sheet = 'settings' | 'shortcuts' | null;
 
 /** Chrome shared by every non-viewer screen: navigation, sheets, hotkeys. */
-export function AppShell({ library, settings, onSettingsChange }: {
+export function AppShell({ library, settings, updates, onSettingsChange }: {
   library: LibraryController;
   settings: DesktopSettings;
+  updates: UpdatesController;
   onSettingsChange: (next: DesktopSettings) => void;
 }) {
   const [sheet, setSheet] = useState<Sheet>(null);
@@ -61,6 +63,7 @@ export function AppShell({ library, settings, onSettingsChange }: {
         worldCount={library.worlds.length}
         renderCount={library.renders.length}
         screen={library.screen}
+        updates={updates}
         onNavigate={library.goTo}
         settingsButtonRef={settingsButtonRef}
         shortcutsButtonRef={shortcutsButtonRef}

@@ -68,6 +68,22 @@ function useLatestDownloads(): Downloads {
   return downloads;
 }
 
+/** Browsers report Intel in the user agent even on Apple silicon, so the GPU
+ *  renderer string is the only workable arch signal. Defaults to Apple
+ *  silicon — the large majority of Macs in use — when the probe is blocked. */
+function isAppleSiliconMac(): boolean {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl');
+    const info = gl?.getExtension('WEBGL_debug_renderer_info');
+    const renderer = info ? String(gl?.getParameter(info.UNMASKED_RENDERER_WEBGL)) : '';
+    if (/apple (m\d|gpu)/i.test(renderer)) return true;
+    if (/intel|amd|radeon/i.test(renderer)) return false;
+  } catch {
+    /* fall through to the default */
+  }
+  return true;
+}
+
 /* ---------- tiny inline icon set (the launcher uses lucide; we don't ship it) ---------- */
 
 type IconProps = { size?: number; className?: string };
@@ -220,6 +236,7 @@ export function DesktopShowcase() {
   const reduced = usePrefersReducedMotion();
   const [live, setLive] = useState(false);
   const [os, setOs] = useState<'win' | 'mac' | 'linux' | 'other'>('other');
+  const [macSilicon, setMacSilicon] = useState(true);
   const windowRef = useRef<HTMLDivElement>(null);
 
   // Only run the animation loop when the mock is actually visible.
@@ -238,8 +255,12 @@ export function DesktopShowcase() {
     const ua = navigator.userAgent;
     const p = (navigator.platform || '').toLowerCase();
     if (/win/i.test(ua) || p.includes('win')) setOs('win');
-    else if (/mac/i.test(ua) || p.includes('mac')) setOs('mac');
-    else if (/linux|x11/i.test(ua) || p.includes('linux')) setOs('linux');
+    else if (/mac/i.test(ua) || p.includes('mac')) {
+      setOs('mac');
+      // Probed once here rather than in render: the animation loop re-renders
+      // this component continuously, and the probe creates a GL context.
+      setMacSilicon(isAppleSiliconMac());
+    } else if (/linux|x11/i.test(ua) || p.includes('linux')) setOs('linux');
   }, []);
 
   const downloads = useLatestDownloads();
@@ -251,10 +272,12 @@ export function DesktopShowcase() {
   const lead =
     os === 'mac'
       ? {
-          href: downloads.macArm,
+          href: macSilicon ? downloads.macArm : downloads.macIntel,
           label: 'Download for macOS',
           Icon: AppleIcon,
-          meta: <><code>.dmg</code> · Apple silicon · Intel build in the list</>,
+          meta: macSilicon
+            ? <><code>.dmg</code> · Apple silicon · Intel build in the list</>
+            : <><code>.dmg</code> · Intel · Apple silicon build in the list</>,
         }
       : os === 'linux'
         ? {

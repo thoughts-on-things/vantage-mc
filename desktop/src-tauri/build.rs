@@ -2,12 +2,14 @@ use std::{env, fs, path::PathBuf, process::Command};
 
 /// The Zig `-Dtarget` for a Cargo target triple. The sidecar always targets an
 /// explicit triple so a cross-arch bundle (an x86_64 macOS build on an arm64
-/// runner) ships the matching binary, and Linux links musl so one static
-/// sidecar runs on any distro's libc.
+/// runner) ships the matching binary. The ABIs are explicit too: gnu on
+/// Windows (self-contained, no MSVC needed — what CLI release binaries have
+/// always shipped) and musl on Linux so one static sidecar runs on any
+/// distro's libc.
 fn zig_target(cargo_target: &str) -> String {
     let arch = cargo_target.split('-').next().expect("target architecture");
     let os = if cargo_target.contains("windows") {
-        "windows"
+        "windows-gnu"
     } else if cargo_target.contains("apple-darwin") {
         "macos"
     } else if cargo_target.contains("linux") {

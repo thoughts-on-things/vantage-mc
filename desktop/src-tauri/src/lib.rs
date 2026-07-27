@@ -766,14 +766,12 @@ mod tests {
 
     #[test]
     fn world_labels_fall_back_to_the_save_folder() {
-        assert_eq!(
-            world_label("Green Valley", "C:\\saves\\green"),
-            "Green Valley"
-        );
-        assert_eq!(
-            world_label("   ", "C:\\saves\\Copper Hills"),
-            "Copper Hills"
-        );
+        // Forward slashes separate on every OS; the backslash form only
+        // parses as a path on Windows, so it is asserted there alone.
+        assert_eq!(world_label("Green Valley", "/saves/green"), "Green Valley");
+        assert_eq!(world_label("   ", "/saves/Copper Hills"), "Copper Hills");
+        assert_eq!(world_label("", "/saves/Copper Hills"), "Copper Hills");
+        #[cfg(windows)]
         assert_eq!(world_label("", "C:\\saves\\Copper Hills"), "Copper Hills");
     }
 

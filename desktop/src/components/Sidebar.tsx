@@ -53,7 +53,6 @@ function UpdateNotice({ updates }: { updates: UpdatesController }) {
       className="update-pill"
       onClick={updates.install}
       disabled={updates.phase !== 'available'}
-      aria-live="polite"
     >
       {updates.phase === 'downloading' && (
         <span className="update-progress" style={{ width: `${percent ?? 8}%` }} aria-hidden="true" />
@@ -61,7 +60,7 @@ function UpdateNotice({ updates }: { updates: UpdatesController }) {
       {updates.phase === 'available'
         ? <ArrowDownToLine size={15} />
         : <LoaderCircle size={15} className="spin" />}
-      <span className="update-copy">
+      <span className="update-copy" role="status" aria-live="polite">
         {updates.phase === 'available' && <><b>Update to {updates.version}</b><small>Download &amp; restart</small></>}
         {updates.phase === 'downloading' && <><b>Downloading update</b><small>{percent === null ? 'Starting…' : `${percent}%`}</small></>}
         {updates.phase === 'restarting' && <><b>Restarting</b><small>Installing {updates.version}</small></>}

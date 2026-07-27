@@ -195,6 +195,7 @@ if (mode === 'setup') {
   if (!ensureDependencies('site')) process.exit(1);
   runChecked(process.execPath, ['scripts/check-versions.mjs'], root, 'Checking release versions…');
   runChecked(process.execPath, ['--test', 'scripts/server-dev.test.mjs'], root, 'Checking the Vantage Server development workflow…');
+  runChecked(process.execPath, ['--test', 'scripts/build-updater-feed.test.mjs'], root, 'Checking the release updater feed builder…');
   runChecked('zig', ['fmt', '--check', '.'], root, 'Checking Zig formatting…');
   runChecked('zig', ['build', 'test'], root, 'Running Zig tests…');
   runChecked(npm, npmArgs(['run', 'ci']), join(root, 'web'), 'Checking the renderer package…');

@@ -369,3 +369,24 @@ jobs:
               throw "Invalid Authenticode signature: $($file.FullName)"
             }
           }
+
+  # The matrix jobs above each merge their own platform into latest.json with
+  # a read-modify-write, so two jobs finishing close together can drop each
+  # other's entry. This job is the single authoritative writer: it rebuilds
+  # the feed from the assets that actually made it onto the release.
+  updater-feed:
+    name: Updater feed
+    needs: [release-please, desktop]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rebuild latest.json from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: node scripts/build-updater-feed.mjs

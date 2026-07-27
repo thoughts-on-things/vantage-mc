@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.10.0...v0.11.0) (2026-07-27)
+
+
+### Features
+
+* render and explore the nether and the end ([#67](https://github.com/thoughts-on-things/vantage-mc/issues/67)) ([47db32f](https://github.com/thoughts-on-things/vantage-mc/commit/47db32feeb8ba5a6596eb519428ba2866aa633b8))
+
+
+### Bug Fixes
+
+* **server:** prioritize interactive tile bakes ([#63](https://github.com/thoughts-on-things/vantage-mc/issues/63)) ([04a0862](https://github.com/thoughts-on-things/vantage-mc/commit/04a0862db4acbd5ad57670eaf1aef282226c50a1))
+
 ## [0.10.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.9.1...v0.10.0) (2026-07-26)
 
 

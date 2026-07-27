@@ -73,9 +73,35 @@ function checkNativeTools() {
       ok('Windows MSVC target');
     }
     info('WebView2 is supplied by current Windows installations; Tauri will report if it is missing.');
+  } else if (process.platform === 'darwin') {
+    const clt = result('xcode-select', ['-p']);
+    if (clt.status !== 0) {
+      fail('The Xcode Command Line Tools were not found.', 'Run `xcode-select --install` — Tauri needs them to link the native app.');
+      healthy = false;
+    } else {
+      ok('Xcode Command Line Tools');
+    }
+  } else if (process.platform === 'linux') {
+    const webkit = result('pkg-config', ['--exists', 'webkit2gtk-4.1']);
+    if (webkit.error?.code === 'ENOENT') {
+      fail('pkg-config was not found, so the WebKitGTK check cannot run.', 'On Debian/Ubuntu: sudo apt install pkg-config, then rerun npm run doctor.');
+      healthy = false;
+    } else if (webkit.status !== 0) {
+      fail('The WebKitGTK development packages were not found.', 'On Debian/Ubuntu: sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf');
+      healthy = false;
+    } else {
+      ok('WebKitGTK 4.1');
+    }
   }
   return healthy;
 }
+
+const INSTALLER_NAMES = {
+  win32: 'Windows installers (NSIS + MSI)',
+  darwin: 'macOS app + DMG',
+  linux: 'Linux packages (AppImage, deb, rpm)',
+};
+const installerName = INSTALLER_NAMES[process.platform] ?? 'desktop bundles';
 
 function lockDigest(workspace) {
   return createHash('sha256')
@@ -163,12 +189,13 @@ if (mode === 'setup') {
   info('The first native compile can take a minute; later launches are incremental.');
   run(npm, npmArgs(['run', 'desktop:dev']), join(root, 'desktop'));
 } else if (mode === 'build') {
-  info('Building the Windows installer and bundled Zig sidecar…');
+  info(`Building the ${installerName} and bundled Zig sidecar…`);
   run(npm, npmArgs(['run', 'desktop:build']), join(root, 'desktop'));
 } else if (mode === 'check') {
   if (!ensureDependencies('site')) process.exit(1);
   runChecked(process.execPath, ['scripts/check-versions.mjs'], root, 'Checking release versions…');
   runChecked(process.execPath, ['--test', 'scripts/server-dev.test.mjs'], root, 'Checking the Vantage Server development workflow…');
+  runChecked(process.execPath, ['--test', 'scripts/build-updater-feed.test.mjs'], root, 'Checking the release updater feed builder…');
   runChecked('zig', ['fmt', '--check', '.'], root, 'Checking Zig formatting…');
   runChecked('zig', ['build', 'test'], root, 'Running Zig tests…');
   runChecked(npm, npmArgs(['run', 'ci']), join(root, 'web'), 'Checking the renderer package…');

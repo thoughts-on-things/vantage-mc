@@ -114,8 +114,15 @@ jobs:
           npm run ci
 
   desktop:
-    name: desktop (Windows)
-    runs-on: windows-latest
+    name: desktop (${{ matrix.os }})
+    # The desktop app ships on all three OSes, so the native host compiles,
+    # lints, and tests on all three — release day must never be the first time
+    # a platform builds.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.0
 
@@ -139,6 +146,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+          key: ${{ matrix.os }}
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev patchelf
 
       # The desktop Vite aliases point at ../web/src, whose React and Three.js
       # imports resolve through web/node_modules.

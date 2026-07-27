@@ -2542,6 +2542,23 @@ h2 em {
   border-top: 1px solid var(--st-line);
 }
 
+/* The mock's miniature of the app's auto-update pill. */
+.studio-update {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 7px 9px;
+  border: 1px solid rgba(215, 255, 95, 0.28);
+  border-radius: 8px;
+  background: rgba(215, 255, 95, 0.06);
+  color: var(--lime);
+}
+
+.studio-update > svg { flex: 0 0 auto; }
+.studio-update b { display: block; color: #dfe8da; font-size: 9.5px; font-weight: 620; }
+.studio-update small { display: block; font: 8px var(--mono); color: #667063; }
+
 .studio-engine {
   display: grid;
   grid-template-columns: 8px 1fr;
@@ -3074,6 +3091,30 @@ h2 em {
 
 .dl-plat-live > svg { color: var(--lime); }
 .dl-plat-live small { color: var(--lime-dim); }
+
+/* Per-variant text links (macOS arch, Linux package formats). The compound
+   selector outranks the `.dl-plat span` label rule this span also matches. */
+.dl-plat .dl-plat-links {
+  display: flex;
+  gap: 6px;
+  margin-right: 0;
+}
+
+.dl-plat-links a {
+  padding: 6px 10px;
+  border: 1px solid rgba(175, 221, 59, 0.3);
+  border-radius: 8px;
+  font: 600 12px var(--mono);
+  color: var(--lime-dim);
+  background: rgba(175, 221, 59, 0.06);
+  transition: filter 0.15s ease, transform 0.15s ease;
+}
+
+.dl-plat-links a:hover {
+  filter: brightness(1.2);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
 
 .dl-plat-btn {
   display: grid;

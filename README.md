@@ -25,16 +25,18 @@ browser, built around four ordered goals:
 
 ## Choose how you use Vantage
 
-### Vantage Desktop for Windows
+### Vantage Desktop for Windows, macOS, and Linux
 
 The easiest way to map worlds on your own PC. Vantage Desktop finds Java
 Edition saves from Minecraft, Prism, MultiMC, CurseForge, Modrinth, GDLauncher,
 and Beacon, renders them locally, and opens them directly in the GPU viewer.
 It includes cave-ready renders, native performance profiles, quality settings,
-real map thumbnails, and a searchable world library—without a command line.
+real map thumbnails, a searchable world library, and built-in auto-update —
+without a command line.
 
 Save files are always read-only, generated maps stay in Vantage's local cache,
-and nothing is uploaded. Download the signed installer from the
+and nothing is uploaded. Download the installer for your OS — signed `.exe`,
+`.dmg` for Apple silicon and Intel, or `.AppImage`/`.deb`/`.rpm` — from the
 **[Vantage site](https://vantage.beacon-mc.io/#desktop)** or the
 **[latest GitHub release](https://github.com/thoughts-on-things/vantage-mc/releases/latest)**.
 

@@ -152,8 +152,20 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
             </span>
           </button>
           <a className="cta cta-ghost" href="#desktop">
-            <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" aria-hidden="true">
-              <path d="M3 5.4 10.4 4.4V11.4H3ZM10.4 12.3V19.4L3 18.4V12.3ZM11.4 4.2 21 3V11.4H11.4ZM21 12.3V21L11.4 19.7V12.3Z" />
+            <svg
+              viewBox="0 0 24 24"
+              width="17"
+              height="17"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 3v12" />
+              <path d="m7 11 5 5 5-5" />
+              <path d="M4 20h16" />
             </svg>
             Get the desktop app
           </a>

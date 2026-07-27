@@ -101,7 +101,8 @@ check:
 # Run the complete repo validation suite used before a PR.
 verify: check
 
-# Build the Windows NSIS + MSI installers and bundled ReleaseFast Zig sidecar.
+# Build this OS's installers (NSIS + MSI / DMG / AppImage + deb + rpm) and the
+# bundled ReleaseFast Zig sidecar.
 package: desktop-build
 
 desktop-build:

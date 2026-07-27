@@ -9,7 +9,7 @@ reports, and PRs are all welcome.
 | --- | --- |
 | `src/` | The native generator (Zig): region/NBT parsing, model resolver, mesher, tile encoder |
 | `web/` | The `@thoughts-on-things/vantage-mc` npm package (tile decoder, three.js renderer, React components) and its demo app |
-| `desktop/` | Windows Tauri 2 app: React/Vite frontend, Rust host, and bundled Zig sidecar |
+| `desktop/` | Tauri 2 app for Windows, macOS, and Linux: React/Vite frontend, Rust host, and bundled Zig sidecar |
 | `vendor/` | Vendored C libraries (libdeflate, stb_image) — don't edit, update wholesale |
 
 ## Dev setup
@@ -29,7 +29,7 @@ just web-install   # npm install for web/
 There are no system library dependencies — the C decompressors are vendored —
 so `zig build` works out of the box on macOS, Linux, and Windows.
 
-For the Windows desktop studio, the same task runner owns the complete loop:
+For the desktop studio, the same task runner owns the complete loop:
 
 ```sh
 just desktop       # native Tauri app + Zig sidecar, with automatic bootstrap
@@ -37,7 +37,7 @@ just desktop-ui    # fast browser-only React/CSS loop
 just site          # marketing site + linked viewer
 just doctor        # actionable prerequisite diagnostics
 just verify        # Zig + renderer + desktop + Rust checks
-just package       # production Windows installers
+just package       # this OS's production installers
 ```
 
 To develop or verify the multiplayer server-to-viewer path, use the supervised
@@ -111,8 +111,10 @@ that should appear in a release: `feat:` creates a minor release and `fix:` or
 
 Release Please maintains the release PR and changelog from commits merged to
 `main`. Merging that PR creates the tag and GitHub release, cross-compiles the
-five CLI archives, builds the Windows desktop MSI and NSIS installers, and
-publishes `@thoughts-on-things/vantage-mc` to npm with provenance. A failed
+five CLI archives, builds the desktop installers for Windows (MSI + NSIS),
+macOS (Apple silicon and Intel `.dmg`), and Linux (AppImage, deb, rpm) along
+with the signed `latest.json` auto-update feed, and publishes
+`@thoughts-on-things/vantage-mc` to npm with provenance. A failed
 publish job can be retried safely; uploads are overwrite-safe and npm publishing
 first checks whether that exact version already exists.
 

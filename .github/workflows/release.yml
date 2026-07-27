@@ -182,12 +182,30 @@ jobs:
           done
 
   desktop:
-    name: Windows desktop installers
+    name: Desktop (${{ matrix.name }})
     needs: release-please
     if: >-
       needs.release-please.outputs.release_created == 'true' ||
       (github.event_name == 'workflow_dispatch' && inputs.build_desktop)
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+          # Both macOS architectures build on the arm64 runner; the Rust
+          # toolchain cross-compiles x86_64 and build.rs points Zig at the
+          # matching sidecar target.
+          - name: macOS Apple silicon
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: macOS Intel
+            os: macos-latest
+            target: x86_64-apple-darwin
+          # The oldest supported LTS so the AppImage's glibc floor stays low.
+          - name: Linux x64
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
     steps:
@@ -207,10 +225,20 @@ jobs:
             desktop/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+          key: ${{ matrix.target || matrix.os }}
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev patchelf
 
       # The desktop Vite aliases point at ../web/src, whose React and Three.js
       # imports resolve through web/node_modules.
@@ -222,11 +250,32 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      # Updater artifacts (per-bundle .sig files and the latest.json feed the
+      # app polls) require the updater private key, so forks and local builds
+      # skip them automatically. createUpdaterArtifacts is injected here rather
+      # than committed for the same reason: without the key it fails the build.
+      - name: Enable updater artifacts
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "No TAURI_SIGNING_PRIVATE_KEY secret; building without updater artifacts"
+            exit 0
+          fi
+          node -e "
+            const fs = require('node:fs');
+            const p = 'desktop/src-tauri/tauri.conf.json';
+            const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+            j.bundle.createUpdaterArtifacts = true;
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+          "
+
       # Keep signing opt-in for forks/local builds. The profile holds the
       # verified ThoughtsOnThings publisher identity; the description is the
       # product name shown for Vantage artifacts.
       - name: Enable Windows code signing
-        if: vars.AZURE_SIGNING_ACCOUNT != ''
+        if: runner.os == 'Windows' && vars.AZURE_SIGNING_ACCOUNT != ''
         shell: bash
         env:
           AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
@@ -254,22 +303,56 @@ jobs:
             fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
           "
 
+      # macOS signing + notarization are opt-in exactly like Windows signing:
+      # set the APPLE_TEAM_ID repository variable and the certificate secrets
+      # and tauri picks them up. Without them the bundles are ad-hoc signed, so
+      # first launch needs right-click → Open.
+      - name: Enable macOS code signing
+        if: runner.os == 'macOS' && vars.APPLE_TEAM_ID != ''
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          # Forward only the values that exist so tauri never sees an empty
+          # variable and tries to import an empty certificate.
+          emit() {
+            [ -n "$2" ] || return 0
+            { echo "$1<<VANTAGE_ENV_EOF"; echo "$2"; echo "VANTAGE_ENV_EOF"; } >> "$GITHUB_ENV"
+          }
+          emit APPLE_CERTIFICATE "$APPLE_CERTIFICATE"
+          emit APPLE_CERTIFICATE_PASSWORD "$APPLE_CERTIFICATE_PASSWORD"
+          emit APPLE_SIGNING_IDENTITY "$APPLE_SIGNING_IDENTITY"
+          emit APPLE_ID "$APPLE_ID"
+          emit APPLE_PASSWORD "$APPLE_PASSWORD"
+          emit APPLE_TEAM_ID "$APPLE_TEAM_ID"
+
       # The release already exists (release-please created it); tauri-action
-      # builds the configured MSI + NSIS bundles and attaches both to that tag.
+      # builds this platform's bundles, attaches them to that tag, and merges
+      # this platform's entry into the release's latest.json update feed.
       - uses: tauri-apps/tauri-action@v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
           tagName: ${{ needs.release-please.outputs.tag_name }}
+          args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
           retryAttempts: 2
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
           uploadWorkflowArtifacts: ${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Verify Windows signatures
-        if: vars.AZURE_SIGNING_ACCOUNT != ''
+        if: runner.os == 'Windows' && vars.AZURE_SIGNING_ACCOUNT != ''
         shell: pwsh
         run: |
           $files = @(
@@ -286,3 +369,24 @@ jobs:
               throw "Invalid Authenticode signature: $($file.FullName)"
             }
           }
+
+  # The matrix jobs above each merge their own platform into latest.json with
+  # a read-modify-write, so two jobs finishing close together can drop each
+  # other's entry. This job is the single authoritative writer: it rebuilds
+  # the feed from the assets that actually made it onto the release.
+  updater-feed:
+    name: Updater feed
+    needs: [release-please, desktop]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rebuild latest.json from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: node scripts/build-updater-feed.mjs

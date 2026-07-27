@@ -1,9 +1,9 @@
 # Vantage Desktop
 
-Vantage Desktop is the Windows-first Tauri 2 shell for the Vantage Zig renderer.
-It finds local Java Edition saves, renders them without modifying the source
-world, and opens the generated tile tree in the existing GPU-accelerated
-Vantage viewer.
+Vantage Desktop is the Tauri 2 shell for the Vantage Zig renderer, shipped for
+Windows, macOS, and Linux. It finds local Java Edition saves, renders them
+without modifying the source world, and opens the generated tile tree in the
+existing GPU-accelerated Vantage viewer.
 
 Discovery includes Beacon Launcher instance saves on Windows, macOS, and Linux.
 Beacon multiplayer worlds are authoritative on the server and are not cached as
@@ -119,7 +119,8 @@ shape is refused before it reaches the filesystem.
 - The window remembers its size, position, and maximized state between
   launches, and falls back to centering when the stored box no longer lands on
   a connected monitor.
-- Renders drive the Windows taskbar progress bar, so a minimized Vantage still
+- Renders drive the taskbar progress bar where the platform has one (the
+  Windows taskbar, Unity-style Linux docks), so a minimized Vantage still
   shows how far along a bake is.
 - **Save image** in the viewer toolbar writes the full-resolution canvas to
   `Pictures/Vantage` and offers to reveal it. The library's browser-download
@@ -131,6 +132,21 @@ shape is refused before it reaches the filesystem.
   GUI-subsystem binaries, the Zig sidecar is spawned by the shell plugin with
   `CREATE_NO_WINDOW`, and the file-manager helpers are started the same way
   with their stdio detached.
+
+## Auto-update
+
+The app checks the latest GitHub release's `latest.json` feed on launch and
+every six hours after. When a newer signed build exists, an update pill appears
+above the sidebar footer; one click downloads it with progress and restarts
+into the new version. Checks are silent by design — offline machines, builds
+ahead of the feed, and Linux installs that did not come from the AppImage
+(the `deb`/`rpm` packages update through the system package manager) simply
+never show the pill.
+
+Every updater artifact is signed with the project's minisign key and verified
+against the public key baked into `tauri.conf.json` before installing.
+Release CI only produces updater artifacts when the `TAURI_SIGNING_PRIVATE_KEY`
+secret is configured; forks and local builds skip them automatically.
 
 ## Viewer chrome
 
@@ -167,8 +183,11 @@ they remain small inline data URLs.
 
 ## Development
 
-Requirements: Zig 0.16, Rust stable, Node 18+, and the Windows WebView2 runtime.
-All development commands run from the repository root:
+Requirements: Zig 0.16, Rust stable, and Node 18+. Each OS adds its WebView:
+Windows ships WebView2, macOS needs the Xcode Command Line Tools, and Linux
+needs the WebKitGTK dev packages (`libwebkit2gtk-4.1-dev
+libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf` on Debian and
+Ubuntu). All development commands run from the repository root:
 
 ```powershell
 just desktop     # full native app; installs changed dependencies automatically
@@ -195,9 +214,11 @@ the operating system's local data directory at `Vantage/renders/<world-id>`.
 The embedded file endpoint binds to `127.0.0.1` on an ephemeral port, rejects
 path traversal, and only serves the currently selected render tree.
 
-Pull requests compile the production app and sidecar on Windows without
-creating installers. Release Please builds both the NSIS `.exe` and MSI on a
-version tag, signs them with the shared ThoughtsOnThings Microsoft Artifact
-Signing profile, verifies their Authenticode signatures, and attaches them to
-the GitHub release. Actions → Release → Run workflow can exercise the signed
-build before a release by enabling `build_desktop`.
+Pull requests compile the production app and sidecar on Windows, macOS, and
+Linux without creating installers. On a version tag, Release Please builds the
+NSIS `.exe` + MSI on Windows (signed with the shared ThoughtsOnThings
+Microsoft Artifact Signing profile and Authenticode-verified), `.dmg` bundles
+for Apple silicon and Intel Macs, and `.AppImage`/`.deb`/`.rpm` packages on
+Linux, attaching everything — plus the signed `latest.json` update feed — to
+the GitHub release. Actions → Release → Run workflow can exercise the build
+before a release by enabling `build_desktop`.

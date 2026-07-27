@@ -6,16 +6,36 @@ import mapBiomes from './assets/render-biomes-v2.png';
 const GITHUB = 'https://github.com/thoughts-on-things/vantage-mc';
 const RELEASES = `${GITHUB}/releases`;
 // Fallback target: the latest-release page always resolves, even before the
-// desktop job has ever run. On mount we upgrade this to the exact signed NSIS
-// installer via the GitHub API (see useLatestInstaller) for a one-click download.
+// desktop job has ever run. On mount we upgrade it to exact asset URLs via the
+// GitHub API (see useLatestDownloads) for one-click downloads.
 const RELEASES_LATEST = `${RELEASES}/latest`;
 const REPO_API = 'https://api.github.com/repos/thoughts-on-things/vantage-mc/releases/latest';
 
-type Installer = { url: string; version: string | null };
+type Downloads = {
+  version: string | null;
+  windows: string;
+  macArm: string;
+  macIntel: string;
+  appImage: string;
+  deb: string;
+  rpm: string;
+};
 
-/** Resolves the latest signed Windows installer (NSIS setup.exe, else MSI). */
-function useLatestInstaller(): Installer {
-  const [installer, setInstaller] = useState<Installer>({ url: RELEASES_LATEST, version: '0.4.0' });
+const PAGE_FALLBACK: Downloads = {
+  version: null,
+  windows: RELEASES_LATEST,
+  macArm: RELEASES_LATEST,
+  macIntel: RELEASES_LATEST,
+  appImage: RELEASES_LATEST,
+  deb: RELEASES_LATEST,
+  rpm: RELEASES_LATEST,
+};
+
+/** Resolves every desktop artifact on the latest release: the signed Windows
+ *  installer, both macOS disk images, and the three Linux packages. Any asset
+ *  a release does not have yet keeps the release-page fallback. */
+function useLatestDownloads(): Downloads {
+  const [downloads, setDownloads] = useState<Downloads>(PAGE_FALLBACK);
   useEffect(() => {
     let live = true;
     fetch(REPO_API, { headers: { Accept: 'application/vnd.github+json' } })
@@ -23,21 +43,45 @@ function useLatestInstaller(): Installer {
       .then((rel: { tag_name?: string; assets?: { name: string; browser_download_url: string }[] } | null) => {
         if (!live || !rel?.assets) return;
         const assets = rel.assets;
-        const win =
-          assets.find((a) => /x64[-_]setup\.exe$/i.test(a.name)) ??
-          assets.find((a) => /\.exe$/i.test(a.name) && /setup/i.test(a.name)) ??
-          assets.find((a) => /x64.*\.msi$/i.test(a.name)) ??
-          assets.find((a) => /\.msi$/i.test(a.name));
-        const version = rel.tag_name?.replace(/^v/, '') ?? null;
-        // Keep the page fallback if this release has no desktop installer yet.
-        setInstaller({ url: win?.browser_download_url ?? RELEASES_LATEST, version });
+        const find = (...patterns: RegExp[]) => {
+          for (const pattern of patterns) {
+            const hit = assets.find((a) => pattern.test(a.name));
+            if (hit) return hit.browser_download_url;
+          }
+          return RELEASES_LATEST;
+        };
+        setDownloads({
+          version: rel.tag_name?.replace(/^v/, '') ?? null,
+          windows: find(/x64[-_]setup\.exe$/i, /setup.*\.exe$/i, /x64.*\.msi$/i, /\.msi$/i),
+          macArm: find(/aarch64\.dmg$/i),
+          macIntel: find(/(x64|x86_64)\.dmg$/i),
+          appImage: find(/\.AppImage$/i),
+          deb: find(/\.deb$/i),
+          rpm: find(/\.rpm$/i),
+        });
       })
       .catch(() => {});
     return () => {
       live = false;
     };
   }, []);
-  return installer;
+  return downloads;
+}
+
+/** Browsers report Intel in the user agent even on Apple silicon, so the GPU
+ *  renderer string is the only workable arch signal. Defaults to Apple
+ *  silicon — the large majority of Macs in use — when the probe is blocked. */
+function isAppleSiliconMac(): boolean {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl');
+    const info = gl?.getExtension('WEBGL_debug_renderer_info');
+    const renderer = info ? String(gl?.getParameter(info.UNMASKED_RENDERER_WEBGL)) : '';
+    if (/apple (m\d|gpu)/i.test(renderer)) return true;
+    if (/intel|amd|radeon/i.test(renderer)) return false;
+  } catch {
+    /* fall through to the default */
+  }
+  return true;
 }
 
 /* ---------- tiny inline icon set (the launcher uses lucide; we don't ship it) ---------- */
@@ -192,6 +236,7 @@ export function DesktopShowcase() {
   const reduced = usePrefersReducedMotion();
   const [live, setLive] = useState(false);
   const [os, setOs] = useState<'win' | 'mac' | 'linux' | 'other'>('other');
+  const [macSilicon, setMacSilicon] = useState(true);
   const windowRef = useRef<HTMLDivElement>(null);
 
   // Only run the animation loop when the mock is actually visible.
@@ -210,16 +255,48 @@ export function DesktopShowcase() {
     const ua = navigator.userAgent;
     const p = (navigator.platform || '').toLowerCase();
     if (/win/i.test(ua) || p.includes('win')) setOs('win');
-    else if (/mac/i.test(ua) || p.includes('mac')) setOs('mac');
-    else if (/linux|x11/i.test(ua) || p.includes('linux')) setOs('linux');
+    else if (/mac/i.test(ua) || p.includes('mac')) {
+      setOs('mac');
+      // Probed once here rather than in render: the animation loop re-renders
+      // this component continuously, and the probe creates a GL context.
+      setMacSilicon(isAppleSiliconMac());
+    } else if (/linux|x11/i.test(ua) || p.includes('linux')) setOs('linux');
   }, []);
 
-  const installer = useLatestInstaller();
+  const downloads = useLatestDownloads();
   const step = useRenderLoop(reduced, live);
   const phase = PHASES[step] ?? PHASES[PHASES.length - 1]!;
   const rendering = phase.label !== 'Ready';
-  const detected =
-    os === 'mac' ? 'macOS' : os === 'linux' ? 'Linux' : os === 'win' ? 'Windows' : null;
+  // The lead button follows the visitor's OS; Windows is the fallback for
+  // platforms Vantage does not ship on.
+  const lead =
+    os === 'mac'
+      ? {
+          href: macSilicon ? downloads.macArm : downloads.macIntel,
+          label: 'Download for macOS',
+          Icon: AppleIcon,
+          meta: macSilicon
+            ? <><code>.dmg</code> · Apple silicon · updates itself · Intel build in the list</>
+            : <><code>.dmg</code> · Intel · updates itself · Apple silicon build in the list</>,
+        }
+      : os === 'linux'
+        ? {
+            href: downloads.appImage,
+            label: 'Download for Linux',
+            Icon: LinuxIcon,
+            meta: (
+              <>
+                <code>.AppImage</code> · x86-64 · updates itself · <code>deb</code> &amp; <code>rpm</code> update
+                via your package manager
+              </>
+            ),
+          }
+        : {
+            href: downloads.windows,
+            label: 'Download for Windows',
+            Icon: WindowsIcon,
+            meta: <>signed <code>.exe</code> installer · Windows 10 &amp; 11 · 64-bit · updates itself</>,
+          };
 
   return (
     <section className="desktop-section" id="desktop">
@@ -230,9 +307,10 @@ export function DesktopShowcase() {
         No command line. Just <em>your worlds</em>.
       </h2>
       <p className="lede reveal">
-        Vantage Desktop finds every Java world on your PC — across Minecraft, Beacon, Prism, MultiMC,
-        CurseForge and more — then uses the native Zig engine to build a cave-ready map and drops you
-        straight into the 3D viewer. Nothing leaves your machine.
+        Vantage Desktop finds every Java world on your PC — across Minecraft, Prism, MultiMC,
+        CurseForge, Modrinth, GDLauncher and Beacon — then uses the native Zig engine to build a
+        cave-ready map and drops you straight into the 3D viewer. Nothing leaves your machine, and
+        updates install themselves.
       </p>
 
       <div className="studio-stage reveal">
@@ -264,11 +342,18 @@ export function DesktopShowcase() {
                 <button className="active" type="button" tabIndex={-1}>
                   <MapIcon size={16} /> Worlds <span>{WORLDS.length}</span>
                 </button>
-                <button type="button" tabIndex={-1} disabled>
-                  <LayersIcon size={16} /> Renders <em>soon</em>
+                <button type="button" tabIndex={-1}>
+                  <LayersIcon size={16} /> Renders <span>2</span>
                 </button>
               </nav>
               <div className="studio-sidebar-foot">
+                <span className="studio-update">
+                  <DownloadIcon size={11} />
+                  <span>
+                    <b>Update ready</b>
+                    <small>one click · restarts itself</small>
+                  </span>
+                </span>
                 <span className="studio-engine">
                   <i /> <b>Zig core</b>
                   <small>connected</small>
@@ -377,51 +462,55 @@ export function DesktopShowcase() {
       {/* ---------- download panel ---------- */}
       <div className="download reveal">
         <div className="dl-lead">
-          <a className="cta cta-primary dl-btn" href={installer.url} rel="noreferrer">
-            <WindowsIcon size={19} />
-            Download for Windows
+          <a className="cta cta-primary dl-btn" href={lead.href} rel="noreferrer">
+            <lead.Icon size={19} />
+            {lead.label}
             <DownloadIcon size={17} className="dl-btn-arrow" />
           </a>
           <p className="dl-meta">
-            {installer.version ? `v${installer.version} · ` : ''}signed <code>.exe</code> installer · Windows 10 &amp;
-            11 · 64-bit
+            {downloads.version ? `v${downloads.version} · ` : ''}
+            {lead.meta}
           </p>
           <p className="dl-detected">
-            {detected && detected !== 'Windows' ? (
-              <>We spotted {detected} — the {detected} build is on the way. </>
-            ) : null}
             <a href={RELEASES} rel="noreferrer">
               All downloads &amp; release notes ↗
             </a>
           </p>
         </div>
 
-        <ul className="dl-platforms" aria-label="Platform availability">
+        <ul className="dl-platforms" aria-label="Platform downloads">
           <li className="dl-plat dl-plat-live">
             <WindowsIcon size={22} />
             <span>
               <b>Windows</b>
-              <small>Available now</small>
+              <small>Signed installer · x64</small>
             </span>
-            <a className="dl-plat-btn" href={installer.url} rel="noreferrer" aria-label="Download for Windows">
+            <a className="dl-plat-btn" href={downloads.windows} rel="noreferrer" aria-label="Download for Windows">
               <DownloadIcon size={16} />
             </a>
           </li>
-          <li className="dl-plat">
+          <li className="dl-plat dl-plat-live">
             <AppleIcon size={22} />
             <span>
               <b>macOS</b>
-              <small>Coming soon</small>
+              <small>Apple silicon &amp; Intel</small>
             </span>
-            <em>soon</em>
+            <span className="dl-plat-links">
+              <a href={downloads.macArm} rel="noreferrer">M-series</a>
+              <a href={downloads.macIntel} rel="noreferrer">Intel</a>
+            </span>
           </li>
-          <li className="dl-plat">
+          <li className="dl-plat dl-plat-live">
             <LinuxIcon size={22} />
             <span>
               <b>Linux</b>
-              <small>Coming soon</small>
+              <small>x86-64</small>
             </span>
-            <em>soon</em>
+            <span className="dl-plat-links">
+              <a href={downloads.appImage} rel="noreferrer">AppImage</a>
+              <a href={downloads.deb} rel="noreferrer">deb</a>
+              <a href={downloads.rpm} rel="noreferrer">rpm</a>
+            </span>
           </li>
         </ul>
       </div>

@@ -39,11 +39,16 @@ export interface ManifestDimension {
 
 /** How a dimension should look: the sky dome gradient, the fog it fades into,
  *  and the light defaults that make it read like the game. The nether has no
- *  daylight to speak of and a crimson haze; the end is a pale void. Colours are
- *  sRGB 0..255. */
+ *  daylight to speak of and a crimson haze; the end is a pale void.
+ *
+ *  Colours arrive in the manifest as sRGB 0..255 and are normalized on parse,
+ *  so every triple below is 0..1 — what the renderer's colour setters take. */
 export interface ManifestAtmosphere {
+  /** Normalized sRGB, 0..1. */
   skyTop: readonly [number, number, number];
+  /** Normalized sRGB, 0..1. */
   skyHorizon: readonly [number, number, number];
+  /** Normalized sRGB, 0..1. */
   fog: readonly [number, number, number];
   /** Brightness floor at zero baked light (the viewer's `light.ambient`). */
   ambient: number;

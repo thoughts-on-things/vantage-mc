@@ -53,9 +53,12 @@ export function parseWorldIndex(data: unknown): WorldIndex {
     if (typeof manifest !== 'string' || manifest.includes('..') || !MANIFEST_RE.test(manifest)) {
       throw new Error(`vantage: world index dimension ${i} has an invalid manifest path`);
     }
+    // Untrusted input that ends up framing the camera: NaN or Infinity here
+    // would poison every view derived from it, so only finite numbers count.
     const s = o['spawn'] as Record<string, unknown> | undefined;
+    const coord = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
     const spawn =
-      typeof s === 'object' && s !== null && typeof s['x'] === 'number' && typeof s['y'] === 'number' && typeof s['z'] === 'number'
+      typeof s === 'object' && s !== null && coord(s['x']) && coord(s['y']) && coord(s['z'])
         ? { x: s['x'], y: s['y'], z: s['z'] }
         : undefined;
     return {
@@ -64,8 +67,8 @@ export function parseWorldIndex(data: unknown): WorldIndex {
       label: typeof label === 'string' && label.length > 0 ? label : id,
       kind: typeof kind === 'string' && KINDS.has(kind) ? (kind as WorldDimension['kind']) : 'custom',
       manifest,
-      tiles: typeof tiles === 'number' && tiles >= 0 ? tiles : 0,
-      bytes: typeof bytes === 'number' && bytes >= 0 ? bytes : 0,
+      tiles: typeof tiles === 'number' && Number.isFinite(tiles) && tiles >= 0 ? tiles : 0,
+      bytes: typeof bytes === 'number' && Number.isFinite(bytes) && bytes >= 0 ? bytes : 0,
       ...(spawn ? { spawn } : {}),
     };
   });

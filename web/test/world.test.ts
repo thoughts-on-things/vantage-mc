@@ -63,6 +63,17 @@ describe('parseWorldIndex', () => {
       parseWorldIndex({ format: 1, dimensions: [{ ...good.dimensions[0], slug: 'Not A Slug' }] }),
     ).toThrow(/id\/slug/);
   });
+
+  it('drops counts and spawns that are not finite numbers', () => {
+    const one = (patch: Record<string, unknown>) =>
+      parseWorldIndex({ format: 1, dimensions: [{ ...good.dimensions[0], ...patch }] }).dimensions[0]!;
+    // A count fed into layout arithmetic, and a spawn fed straight to the
+    // camera: neither may carry NaN or Infinity out of an untrusted index.
+    expect(one({ tiles: Number.POSITIVE_INFINITY, bytes: Number.NaN }).tiles).toBe(0);
+    expect(one({ tiles: Number.POSITIVE_INFINITY, bytes: Number.NaN }).bytes).toBe(0);
+    expect(one({ spawn: { x: 0, y: Number.NaN, z: 0 } }).spawn).toBeUndefined();
+    expect(one({ spawn: { x: Number.POSITIVE_INFINITY, y: 64, z: 0 } }).spawn).toBeUndefined();
+  });
 });
 
 describe('isWorldIndex', () => {

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.11.0...v0.12.0) (2026-07-27)
+
+
+### Features
+
+* **desktop:** auto-update + macOS and Linux builds ([#68](https://github.com/thoughts-on-things/vantage-mc/issues/68)) ([3594cb0](https://github.com/thoughts-on-things/vantage-mc/commit/3594cb0fba30b6ed0c737569d775aa4e5cfb5b97))
+
 ## [0.11.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.10.0...v0.11.0) (2026-07-27)
 
 

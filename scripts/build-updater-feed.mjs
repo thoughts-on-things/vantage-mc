@@ -50,8 +50,12 @@ export function buildFeed(assets, { version, pubDate, readSignature }) {
 
 function run(command, args) {
   const result = spawnSync(command, args, { encoding: 'utf8', windowsHide: true });
+  if (result.error) {
+    throw new Error(`${command} ${args.join(' ')} could not start: ${result.error.message}`);
+  }
   if (result.status !== 0) {
-    throw new Error(`${command} ${args.join(' ')} failed:\n${result.stderr || result.stdout}`);
+    const output = result.stderr || result.stdout || `exit code ${result.status}`;
+    throw new Error(`${command} ${args.join(' ')} failed:\n${output}`);
   }
   return result.stdout;
 }

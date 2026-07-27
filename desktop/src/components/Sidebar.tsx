@@ -53,6 +53,7 @@ function UpdateNotice({ updates }: { updates: UpdatesController }) {
   const busy = updates.phase !== 'available';
   return (
     <button
+      type="button"
       className="update-pill"
       onClick={busy ? undefined : updates.install}
       aria-disabled={busy}

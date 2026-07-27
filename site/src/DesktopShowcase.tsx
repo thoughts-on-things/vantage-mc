@@ -276,21 +276,26 @@ export function DesktopShowcase() {
           label: 'Download for macOS',
           Icon: AppleIcon,
           meta: macSilicon
-            ? <><code>.dmg</code> · Apple silicon · Intel build in the list</>
-            : <><code>.dmg</code> · Intel · Apple silicon build in the list</>,
+            ? <><code>.dmg</code> · Apple silicon · updates itself · Intel build in the list</>
+            : <><code>.dmg</code> · Intel · updates itself · Apple silicon build in the list</>,
         }
       : os === 'linux'
         ? {
             href: downloads.appImage,
             label: 'Download for Linux',
             Icon: LinuxIcon,
-            meta: <><code>.AppImage</code> · x86-64 · <code>deb</code> &amp; <code>rpm</code> in the list</>,
+            meta: (
+              <>
+                <code>.AppImage</code> · x86-64 · updates itself · <code>deb</code> &amp; <code>rpm</code> update
+                via your package manager
+              </>
+            ),
           }
         : {
             href: downloads.windows,
             label: 'Download for Windows',
             Icon: WindowsIcon,
-            meta: <>signed <code>.exe</code> installer · Windows 10 &amp; 11 · 64-bit</>,
+            meta: <>signed <code>.exe</code> installer · Windows 10 &amp; 11 · 64-bit · updates itself</>,
           };
 
   return (
@@ -464,7 +469,7 @@ export function DesktopShowcase() {
           </a>
           <p className="dl-meta">
             {downloads.version ? `v${downloads.version} · ` : ''}
-            {lead.meta} · updates itself
+            {lead.meta}
           </p>
           <p className="dl-detected">
             <a href={RELEASES} rel="noreferrer">

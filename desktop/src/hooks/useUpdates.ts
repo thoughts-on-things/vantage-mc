@@ -33,7 +33,17 @@ export function useUpdates(): UpdatesController {
       if (installingRef.current) return;
       try {
         const update = await checkForUpdate();
-        if (!alive || !update || installingRef.current) return;
+        if (!alive || installingRef.current) return;
+        if (!update) {
+          // An authoritative "this build is current" withdraws any earlier
+          // offer — the app may have been updated underneath us by a package
+          // manager. A failed check (below) never clears it: offline is not
+          // proof the update went away.
+          updateRef.current = null;
+          setVersion(null);
+          setPhase('idle');
+          return;
+        }
         updateRef.current = update;
         setVersion(update.version);
         setPhase('available');

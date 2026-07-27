@@ -3092,10 +3092,12 @@ h2 em {
 .dl-plat-live > svg { color: var(--lime); }
 .dl-plat-live small { color: var(--lime-dim); }
 
-/* Per-variant text links (macOS arch, Linux package formats). */
-.dl-plat-links {
+/* Per-variant text links (macOS arch, Linux package formats). The compound
+   selector outranks the `.dl-plat span` label rule this span also matches. */
+.dl-plat .dl-plat-links {
   display: flex;
   gap: 6px;
+  margin-right: 0;
 }
 
 .dl-plat-links a {

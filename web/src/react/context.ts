@@ -3,7 +3,7 @@
 // events into React state; children read it via useVantage().
 
 import { createContext, useContext } from 'react';
-import type { BiomeEntry, TileInfo, VantageViewer } from '../three/index.js';
+import type { BiomeEntry, TileInfo, VantageViewer, WorldDimension } from '../three/index.js';
 
 export type VantageStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -20,6 +20,11 @@ export interface VantageContextValue {
   highlightedBiome: number | null;
   /** Biome id under the cursor, or `null`. */
   hoveredBiome: number | null;
+  /** Every dimension of the loaded world — empty unless it was loaded from a
+   *  `world.json` index. */
+  dimensions: WorldDimension[];
+  /** The dimension currently showing, or `null` for a single-manifest world. */
+  dimension: WorldDimension | null;
 }
 
 export const VantageContext = createContext<VantageContextValue | null>(null);

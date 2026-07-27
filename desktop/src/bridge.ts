@@ -7,6 +7,8 @@ export interface RenderSignature {
   fullCaves: boolean;
   smoothLighting: boolean;
   biomeBlend: boolean;
+  /** Absent in records written before dimension support (overworld only). */
+  allDimensions?: boolean;
 }
 
 export interface WorldInfo {
@@ -48,6 +50,9 @@ export interface RenderProgress {
 
 export interface RenderReady {
   manifestUrl: string;
+  /** The render's `world.json` when it has one — every dimension, for the
+   *  viewer's switcher. Absent for renders made before dimension support. */
+  worldUrl?: string;
   outputPath: string;
 }
 
@@ -94,7 +99,7 @@ const mockWorlds: WorldInfo[] = [
     thumbnailUrl: null,
     cached: true,
     renderedAtMs: Date.now() - 30 * HOUR,
-    renderSettings: { fullCaves: true, smoothLighting: true, biomeBlend: true },
+    renderSettings: { fullCaves: true, smoothLighting: true, biomeBlend: true, allDimensions: true },
   },
 ];
 
@@ -108,7 +113,7 @@ const mockRenders: RenderEntry[] = [
     fileCount: 268,
     renderedAtMs: Date.now() - 30 * HOUR,
     worldMissing: false,
-    settings: { fullCaves: true, smoothLighting: true, biomeBlend: true },
+    settings: { fullCaves: true, smoothLighting: true, biomeBlend: true, allDimensions: true },
     thumbnailUrl: null,
   },
   {

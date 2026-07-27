@@ -67,6 +67,12 @@ const FEATURES = [
     wide: false,
   },
   {
+    icon: '🔥',
+    title: 'Nether and End too',
+    body: 'All three dimensions, one viewer. The Nether renders with its roof off.',
+    wide: false,
+  },
+  {
     icon: '🧭',
     title: 'Layers & flight',
     body: 'Biome legend, day/night lighting, quality presets, free flight. Press B.',

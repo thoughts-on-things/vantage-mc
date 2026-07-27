@@ -102,6 +102,37 @@ describe('parseManifest', () => {
     expect(() => parseManifest({ ...good, tiles: [{ ...good.tiles[0], revision: 12 }] })).toThrow(/revision/);
   });
 
+  it('carries the dimension and its atmosphere, normalized to 0..1 colours', () => {
+    const m = parseManifest({
+      ...good,
+      dimension: { id: 'minecraft:the_nether', slug: 'the_nether', label: 'The Nether', kind: 'nether' },
+      atmosphere: {
+        skyTop: [40, 12, 10],
+        skyHorizon: [104, 40, 26],
+        fog: [104, 40, 26],
+        ambient: 0.3,
+        daylight: 0.25,
+      },
+    });
+    expect(m.dimension).toEqual({ id: 'minecraft:the_nether', slug: 'the_nether', label: 'The Nether', kind: 'nether' });
+    expect(m.atmosphere?.skyTop[0]).toBeCloseTo(40 / 255);
+    expect(m.atmosphere?.ambient).toBe(0.3);
+    expect(m.atmosphere?.daylight).toBe(0.25);
+    // Both optional: a pre-dimension render carries neither.
+    expect(parseManifest(good).dimension).toBeUndefined();
+    expect(parseManifest(good).atmosphere).toBeUndefined();
+    // Junk is dropped rather than thrown: the map still renders with defaults.
+    expect(parseManifest({ ...good, dimension: { id: 'x', slug: '../etc' } }).dimension).toBeUndefined();
+    expect(parseManifest({ ...good, atmosphere: { skyTop: [1, 2] } }).atmosphere).toBeUndefined();
+    // An unknown kind still names itself — it just renders like a custom one.
+    expect(parseManifest({ ...good, dimension: { id: 'aether:x', slug: 'aether.x', kind: 'sideways' } }).dimension).toEqual({
+      id: 'aether:x',
+      slug: 'aether.x',
+      label: 'aether:x',
+      kind: 'custom',
+    });
+  });
+
   it('rejects wrong format versions and malformed shapes', () => {
     expect(() => parseManifest(null)).toThrow(/not an object/);
     expect(() => parseManifest({ ...good, format: 7 })).toThrow(/format/);

@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   BiomeLayer,
   DepthSlider,
+  DimensionPicker,
   LightPanel,
   MapNav,
   Reticle,
@@ -65,6 +66,7 @@ export function ViewerApp({ world, label, onExit }: { world: string; label: stri
       <VantageViewer world={world} streaming={streaming}>
         <Chrome label={label} onExit={onExit} />
         <Reticle />
+        <DimensionPicker />
         <BiomeLayer legend hover />
         <LightPanel />
         <SettingsPanel />

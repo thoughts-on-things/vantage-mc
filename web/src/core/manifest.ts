@@ -27,6 +27,35 @@ export interface LowresLevel {
   tiles: ManifestTile[];
 }
 
+/** Which Minecraft dimension a render covers. `slug` is the render's
+ *  sub-directory (`overworld` for the root) and the id used in deep links. */
+export interface ManifestDimension {
+  /** Resource id, e.g. `minecraft:the_nether`. */
+  id: string;
+  slug: string;
+  label: string;
+  kind: 'overworld' | 'nether' | 'end' | 'custom';
+}
+
+/** How a dimension should look: the sky dome gradient, the fog it fades into,
+ *  and the light defaults that make it read like the game. The nether has no
+ *  daylight to speak of and a crimson haze; the end is a pale void.
+ *
+ *  Colours arrive in the manifest as sRGB 0..255 and are normalized on parse,
+ *  so every triple below is 0..1 — what the renderer's colour setters take. */
+export interface ManifestAtmosphere {
+  /** Normalized sRGB, 0..1. */
+  skyTop: readonly [number, number, number];
+  /** Normalized sRGB, 0..1. */
+  skyHorizon: readonly [number, number, number];
+  /** Normalized sRGB, 0..1. */
+  fog: readonly [number, number, number];
+  /** Brightness floor at zero baked light (the viewer's `light.ambient`). */
+  ambient: number;
+  /** How much baked sky light counts (the viewer's `light.daylight`). */
+  daylight: number;
+}
+
 /** A parsed `manifest.json` for a tiled world render. */
 export interface WorldManifest {
   /** Manifest schema version (1 = hires tiles only, 2 adds `lowres`,
@@ -44,6 +73,12 @@ export interface WorldManifest {
   textures: string;
   /** World spawn point, when the generator could read level.dat. */
   spawn?: { x: number; y: number; z: number };
+  /** Which dimension this render covers (absent in pre-dimension renders,
+   *  which are always the overworld). */
+  dimension?: ManifestDimension;
+  /** The dimension's sky, fog and light defaults — applied on load unless the
+   *  embedder passed its own `light` settings. */
+  atmosphere?: ManifestAtmosphere;
   /** True when the render kept full cave geometry (`--caves full`) — the
    *  viewer's depth-slice cave view has real caves to reveal. */
   caves?: boolean;
@@ -80,6 +115,49 @@ export interface WorldManifest {
 /** Tile-coordinate key for maps/sets. */
 export function tileKey(x: number, z: number): string {
   return `${x},${z}`;
+}
+
+const DIMENSION_KINDS = new Set(['overworld', 'nether', 'end', 'custom']);
+
+/** Slugs address directories and URL fragments, so they stay to the character
+ *  set both accept — a manifest is untrusted input like any other fetch. */
+const SLUG_RE = /^[a-z0-9._-]{1,64}$/;
+
+function parseDimension(value: unknown): ManifestDimension | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const o = value as Record<string, unknown>;
+  const { id, slug, label, kind } = o;
+  if (typeof id !== 'string' || typeof slug !== 'string' || !SLUG_RE.test(slug)) return undefined;
+  return {
+    id,
+    slug,
+    label: typeof label === 'string' && label.length > 0 ? label : id,
+    kind: typeof kind === 'string' && DIMENSION_KINDS.has(kind) ? (kind as ManifestDimension['kind']) : 'custom',
+  };
+}
+
+function parseRgb(value: unknown): [number, number, number] | undefined {
+  if (!Array.isArray(value) || value.length !== 3) return undefined;
+  if (!value.every((c) => typeof c === 'number' && Number.isFinite(c))) return undefined;
+  return value.map((c: number) => Math.min(255, Math.max(0, c)) / 255) as [number, number, number];
+}
+
+function parseAtmosphere(value: unknown): ManifestAtmosphere | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const o = value as Record<string, unknown>;
+  const skyTop = parseRgb(o['skyTop']);
+  const skyHorizon = parseRgb(o['skyHorizon']);
+  const fog = parseRgb(o['fog']);
+  if (!skyTop || !skyHorizon || !fog) return undefined;
+  const unit = (v: unknown, fallback: number) =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : fallback;
+  return {
+    skyTop,
+    skyHorizon,
+    fog,
+    ambient: unit(o['ambient'], 0.12),
+    daylight: unit(o['daylight'], 1),
+  };
 }
 
 /**
@@ -171,6 +249,8 @@ export function parseManifest(data: unknown): WorldManifest {
     yRange = { min: yr['min'], max: yr['max'] };
   }
 
+  const dimension = parseDimension(m['dimension']);
+  const atmosphere = parseAtmosphere(m['atmosphere']);
   const maxSectionVerts = m['maxSectionVerts'];
   const textureLayers = m['textureLayers'];
   const pr = m['progress'] as Record<string, unknown> | undefined;
@@ -189,6 +269,8 @@ export function parseManifest(data: unknown): WorldManifest {
     ...(m['dynamic'] === true ? { dynamic: true } : {}),
     ...(progress ? { progress } : {}),
     ...(spawn ? { spawn } : {}),
+    ...(dimension ? { dimension } : {}),
+    ...(atmosphere ? { atmosphere } : {}),
     ...(m['caves'] === true ? { caves: true } : {}),
     ...(yRange ? { yRange } : {}),
     ...(lowres ? { lowres } : {}),

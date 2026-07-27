@@ -109,6 +109,40 @@ scene, or call `viewer.invalidate()` after mutating it externally.
 `viewer.screenshot()` returns the current view as a PNG data URL (`<MapNav>`
 has a button for it, next to its fullscreen toggle).
 
+### Every dimension
+
+`vantage render` bakes the nether and the end alongside the overworld and
+writes a `world.json` index next to them. Point the viewer at that instead of a
+single manifest and it opens one dimension, offers the rest, and takes each
+one's sky, fog and light floor from its manifest — so the nether arrives
+crimson and lit by its lava, the end as pale islands over the void:
+
+```tsx
+import { VantageViewer, DimensionPicker } from '@thoughts-on-things/vantage-mc/react';
+
+<VantageViewer world="/world.json">
+  <DimensionPicker />
+</VantageViewer>
+```
+
+`<DimensionPicker>` renders nothing for a single-dimension world, so it is safe
+to include unconditionally. The dimension is part of the deep link
+(`#the_nether@x,y,z,…`), and each dimension remembers where its camera was.
+Engine API: `viewer.dimensions`, `viewer.dimension`,
+`await viewer.setDimension('the_nether')`, and a `'dimension'` event.
+
+It behaves as a toolbar: Tab reaches the open dimension, `←`/`→` walk the row,
+Enter switches (arrowing never triggers a load). `position` puts it in any
+corner or the top centre — on phone-width screens it moves above the navigation
+cluster rather than fighting the corner panels. Passing `className` lets you
+re-home it entirely: the desktop app resets its position and drops its glass to
+seat the row inside its own toolbar.
+
+Every dimension directory is a complete render — its own manifest, tiles, LOD
+pyramid and texture array — so `world="/the_nether/manifest.json"` also works,
+and a viewer that only knows about `manifest.json` still gets the overworld at
+the render root.
+
 Worlds baked with `vantage render --caves full` get the **cave view**: a
 depth slice that cuts the world at any Y. Toggle it with `C` or `<MapNav>`'s
 layers button, set the depth with the `<DepthSlider>` gauge, and share it —

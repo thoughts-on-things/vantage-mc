@@ -402,6 +402,17 @@ button:focus-visible, input:focus-visible, [role='button']:focus-visible {
 .toolbar-icon { width: 34px; height: 37px; flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: var(--radius-sm); color: var(--text-3); background: transparent; cursor: pointer; transition: color 0.16s ease, background 0.16s ease; }
 .toolbar-icon:hover { color: var(--text-1); background: rgba(255, 255, 255, 0.08); }
 
+/* The library's dimension switch, re-homed from a floating overlay into this
+   row: its own glass is dropped, it wears the app's accent, and only the
+   current dimension keeps its name so the row stays short. */
+.viewer-toolbar .toolbar-dims { --vtg-accent: var(--accent); position: static; transform: none; flex: 0 0 auto; max-width: none; overflow: visible; gap: 2px; padding: 0; border: 0; background: none; box-shadow: none; backdrop-filter: none; animation: none; }
+.viewer-toolbar .toolbar-dims .vtg-dim-btn { height: 37px; padding: 0 10px; gap: 7px; border-radius: var(--radius-sm); color: var(--text-2); font-family: inherit; font-size: var(--text-sm); font-weight: 500; letter-spacing: 0; transition: background 0.16s ease, color 0.16s ease, transform 0.12s ease; }
+.viewer-toolbar .toolbar-dims .vtg-dim-btn:not(.vtg-on) .vtg-dim-label { display: none; }
+.viewer-toolbar .toolbar-dims .vtg-dim-btn:hover:not(:disabled) { color: var(--text-1); background: rgba(255, 255, 255, 0.1); border-color: transparent; }
+.viewer-toolbar .toolbar-dims .vtg-dim-btn:active:not(:disabled) { transform: scale(0.97); }
+.viewer-toolbar .toolbar-dims .vtg-dim-btn.vtg-on { color: var(--accent-ink); }
+.viewer-toolbar .toolbar-dims .vtg-dim-btn:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+
 /* Directly under the toolbar: it reports on a toolbar action, and the corners
    it would otherwise take are the viewer's own (nav below, panels right,
    lighting bottom-left). */
@@ -473,6 +484,10 @@ button:focus-visible, input:focus-visible, [role='button']:focus-visible {
 @media (max-width: 940px) {
   .toolbar-label { display: none; }
   .toolbar-action { padding: 0 10px; }
+  /* Down here even the current dimension gives up its name; the glyphs and the
+     highlight still say which one is open. */
+  .viewer-toolbar .toolbar-dims .vtg-dim-label { display: none; }
+  .viewer-toolbar .toolbar-dims .vtg-dim-btn { padding: 0 8px; }
 }
 
 @media (max-width: 720px) {

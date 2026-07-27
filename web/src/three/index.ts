@@ -16,6 +16,7 @@ export {
   createTerrainMaterial,
   createWaterMaterial,
   createSky,
+  setSkyColors,
   createLowresMaterial,
   SKY_TOP,
   SKY_HORIZON,

@@ -407,9 +407,12 @@ body-size, header-size, idle-timeout, TLS, and audit policy at the edge proxy.
 
 ## Current boundaries
 
-- Java Edition Anvil saves and the overworld are supported. Other dimensions
-  should become explicit world IDs rather than filesystem parameters supplied
-  by a client.
+- Java Edition Anvil saves are supported. One session streams one dimension:
+  `--dimension nether` (default: the overworld) picks which, and the manifest
+  names it. Serving several at once should arrive as explicit world IDs rather
+  than filesystem parameters supplied by a client — for now, run one sidecar
+  per dimension behind the same proxy. Batch `vantage render` has no such
+  limit: it writes every dimension of a save at once.
 - Vantage renders persisted terrain, not players, entities, inventories, chat,
   or live chunk packets.
 - The sidecar is an HTTP data plane, not a Minecraft remote administration
@@ -419,7 +422,7 @@ body-size, header-size, idle-timeout, TLS, and audit policy at the edge proxy.
 - Native TLS is intentionally out of scope; public deployments require a
   trusted TLS reverse proxy.
 
-These boundaries keep protocol v1 small and auditable. Future additions—more
-dimensions, host-pushed invalidations from Minecraft's management protocol,
+These boundaries keep protocol v1 small and auditable. Future additions—several
+dimensions in one session, host-pushed invalidations from Minecraft's management protocol,
 entity overlays, or shared object storage—can extend the world descriptor and
 artifact streams without moving identity or server control into Vantage.

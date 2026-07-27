@@ -1,4 +1,4 @@
-import { Cpu, Gauge, Layers3, Moon, Sparkles, X, Zap } from 'lucide-react';
+import { Cpu, Gauge, Globe2, Layers3, Moon, Sparkles, X, Zap } from 'lucide-react';
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react';
 import type { SystemProfile } from '../bridge.js';
 import { renderThreadCount } from '../lib/renderProfile.js';
@@ -65,6 +65,13 @@ export function SettingsSheet({ settings, system, onChange, onClose }: {
 
           <section className="settings-group">
             <div className="settings-group-title"><Layers3 size={16} /><div><h3>Render detail</h3><p>Applied the next time a world is rendered.</p></div></div>
+            <SettingToggle
+              icon={<Globe2 size={17} />}
+              title="All dimensions"
+              copy="Render the nether and the end too, and switch between them in the viewer."
+              checked={settings.allDimensions}
+              onChange={(allDimensions) => update({ allDimensions })}
+            />
             <SettingToggle
               icon={<Moon size={17} />}
               title="Cave-ready geometry"

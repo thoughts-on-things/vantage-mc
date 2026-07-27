@@ -35,3 +35,7 @@ desktop/src-tauri/icons/StoreLogo.png
 # Tiled render output (regenerate with `vantage render`)
 web/public/manifest.json
 web/public/tiles/
+# Multi-dimension renders: the world index, plus one directory per
+# non-overworld dimension (the_nether, the_end, or a data pack's slug).
+web/public/world.json
+web/public/*/

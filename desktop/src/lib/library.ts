@@ -36,7 +36,9 @@ export function sameSignature(signature: RenderSignature, settings: DesktopSetti
   return (
     signature.fullCaves === settings.fullCaves &&
     signature.smoothLighting === settings.smoothLighting &&
-    signature.biomeBlend === settings.biomeBlend
+    signature.biomeBlend === settings.biomeBlend &&
+    // Older records predate dimensions and covered the overworld only.
+    (signature.allDimensions ?? false) === settings.allDimensions
   );
 }
 

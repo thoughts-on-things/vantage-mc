@@ -84,6 +84,11 @@ versioned binary tile contract, so each can evolve independently.
 - **Whole-world tiled streaming** — every populated chunk is baked into
   gzip-wrapped tiles + a manifest; the viewer streams them around the camera
   (nearest-first, distance-based unload), so world size doesn't matter.
+- **All three dimensions** — the nether and the end render beside the
+  overworld and share one viewer. The nether's bedrock lid is cut away before
+  anything is lit or meshed, both skyless dimensions cull by what a camera can
+  actually reach instead of by sky light, and each arrives with its own sky,
+  fog and light floor.
 - **GPU dequantization** — tiles upload in their on-disk quantized encoding and
   the vertex shader dequantizes, so arriving tiles cost the main thread nearly
   nothing and panning stays stutter-free.
@@ -173,9 +178,29 @@ vantage serve my-map --open      # → http://127.0.0.1:8268/
 the binary — no Node needed to view a map. Pass
 `--host 0.0.0.0` to share the map with your local network.
 
+It renders **every dimension the save has**: the overworld lands at the root
+(`manifest.json` + `tiles/`, exactly where it always did), the nether and the
+end get their own self-contained sub-directories, and a small `world.json`
+indexes them for the viewer's dimension switcher.
+
+```sh
+vantage render "~/.minecraft/saves/My World" --out my-map
+#   Overworld    81 tiles · 25.8 MB → my-map/manifest.json
+#   The Nether   34 tiles · 14.1 MB → my-map/the_nether
+#   The End       9 tiles ·  1.2 MB → my-map/the_end
+vantage serve my-map --open      # one viewer, all three
+```
+
 The renderer only ever reads the world — it never writes to it. Useful flags:
 
 - `--out <dir>` — output directory (default `web/public`).
+- `--dimension <list>` — which dimensions to render: `all` (default),
+  `overworld`, `nether`, `end`, a resource id (`minecraft:the_nether`), or a
+  comma-separated list. Data-pack dimensions under
+  `<save>/dimensions/<namespace>/<name>` are found and rendered too.
+- `--ceiling <y|keep>` — the nether's roof cut (default `104`): blocks at or
+  above this Y are dropped before the tile is lit or meshed, so the map opens
+  into the caverns instead of showing a bedrock lid. `keep` renders the roof.
 - `--assets <dir>` — the extracted `assets/minecraft` directory (default:
   newest version under `~/.cache/vantage/assets`).
 - `--radius <chunks>` — render only a window around spawn (quick previews).
@@ -183,7 +208,10 @@ The renderer only ever reads the world — it never writes to it. Useful flags:
   into dark, sky-light-0 cells below this Y are skipped. Ocean and lake floors
   are always kept. `full` keeps every cave and enables the viewer's **cave
   view** — press `C` and slice the world at any Y. Costs disk (New World:
-  25 → 47 MB gzipped), not bake time.
+  25 → 47 MB gzipped), not bake time. The nether and the end never cull this
+  way (nothing there has sky light): the nether drops only what is sealed off
+  from every camera, the end keeps every face, and both always offer the cave
+  view.
 - `--tile-chunks <n>` — tile span in chunks (default 8 = 128×128 blocks).
 - `--threads <n>` — upper bound on tile-render parallelism. By default Vantage
   uses the smaller of the logical-core count and its memory admission limit.
@@ -210,7 +238,9 @@ hour, with a bounded memory footprint (the world stays on disk and concurrent
 bakes pass through the same `--threads` / `--memory` admission gate). Duplicate
 requests for an in-flight tile share one bake. Tiles cache into `--out` (default
 `web/public`) as they bake, so panning back is instant, and the cache doubles
-as a partial `render` you can `serve` later. It takes the same world flags as
+as a partial `render` you can `serve` later. `live` and `server` stream one
+dimension per session — `--dimension nether` picks it; the default is the
+overworld. It takes the same world flags as
 `render` (`--tile-chunks`, `--radius`, `--caves`, `--light`, `--biome-blend`,
 `--gz`, `--threads`, `--memory`) plus `serve`'s `--port` / `--host` / `--open`.
 
@@ -272,7 +302,8 @@ in **[docs/server.md](./docs/server.md)**.
 ### 3. Deploy anywhere
 
 The output is a static file tree (`manifest.json` + `tiles/` + one texture
-array) — serve it from any web server or object store. The viewer is an
+array, plus `world.json` and a directory per extra dimension) — serve it from
+any web server or object store. The viewer is an
 installable npm package, **[`@thoughts-on-things/vantage-mc`](./web/README.md)**, with three layers:
 a zero-dependency tile decoder, a three.js renderer, and drop-in React
 components:
@@ -298,7 +329,7 @@ stream tiles into your own three.js scene.
 (`vantage --help` prints the full usage):
 
 ```sh
-vantage render  <save> [flags]                       # world → tiles + manifest + LOD pyramid
+vantage render  <save> [flags]                       # every dimension → tiles + manifests + LOD pyramids
 vantage live    <save> [flags]                       # explore now: tiles baked on demand as you look
 vantage server  <save> [flags]                       # secure continuous data plane for multiplayer launchers
 vantage serve   [render-dir] [--port n] [--host addr] [--open]   # host a render + the embedded viewer

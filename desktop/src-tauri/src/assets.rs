@@ -38,6 +38,10 @@ const LIBRARY_FILES: &[&str] = &[renders::THUMBNAIL_FILE];
 #[serde(rename_all = "camelCase")]
 pub struct RenderReady {
     pub manifest_url: String,
+    /// The render's dimension index, when it has one. The viewer loads this in
+    /// preference to the bare manifest so the dimension switcher appears;
+    /// renders made before dimension support have only the manifest.
+    pub world_url: Option<String>,
     pub output_path: String,
 }
 
@@ -104,8 +108,13 @@ impl AssetServer {
             .open
             .write()
             .map_err(|_| "asset server lock poisoned")? = Some(canonical.clone());
+        let world_url = canonical
+            .join("world.json")
+            .is_file()
+            .then(|| format!("http://127.0.0.1:{}/world.json", self.port));
         Ok(RenderReady {
             manifest_url: format!("http://127.0.0.1:{}/manifest.json", self.port),
+            world_url,
             output_path: canonical.to_string_lossy().into_owned(),
         })
     }

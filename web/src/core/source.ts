@@ -192,10 +192,20 @@ export async function worldFromIndexEntry(source: WorldSource, manifestPath: str
   };
 }
 
+/** Read a file that may not be there, without turning a miss into a failure. */
+async function readOptional(read: (path: string) => Promise<File>, path: string): Promise<File | undefined> {
+  try {
+    return await read(path);
+  } catch {
+    return undefined;
+  }
+}
+
 /** A world in a local directory picked with the File System Access API
- *  (`window.showDirectoryPicker()`, Chromium) — reads `manifest.json` from the
- *  directory root and resolves tile paths through subdirectory handles on
- *  demand, so nothing is read until it streams in. */
+ *  (`window.showDirectoryPicker()`, Chromium) — reads `world.json` (or
+ *  `manifest.json` for a single-dimension render) from the directory root and
+ *  resolves tile paths through subdirectory handles on demand, so nothing is
+ *  read until it streams in. */
 export async function worldFromDirectory(dir: FileSystemDirectoryHandle): Promise<WorldSource> {
   const readFile = async (path: string, signal?: AbortSignal): Promise<File> => {
     throwIfAborted(signal);
@@ -206,16 +216,19 @@ export async function worldFromDirectory(dir: FileSystemDirectoryHandle): Promis
     const handle = await node.getFileHandle(segments[segments.length - 1]!);
     return handle.getFile();
   };
-  let manifestFile: File;
-  try {
-    manifestFile = await readFile('manifest.json');
-  } catch {
+  // A multi-dimension render is opened through its `world.json`: the viewer
+  // picks a dimension from the index and re-roots at that directory, which the
+  // subdirectory reads below already serve. It has to be tried first rather
+  // than as a fallback — a render of one non-overworld dimension has no
+  // manifest at the root at all.
+  const entry = (await readOptional(readFile, 'world.json')) ?? (await readOptional(readFile, 'manifest.json'));
+  if (!entry) {
     throw new Error(
-      `vantage: no manifest.json in "${dir.name}" — pick the folder a \`vantage render\` wrote (it holds manifest.json, terrain.vtexarr, and tiles/)`,
+      `vantage: no world.json or manifest.json in "${dir.name}" — pick the folder a \`vantage render\` wrote (it holds manifest.json, terrain.vtexarr, and tiles/)`,
     );
   }
   return {
-    manifest: JSON.parse(await manifestFile.text()) as unknown,
+    manifest: JSON.parse(await entry.text()) as unknown,
     label: dir.name,
     fetch: async (path, signal) => {
       const file = await readFile(path, signal);
@@ -227,10 +240,11 @@ export async function worldFromDirectory(dir: FileSystemDirectoryHandle): Promis
 
 /** A world from a flat file list — `<input webkitdirectory>` or a drag-and-drop
  *  walk (the fallback for browsers without `showDirectoryPicker`). Finds the
- *  shallowest `manifest.json` and keys every file relative to its folder, so
- *  picking a parent folder of the render also works. `pathOf` overrides how a
- *  file's relative path is derived (default: `webkitRelativePath`, falling
- *  back to `name`). */
+ *  shallowest `world.json` (else the shallowest `manifest.json`) and keys every
+ *  file relative to its folder, so picking a parent folder of the render also
+ *  works, and a render carrying the nether and the end opens with all of them.
+ *  `pathOf` overrides how a file's relative path is derived (default:
+ *  `webkitRelativePath`, falling back to `name`). */
 export async function worldFromFiles(
   files: Iterable<File>,
   pathOf: (file: File) => string = (f) => f.webkitRelativePath || f.name,
@@ -238,17 +252,24 @@ export async function worldFromFiles(
   const byPath = new Map<string, File>();
   for (const file of files) byPath.set(normalizePath(pathOf(file)).replace(/\\/g, '/'), file);
 
-  let manifestPath: string | null = null;
-  for (const path of byPath.keys()) {
-    if (path !== 'manifest.json' && !path.endsWith('/manifest.json')) continue;
-    if (manifestPath === null || path.split('/').length < manifestPath.split('/').length) manifestPath = path;
-  }
+  const shallowest = (name: string): string | null => {
+    let found: string | null = null;
+    for (const path of byPath.keys()) {
+      if (path !== name && !path.endsWith(`/${name}`)) continue;
+      if (found === null || path.split('/').length < found.split('/').length) found = path;
+    }
+    return found;
+  };
+  // The dimension index wins where there is one: it names every dimension, and
+  // a render of one non-overworld dimension has no manifest beside it at all.
+  const entryName = shallowest('world.json') !== null ? 'world.json' : 'manifest.json';
+  const manifestPath = shallowest(entryName);
   if (manifestPath === null) {
     throw new Error(
       'vantage: no manifest.json among the selected files — pick the folder a `vantage render` wrote (it holds manifest.json, terrain.vtexarr, and tiles/)',
     );
   }
-  const prefix = manifestPath.slice(0, manifestPath.length - 'manifest.json'.length);
+  const prefix = manifestPath.slice(0, manifestPath.length - entryName.length);
   const root = prefix === '' ? 'world' : prefix.slice(0, -1);
 
   return {

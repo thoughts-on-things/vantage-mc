@@ -267,9 +267,15 @@ fn discoverSiblings(arena: std.mem.Allocator, io: std.Io, save_dir: []const u8, 
     }
 }
 
-/// Data-pack dimensions: `<save>/dimensions/<namespace>/<path>/region`. Nested
-/// paths are walked one level deep, which covers everything vanilla allows in
-/// practice (`namespace:name`) without unbounded recursion into a save.
+/// How far under a namespace a dimension's region directory may sit. A resource
+/// id's path may carry slashes (`namespace:foo/bar` lives at
+/// `dimensions/namespace/foo/bar/region`), so the search has to descend — but
+/// only so far, or a save with a deep tree under `dimensions/` would turn
+/// discovery into a filesystem crawl.
+const max_datapack_depth = 4;
+
+/// Data-pack dimensions: `<save>/dimensions/<namespace>/<path>/region`, where
+/// `<path>` may itself be nested.
 fn discoverDatapack(arena: std.mem.Allocator, io: std.Io, save_dir: []const u8, out: *std.ArrayList(Found)) !void {
     const root = try std.fmt.allocPrint(arena, "{s}/dimensions", .{save_dir});
     var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch return;
@@ -279,23 +285,46 @@ fn discoverDatapack(arena: std.mem.Allocator, io: std.Io, save_dir: []const u8, 
         if (entry.kind != .directory) continue;
         const namespace = try arena.dupe(u8, entry.name);
         const ns_path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ root, namespace });
-        var ns_dir = std.Io.Dir.cwd().openDir(io, ns_path, .{ .iterate = true }) catch continue;
-        defer ns_dir.close(io);
-        var ns_it = ns_dir.iterate();
-        while (try ns_it.next(io)) |sub| {
-            if (sub.kind != .directory) continue;
-            const name = try arena.dupe(u8, sub.name);
-            const region_dir = try std.fmt.allocPrint(arena, "{s}/{s}/region", .{ ns_path, name });
-            if (!try dirHasRegions(io, region_dir)) continue;
-            const id = try std.fmt.allocPrint(arena, "{s}:{s}", .{ namespace, name });
+        try walkDatapack(arena, io, ns_path, namespace, "", 1, out);
+    }
+}
+
+/// Descend one namespace looking for `<path>/region`, building the dimension's
+/// id path as it goes. A directory that holds regions is a dimension, not a
+/// parent of one, so the walk stops there.
+fn walkDatapack(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    dir_path: []const u8,
+    namespace: []const u8,
+    rel: []const u8,
+    depth: usize,
+    out: *std.ArrayList(Found),
+) !void {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |sub| {
+        if (sub.kind != .directory) continue;
+        // A dimension's own data folders are never dimension names.
+        if (std.mem.eql(u8, sub.name, "region") or std.mem.eql(u8, sub.name, "entities") or
+            std.mem.eql(u8, sub.name, "poi") or std.mem.eql(u8, sub.name, "data")) continue;
+        const name = try arena.dupe(u8, sub.name);
+        const path = if (rel.len == 0) name else try std.fmt.allocPrint(arena, "{s}/{s}", .{ rel, name });
+        const child = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, name });
+        const region_dir = try std.fmt.allocPrint(arena, "{s}/region", .{child});
+        if (try dirHasRegions(io, region_dir)) {
+            const id = try std.fmt.allocPrint(arena, "{s}:{s}", .{ namespace, path });
             if (hasProfile(out.items, id)) continue; // already found via DIM-1/DIM1
             const profile = if (std.mem.eql(u8, namespace, "minecraft"))
-                builtinFor(name) orelse try customProfile(arena, namespace, name)
+                builtinFor(path) orelse try customProfile(arena, namespace, path)
             else
-                try customProfile(arena, namespace, name);
+                try customProfile(arena, namespace, path);
             if (hasProfile(out.items, profile.id)) continue;
             try out.append(arena, .{ .profile = profile, .region_dir = region_dir });
+            continue;
         }
+        if (depth < max_datapack_depth) try walkDatapack(arena, io, child, namespace, path, depth + 1, out);
     }
 }
 

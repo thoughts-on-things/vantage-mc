@@ -950,9 +950,26 @@ const RenderSettings = struct {
     /// Null = not given, so each dimension uses its own default.
     caves: ?CaveSetting,
     ceiling: ?CeilingOverride,
+    /// Whether the run targets one named dimension. A `--ceiling <y>` given
+    /// alongside a whole-save render must not behead the dimensions that have
+    /// no roof; named on its own, it is an instruction about that dimension.
+    single_dimension: bool = false,
     requested_threads: ?usize,
     memory_budget: usize,
 };
+
+/// The roof cut for one dimension: its own by default, moved or removed by
+/// `--ceiling`. A numeric cut only reaches dimensions that have a lid of their
+/// own (the nether) unless the render was narrowed to a single dimension —
+/// otherwise `vantage render <save> --ceiling 104` would silently delete every
+/// overworld build above y=104 on its way to trimming the nether's roof.
+fn ceilingFor(dim: dimension.Profile, override: ?CeilingOverride, single_dimension: bool) ?i32 {
+    const o = override orelse return dim.ceiling_cut;
+    return switch (o) {
+        .keep => null,
+        .at => |y| if (dim.ceiling_cut != null or single_dimension) y else dim.ceiling_cut,
+    };
+}
 
 /// What one finished dimension contributes to the world index.
 const DimSummary = struct {
@@ -1018,6 +1035,9 @@ fn renderWorldArgs(
     }
 
     const dims = try resolveDimensions(init, a, save, dimension_spec);
+    // One dimension asked for by name takes `--ceiling` literally; a whole-save
+    // render only applies it where there is a roof to cut.
+    settings.single_dimension = dimension_spec != null and dims.len == 1;
     const assets = try resolveAssets(init, a, assets_opt);
     const overworld_spawn = world.readSpawn(a, init.io, save);
     std.debug.print("assets:  {s}\n", .{assets});
@@ -1104,10 +1124,7 @@ fn renderDimension(
     // A dimension with a ceiling renders below its roof cut; `--ceiling`
     // overrides both the cut and (with `keep`) the whole idea.
     var dim = wl.dim;
-    if (settings.ceiling) |override| dim.ceiling_cut = switch (override) {
-        .keep => null,
-        .at => |y| y,
-    };
+    dim.ceiling_cut = ceilingFor(dim, settings.ceiling, settings.single_dimension);
     const cave_y = caveHorizonFor(dim, settings.caves);
     const out_dir = try dimension.outputDir(a, settings.out_dir, dim);
 
@@ -3538,10 +3555,9 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         return;
     }
     var dim = wl.dim;
-    if (ceiling) |override| dim.ceiling_cut = switch (override) {
-        .keep => null,
-        .at => |y| y,
-    };
+    // A session streams exactly one dimension, so `--ceiling` can only be about
+    // that one — it applies whether or not the dimension has a roof of its own.
+    dim.ceiling_cut = ceilingFor(dim, ceiling, true);
     const cave_y = caveHorizonFor(dim, requested_caves);
     const tile_keys = try enumerateTilesSpawnOutward(a, wl.populated, radius, wl.centre_cx, wl.centre_cz, tile_chunks);
 

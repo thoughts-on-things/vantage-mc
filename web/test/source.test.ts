@@ -2,6 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { worldFromDirectory, worldFromFiles, worldFromHttp, worldFromUrl, worldFromVantageServer } from '../src/core/index.js';
 
 const MANIFEST = { format: 1, tileChunks: 8, tileBlocks: 128, textures: 'terrain.vtexarr', biomes: [], tiles: [] };
+const WORLD_INDEX = {
+  format: 1,
+  dimensions: [
+    { id: 'minecraft:overworld', slug: 'overworld', label: 'Overworld', kind: 'overworld', manifest: 'manifest.json', tiles: 1, bytes: 1 },
+    { id: 'minecraft:the_nether', slug: 'the_nether', label: 'The Nether', kind: 'nether', manifest: 'the_nether/manifest.json', tiles: 1, bytes: 1 },
+  ],
+};
 
 function jsonFile(value: unknown): File {
   return new File([JSON.stringify(value)], 'manifest.json');
@@ -55,6 +62,23 @@ describe('worldFromFiles', () => {
     await expect(worldFromFiles(files, pathOf)).rejects.toThrow(/no manifest\.json/);
   });
 
+  it('opens a multi-dimension render through its world index', async () => {
+    // The picked folder holds every dimension; opening the overworld manifest
+    // directly would hide the nether and the end behind a switcher that never
+    // appears.
+    const { files, pathOf } = pick({
+      'render/world.json': jsonFile(WORLD_INDEX),
+      'render/manifest.json': jsonFile(MANIFEST),
+      'render/the_nether/manifest.json': jsonFile({ ...MANIFEST, format: 6 }),
+      'render/the_nether/tiles/t.0.0.vtile': binFile('t.0.0.vtile', [8]),
+    });
+    const src = await worldFromFiles(files, pathOf);
+    expect(src.manifest).toEqual(WORLD_INDEX);
+    // Paths still resolve from the index's own directory, so a dimension's
+    // sub-source reaches its tiles.
+    expect(new Uint8Array(await src.fetch('the_nether/tiles/t.0.0.vtile'))).toEqual(new Uint8Array([8]));
+  });
+
   it('rejects fetches for files outside the selection', async () => {
     const { files, pathOf } = pick({ 'manifest.json': jsonFile(MANIFEST) });
     const src = await worldFromFiles(files, pathOf);
@@ -94,7 +118,25 @@ describe('worldFromDirectory', () => {
   });
 
   it('explains when the picked folder is not a render', async () => {
-    await expect(worldFromDirectory(dirHandle('saves', {}))).rejects.toThrow(/no manifest\.json in "saves"/);
+    await expect(worldFromDirectory(dirHandle('saves', {}))).rejects.toThrow(/no world\.json or manifest\.json in "saves"/);
+  });
+
+  it('prefers a world index in the picked folder', async () => {
+    const dir = dirHandle('render', {
+      'world.json': jsonFile(WORLD_INDEX),
+      'manifest.json': jsonFile(MANIFEST),
+      the_nether: { 'manifest.json': jsonFile({ ...MANIFEST, format: 6 }) },
+    });
+    const src = await worldFromDirectory(dir);
+    expect(src.manifest).toEqual(WORLD_INDEX);
+  });
+
+  it('opens a render of one non-overworld dimension, which has no manifest at its root', async () => {
+    const dir = dirHandle('nether-only', {
+      'world.json': jsonFile({ ...WORLD_INDEX, dimensions: [WORLD_INDEX.dimensions[1]] }),
+      the_nether: { 'manifest.json': jsonFile(MANIFEST) },
+    });
+    await expect(worldFromDirectory(dir)).resolves.toMatchObject({ label: 'nether-only' });
   });
 
   it('refuses path escapes', async () => {

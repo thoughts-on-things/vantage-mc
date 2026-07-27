@@ -488,6 +488,14 @@ export class VantageViewer {
     let source = opened;
     // A world index names the dimensions; the entry we pick re-roots the source
     // at that dimension's directory and hands back a normal manifest world.
+    // Staged, not committed: a manifest that fails to parse or an atlas that
+    // fails to fetch would otherwise leave the viewer claiming a dimension it
+    // never loaded — with the old one still on screen and a retry of the same
+    // slug returning early as a no-op. These land once the load is past its
+    // last failure point, below.
+    let nextIndex: WorldDimension[] = [];
+    let nextIndexSource: WorldSource | null = null;
+    let nextDimension: WorldDimension | null = null;
     if (isWorldIndex(opened.manifest)) {
       const index = parseWorldIndex(opened.manifest);
       // A deep link may already name a dimension — honour it before framing so
@@ -495,13 +503,9 @@ export class VantageViewer {
       const slug = wantSlug ?? (this.options.urlState ? this.hashDimension() : null);
       const entry = pickDimension(index, slug);
       source = await worldFromIndexEntry(opened, entry.manifest);
-      this.worldIndex = index.dimensions;
-      this.indexSource = opened;
-      this.currentDimension = entry;
-    } else {
-      this.worldIndex = [];
-      this.indexSource = null;
-      this.currentDimension = null;
+      nextIndex = index.dimensions;
+      nextIndexSource = opened;
+      nextDimension = entry;
     }
     const manifest = parseManifest(source.manifest);
     const texData = parseTextureArray(await maybeInflate(await source.fetch(manifest.textures)));
@@ -523,6 +527,10 @@ export class VantageViewer {
     this.waterShader = waterShader;
     this.lowresShader = lowresShader ?? null;
     this.manifest = manifest;
+    // Past the fetches and the parse: this world is the one on screen now.
+    this.worldIndex = nextIndex;
+    this.indexSource = nextIndexSource;
+    this.currentDimension = nextDimension;
     this.hasAnims = texData.anims.length > 0;
     this.lastTextureLayers = manifest.textureLayers ?? texData.layers;
     this.tile = null;
@@ -571,7 +579,14 @@ export class VantageViewer {
     this.frameWorld(manifest, view);
     // A deep link overrides the default framing (the home button still returns
     // to the framed view). Applied before seeding so tiles stream in there.
-    if (this.options.urlState) this.applyViewHash(window.location.hash);
+    // The camera in a hash belongs to the dimension that hash names: on a
+    // switch it still holds the outgoing one's view, and applying that would
+    // open the nether at overworld coordinates instead of its own spawn.
+    // setDimension restores a remembered view for dimensions already visited.
+    if (this.options.urlState) {
+      const hashSlug = this.hashDimension();
+      if (hashSlug === null || hashSlug === this.currentDimension?.slug) this.applyViewHash(window.location.hash);
+    }
     this.applyBiomeUniforms();
     this.applyLight();
     this.applyDisplay();

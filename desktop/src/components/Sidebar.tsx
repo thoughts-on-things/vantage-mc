@@ -48,11 +48,14 @@ export function Sidebar({ worldCount, renderCount, screen, updates, onNavigate, 
 function UpdateNotice({ updates }: { updates: UpdatesController }) {
   if (updates.phase === 'idle') return null;
   const percent = updates.progress === null ? null : Math.round(updates.progress * 100);
+  // aria-disabled rather than disabled: a natively disabled button can drop
+  // out of the accessibility tree, silencing the live region inside it.
+  const busy = updates.phase !== 'available';
   return (
     <button
       className="update-pill"
-      onClick={updates.install}
-      disabled={updates.phase !== 'available'}
+      onClick={busy ? undefined : updates.install}
+      aria-disabled={busy}
     >
       {updates.phase === 'downloading' && (
         <span className="update-progress" style={{ width: `${percent ?? 8}%` }} aria-hidden="true" />

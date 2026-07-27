@@ -97,8 +97,8 @@ button:focus-visible, input:focus-visible, [role='button']:focus-visible {
 /* The update pill takes over the footer's auto margin when it appears, so the
    pair stays pinned to the bottom of the sidebar together. */
 .update-pill { position: relative; overflow: hidden; margin-top: auto; display: flex; align-items: center; gap: 9px; padding: 10px 11px; border: 1px solid var(--accent-line); border-radius: 10px; color: var(--text-2); background: var(--accent-soft); text-align: left; cursor: pointer; transition: filter 0.15s ease; }
-.update-pill:hover:not(:disabled) { filter: brightness(1.16); }
-.update-pill:disabled { cursor: default; }
+.update-pill:hover:not([aria-disabled='true']) { filter: brightness(1.16); }
+.update-pill[aria-disabled='true'] { cursor: default; }
 .update-pill > svg { position: relative; z-index: 1; flex: none; color: var(--accent); }
 .update-progress { position: absolute; inset: 0 auto 0 0; background: var(--accent-glow); transition: width 0.2s ease; }
 .update-copy { position: relative; z-index: 1; display: grid; min-width: 0; }

@@ -83,7 +83,10 @@ function checkNativeTools() {
     }
   } else if (process.platform === 'linux') {
     const webkit = result('pkg-config', ['--exists', 'webkit2gtk-4.1']);
-    if (webkit.status !== 0) {
+    if (webkit.error?.code === 'ENOENT') {
+      fail('pkg-config was not found, so the WebKitGTK check cannot run.', 'On Debian/Ubuntu: sudo apt install pkg-config, then rerun npm run doctor.');
+      healthy = false;
+    } else if (webkit.status !== 0) {
       fail('The WebKitGTK development packages were not found.', 'On Debian/Ubuntu: sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf');
       healthy = false;
     } else {

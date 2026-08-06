@@ -4,6 +4,8 @@ Vantage draws the people on your server as actual Minecraft player models,
 standing where they stand, walking as they walk. It is one small JSON document
 away.
 
+![Three players on a Vantage map, each drawn as a Minecraft player model with a name tag](./render-players.jpg)
+
 ```mermaid
 flowchart LR
   H["host supervisor<br/>(plugin, mod, script)"] -->|"rewrites players.json"| F["players.json"]

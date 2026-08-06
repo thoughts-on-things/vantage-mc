@@ -29,8 +29,14 @@ Vantage is a fast, native renderer that turns Minecraft Java Edition worlds into
 | Render a world | `vantage render "~/.minecraft/saves/My World" --out my-map` |
 | Open the finished map | `vantage serve my-map --open` |
 | Explore immediately with on-demand rendering | `vantage live "~/.minecraft/saves/My World" --open` |
+| Show live players on the map | `vantage live "~/world" --players-file /run/players.json` |
 
 Vantage automatically finds an installed Minecraft client jar when extracting assets, renders every discovered dimension by default, and never writes to the source world. Run `vantage --help` for the complete CLI reference.
+
+Players appear on the map as real 3D player models that walk, turn and carry a
+name tag — fed either by a file your server writes (BlueMap's
+`live/players.json` works as-is) or, with no setup at all, by the last known
+positions in the save itself. See [docs/players.md](./docs/players.md).
 
 ## Project links
 
@@ -39,6 +45,7 @@ Vantage automatically finds an installed Minecraft client jar when extracting as
 | Product site and live demo | [vantage.beacon-mc.io](https://vantage.beacon-mc.io) |
 | Development setup and repository layout | [CONTRIBUTING.md](./CONTRIBUTING.md) |
 | Streaming design | [docs/streaming.md](./docs/streaming.md) |
+| Live player positions | [docs/players.md](./docs/players.md) |
 | Performance roadmap | [docs/performance-roadmap.md](./docs/performance-roadmap.md) |
 | Issues and support | [GitHub Issues](https://github.com/thoughts-on-things/vantage-mc/issues) |
 | License | [MIT](./LICENSE) |

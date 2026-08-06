@@ -96,6 +96,30 @@ export const CSS = `
 .vtg-name { overflow: hidden; text-overflow: ellipsis; }
 .vtg-pct { margin-left: auto; color: var(--vtg-dim); font: 11px var(--vtg-mono); font-variant-numeric: tabular-nums; }
 
+/* --- player roster -------------------------------------------------------- */
+.vtg-players { overflow-y: auto; padding: 7px; scrollbar-width: thin; scrollbar-color: rgba(132,170,230,0.3) transparent; }
+.vtg-player { gap: 8px; }
+.vtg-player:focus-visible { outline: 2px solid var(--vtg-accent); outline-offset: -2px; }
+/* Faces are 8×8 skin pixels blown up: nearest-neighbour keeps them crisp
+   instead of turning them into four smudged blobs. */
+.vtg-face {
+  width: 16px; height: 16px; flex: none; border-radius: 3px;
+  image-rendering: pixelated; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+.vtg-face-blank { background: rgba(132, 170, 230, 0.2); }
+.vtg-follow {
+  flex: none; width: 20px; height: 20px; padding: 3px; margin: -2px -3px -2px 0;
+  display: grid; place-items: center; border: none; border-radius: 6px;
+  background: transparent; color: var(--vtg-dim); cursor: pointer;
+  opacity: 0; transition: opacity 0.16s, color 0.16s, background 0.16s;
+}
+.vtg-follow svg { width: 100%; height: 100%; }
+/* The pin only shows on the row you are pointing at — or permanently, once it
+   is the reason the camera is where it is. */
+.vtg-player:hover .vtg-follow, .vtg-player:focus-within .vtg-follow, .vtg-follow.vtg-on { opacity: 1; }
+.vtg-follow:hover { color: var(--vtg-text); background: rgba(132, 170, 230, 0.18); }
+.vtg-follow.vtg-on { color: var(--vtg-accent); }
+
 /* --- segmented toggle (render mode) --------------------------------------- */
 .vtg-seg { display: flex; gap: 2px; padding: 2px; border-radius: 999px; background: rgba(40, 60, 90, 0.4); border: 1px solid rgba(132, 170, 230, 0.28); }
 .vtg-seg button {

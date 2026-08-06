@@ -8,7 +8,7 @@ import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { worldFromVantageServer } from '../src/core/index.js';
 import type { WorldSource } from '../src/core/index.js';
-import { BiomeLayer, DepthSlider, DimensionPicker, LightPanel, MapNav, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
+import { BiomeLayer, DepthSlider, DimensionPicker, LightPanel, MapNav, PlayerList, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
@@ -37,7 +37,9 @@ function Hud() {
       style={{
         position: 'absolute',
         top: 16,
-        left: 16,
+        // Clear of <PlayerList>, which owns the top-left corner whenever the
+        // world serves a roster.
+        left: 248,
         padding: '12px 15px',
         font: '12px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
         color: '#e6eefb',
@@ -98,6 +100,7 @@ function App({ entry, serverWorld }: { entry: Entry; serverWorld?: WorldSource }
     <VantageViewer ref={ref} {...source} view={view}>
       <Hud />
       <Reticle />
+      <PlayerList />
       <DimensionPicker />
       <BiomeLayer legend hover defaultEnabled={biomeOpen} />
       <LightPanel />
@@ -120,11 +123,21 @@ function mount(entry: Entry, serverWorld?: WorldSource): void {
 }
 
 /** Whether a JSON file sits at `path` — how the viewer decides which entry
- *  point a render directory offers without fetching a body it may not use. */
+ *  point a render directory offers without fetching a body it may not use.
+ *
+ *  HEAD answers that for a static render. `vantage live` and `vantage server`
+ *  synthesize their manifest on demand and deliberately answer HEAD from disk
+ *  alone (a metadata probe must never trigger a bake), so a cold on-demand
+ *  cache has no file to stat and the probe has to ask properly — cancelling
+ *  the body the moment the headers say what we needed to know. */
 async function hasJson(path: string): Promise<boolean> {
+  const isJson = (r: Response) => r.ok && (r.headers.get('content-type') ?? '').includes('json');
   try {
-    const r = await fetch(path, { method: 'HEAD' });
-    return r.ok && (r.headers.get('content-type') ?? '').includes('json');
+    if (isJson(await fetch(path, { method: 'HEAD' }))) return true;
+    const res = await fetch(path);
+    const answer = isJson(res);
+    void res.body?.cancel();
+    return answer;
   } catch {
     return false;
   }

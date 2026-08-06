@@ -9,6 +9,7 @@ import {
   type BiomeEntry,
   type DisplaySettings,
   type LightSettings,
+  type PlayerOptions,
   type StreamingSettings,
   type TextureSource,
   type TileInfo,
@@ -50,6 +51,9 @@ export interface VantageViewerProps {
   /** Live display fidelity (sharpness, AO, saturation, contrast, fog, render
    *  scale). Applied on change without re-baking — drive it from sliders. */
   display?: DisplaySettings;
+  /** Live players. Polling starts by itself when the world serves a roster;
+   *  pass `{ enabled: false }` to keep them off. Display fields apply live. */
+  players?: PlayerOptions;
   /** Keep the camera in the URL hash so any view is a shareable deep link.
    *  Default `true` — pass `false` if the page owns its hash (e.g. a router). */
   urlState?: boolean;
@@ -103,6 +107,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     renderOnDemand = true,
     light,
     display,
+    players,
     urlState = true,
     className,
     style,
@@ -131,7 +136,7 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
     injectStyles();
     const el = canvasRef.current;
     if (!el) return;
-    const v = new Engine(el, { antialias, maxPixelRatio, renderOnDemand, view, light, display, streaming, urlState });
+    const v = new Engine(el, { antialias, maxPixelRatio, renderOnDemand, view, light, display, streaming, players, urlState });
     engineRef.current = v;
     setEngine(v);
 
@@ -209,6 +214,11 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
   useEffect(() => {
     if (engine && streaming) engine.setStreaming(streaming);
   }, [engine, streaming?.viewDistance, streaming?.maxTiles, streaming?.concurrency, streaming?.maxBytes, streaming?.tileCacheBytes, streaming?.mapMemory]);
+
+  // Apply live player-display changes (no remount, no re-load).
+  useEffect(() => {
+    if (engine && players) engine.setPlayers(players);
+  }, [engine, players?.enabled, players?.names, players?.offline, players?.foreign, players?.scale, players?.tagSize]);
 
   const ctx = useMemo<VantageContextValue>(
     () => ({

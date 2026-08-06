@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -46,7 +46,8 @@ Options:
   --scan-interval <secs>  Region rescan interval (default: 1)
   --no-open               Do not open the default browser
   --skip-build            Reuse the current zig-out binary
-  --smoke                 Verify auth, CORS, manifest, and one lazy tile; then exit
+  --smoke                 Verify auth, CORS, manifest, one lazy tile, and the
+                          live-player roster; then exit
   -h, --help              Show this help
 
 Examples:
@@ -338,6 +339,36 @@ async function smokeCheck(serverUrl, viewerOrigin, token) {
     'lazy tile did not return the exact configured CORS origin',
   );
   await tileResponse.arrayBuffer();
+
+  // The live-player roster: served from the host's feed, exactly-origin CORS
+  // like every other artifact, and revalidatable — an unchanged roster is the
+  // normal case on a real server, and it must cost a status line, not a body.
+  const playersUrl = new URL('/v1/worlds/default/players.json', serverUrl);
+  const playersResponse = await fetch(playersUrl, { headers: authHeaders, signal: AbortSignal.timeout(30_000) });
+  assertResponse(playersResponse.ok, `player roster returned HTTP ${playersResponse.status}`);
+  assertResponse(
+    playersResponse.headers.get('access-control-allow-origin') === viewerOrigin,
+    'player roster did not return the exact configured CORS origin',
+  );
+  assertResponse(
+    (playersResponse.headers.get('cache-control') ?? '').includes('private'),
+    'player positions must not be storable by shared caches',
+  );
+  const playersEtag = playersResponse.headers.get('etag');
+  assertResponse(!!playersEtag, 'player roster is missing its strong ETag validator');
+  const roster = await playersResponse.json();
+  assertResponse(roster.source === 'host', `player roster reported source ${roster.source}`);
+  assertResponse(
+    Array.isArray(roster.players) && roster.players.some((player) => player.name === 'demo'),
+    'player roster does not contain the host-supplied player',
+  );
+  const conditionalPlayers = await fetch(playersUrl, {
+    headers: { ...authHeaders, 'If-None-Match': playersEtag },
+    signal: AbortSignal.timeout(30_000),
+  });
+  assertResponse(conditionalPlayers.status === 304, `conditional roster returned HTTP ${conditionalPlayers.status}`);
+  assertResponse((await conditionalPlayers.arrayBuffer()).byteLength === 0, 'a 304 must not carry a body');
+
   return manifest.tiles.length;
 }
 
@@ -361,6 +392,22 @@ export async function runServerDev(options) {
   if (!existsSync(binary)) throw new Error(`Vantage binary is missing: ${binary} (remove --skip-build)`);
   mkdirSync(cache, { recursive: true });
 
+  // A supervisor's player feed, written where a supervisor would write one:
+  // beside the cache rather than inside it, because it is the host's file and
+  // not Vantage's. The walkthrough then demonstrates the live-player layer, and
+  // the smoke run has a roster endpoint to check.
+  const playersFile = join(dirname(cache), 'players.json');
+  writeFileSync(playersFile, `${JSON.stringify({
+    players: [{
+      uuid: '00000000-0000-4000-8000-00000000d3m0',
+      name: 'demo',
+      foreign: false,
+      position: { x: 0.5, y: 72, z: 0.5 },
+      rotation: { yaw: 135, pitch: 0 },
+      dimension: 'minecraft:overworld',
+    }],
+  }, null, 2)}\n`);
+
   const token = randomBytes(32).toString('base64url');
   const server = spawnService(binary, [
     'server', world,
@@ -370,6 +417,7 @@ export async function runServerDev(options) {
     '--token-env', 'VANTAGE_SERVER_TOKEN',
     '--allow-origin', viewerUrl.slice(0, -1),
     '--scan-interval', String(options.scanInterval),
+    '--players-file', playersFile,
   ], {
     cwd: root,
     env: { ...process.env, VANTAGE_SERVER_TOKEN: token },

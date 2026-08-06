@@ -28,6 +28,7 @@ const dimension = @import("dimension.zig");
 const lowres = @import("lowres.zig");
 const extract = @import("extract.zig");
 const serve = @import("serve.zig");
+const players = @import("players.zig");
 pub const discovery = @import("discovery.zig");
 pub const version = @import("build_options").version;
 
@@ -86,7 +87,7 @@ fn printUsage() void {
         \\  vantage render  <world-save-dir> [--assets <dir>] [--out <dir>] [--tile-chunks <n>]
         \\                  [--radius <chunks>] [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
         \\                  [--dimension all|overworld|nether|end|<list>] [--ceiling <y>|keep]
-        \\                  [--threads <n>] [--memory <MiB>] [--gz <1..12>]
+        \\                  [--threads <n>] [--memory <MiB>] [--gz <1..12>] [--players on|off]
         \\      Render the whole populated world as streamable tiles + manifest.json
         \\      (default out: web/public). --radius caps to a window around spawn.
         \\      Every dimension the save has is rendered: the overworld at the root,
@@ -94,6 +95,8 @@ fn printUsage() void {
         \\      --ceiling moves the nether's roof cut (default 104), which is what
         \\      opens the map into the caverns instead of showing the bedrock lid.
         \\      Missing assets are extracted automatically from your newest client jar.
+        \\      A players.json snapshot of the save's last known player positions is
+        \\      written alongside the map (--players off to leave it out).
         \\  vantage serve   [render-dir] [--port <n>] [--host <addr>] [--open]
         \\      View a render in your browser — a local web server with the viewer
         \\      built in (default dir: web/public, port: 8268). --open launches the
@@ -102,7 +105,7 @@ fn printUsage() void {
         \\                  [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
         \\                  [--dimension <name>] [--ceiling <y>|keep]
         \\                  [--threads <n>] [--memory <MiB>] [--gz <1..12>] [--port <n>] [--host <addr>] [--open]
-        \\                  [--prebake on|off] [--lod on|off]
+        \\                  [--prebake on|off] [--lod on|off] [--players on|off] [--players-file <path>]
         \\      Open a world in the browser NOW — no full pre-render. Every tile is
         \\      listed up front and baked on demand as it scrolls into view, caching
         \\      into --out (default web/public) so panning back is instant.
@@ -110,10 +113,12 @@ fn printUsage() void {
         \\      --prebake on also bakes the rest of the world in the background.
         \\      Baked tiles also feed a zoomed-out overview that fills in as they
         \\      land and survives a reload (--lod off to skip it).
+        \\      Players appear on the map from the save's own player files; point
+        \\      --players-file at a live feed for real-time positions.
         \\  vantage server  <world-save-dir> [live render flags] [--port <n>] [--host <addr>]
         \\                  [--token-env <name>] [--allow-origin <origin>] [--max-connections <n>]
         \\                  [--scan-interval <seconds>] [--prebake on|off] [--lod on|off]
-        \\                  [--focus-file <path>]
+        \\                  [--focus-file <path>] [--players-file <path>] [--players on|off]
         \\      Run the hardened Vantage server data plane for launchers and web apps.
         \\      Binds to 127.0.0.1 by default for an authenticating reverse proxy.
         \\      Non-loopback binds require a >=32-byte bearer secret in the environment
@@ -122,6 +127,10 @@ fn printUsage() void {
         \\      to disable); saved world edits re-bake changed tiles automatically.
         \\      --focus-file points prebake at a JSON file of block coordinates the
         \\      host rewrites as its players move, so the map warms where they are.
+        \\      --players-file serves live player positions from a JSON file the host
+        \\      rewrites (BlueMap's live/players.json works as-is), and steers prebake
+        \\      at them too. Reading positions out of the save is opt-in here
+        \\      (--players on): they are last-known, including for offline players.
         \\  vantage extract [client.jar]
         \\      Extract the assets a render needs into ~/.cache/vantage/assets/<version>.
         \\      With no argument, uses the newest jar in your .minecraft/versions.
@@ -362,6 +371,34 @@ fn parseBiomeBlend(args: []const []const u8) error{InvalidArgument}!bool {
         return badValue("--biome-blend", args[i + 1], "on|off");
     }
     return true;
+}
+
+/// Scan args for `--players on|off`. Null means "not given", which each command
+/// resolves to its own default — see {@link playersMode}.
+fn parsePlayersFlag(args: []const []const u8) error{InvalidArgument}!?bool {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--players")) continue;
+        if (std.mem.eql(u8, args[i + 1], "off")) return false;
+        if (std.mem.eql(u8, args[i + 1], "on")) return true;
+        return badValue("--players", args[i + 1], "on|off");
+    }
+    return null;
+}
+
+/// Where this command gets player positions.
+///
+/// A host feed always wins: it is the only live source, and asking for one is
+/// unambiguous. Otherwise the save's own player files fill in — by default for
+/// the local commands, where the map and the save belong to the same person,
+/// and only on request for `vantage server`, where "last known position of
+/// every player who ever logged in" is a different disclosure from "who is
+/// online right now" and should be a deliberate choice.
+fn playersMode(host_file: ?[]const u8, flag: ?bool, server_mode: bool) players.Mode {
+    if (flag == false) return .off;
+    if (host_file != null) return .host_file;
+    if (flag == true) return .save;
+    return if (server_mode) .off else .save;
 }
 
 fn badValue(flag: []const u8, got: []const u8, want: []const u8) error{InvalidArgument} {
@@ -959,6 +996,11 @@ const RenderSettings = struct {
     single_dimension: bool = false,
     requested_threads: ?usize,
     memory_budget: usize,
+    /// The save being rendered, for the artifacts that read it directly rather
+    /// than through the region catalog (the player snapshot).
+    save_dir: []const u8 = "",
+    /// Whether to write `players.json` beside each dimension's manifest.
+    players: players.Mode = .save,
 };
 
 /// The roof cut for one dimension: its own by default, moved or removed by
@@ -1004,6 +1046,10 @@ fn renderWorldArgs(
         .ceiling = try parseCeiling(args),
         .requested_threads = try parseThreads(args),
         .memory_budget = bakeMemoryBudget(try parseMemoryMiB(args)),
+        .save_dir = save,
+        // A batch render has no live source to poll, so the only players it can
+        // describe are the ones the save persisted. `--players off` skips it.
+        .players = playersMode(null, try parsePlayersFlag(args), false),
     };
     const dimension_spec = parseDimensionArg(args);
     var argi: usize = 1;
@@ -1027,6 +1073,7 @@ fn renderWorldArgs(
         } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
             std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads") or
             std.mem.eql(u8, arg, "--memory") or std.mem.eql(u8, arg, "--ceiling") or
+            std.mem.eql(u8, arg, "--players") or
             std.mem.eql(u8, arg, "--dimension") or std.mem.eql(u8, arg, "--dimensions"))
         {
             // Parsed by their dedicated scanners above; skip the value here.
@@ -1356,6 +1403,12 @@ fn renderDimension(
         .texture_layers = arr.layer_count,
     });
     try atomicWrite(init.io, a, out_dir, "manifest.json", manifest);
+    // A batch render is a point in time, and so is its player list: the
+    // positions the save last persisted, each marked stale. `vantage serve`
+    // hands the file straight to the viewer, so a plain render already shows
+    // who was where — and a host that later drops a live players.json into the
+    // same directory simply replaces it.
+    writePlayerSnapshot(init.io, a, out_dir, settings, dim);
     // Re-rendering onto an existing output dir can leave tiles from a previous
     // bake behind; now that the manifest is written, sweep anything tile-shaped
     // it doesn't reference.
@@ -1558,6 +1611,27 @@ fn flushOnce(fc: *FlushCtx, a: std.mem.Allocator) !void {
 
 /// Write `dir/name` by writing a temp file and renaming over it, so a browser
 /// polling the file never reads a half-written manifest or atlas.
+/// Write the last-known player positions beside a finished dimension's
+/// manifest. Best-effort throughout: a save whose player files can't be read is
+/// still a perfectly good map, and a render must not fail over a decoration.
+fn writePlayerSnapshot(
+    io: std.Io,
+    a: std.mem.Allocator,
+    out_dir: []const u8,
+    settings: RenderSettings,
+    dim: dimension.Profile,
+) void {
+    if (settings.players == .off or settings.save_dir.len == 0) return;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const snap = players.readSaveSnapshot(arena.allocator(), io, settings.save_dir, dim.id) catch return;
+    const json = players.serialize(arena.allocator(), snap) catch return;
+    atomicWrite(io, a, out_dir, "players.json", json) catch return;
+    if (snap.players.len > 0) std.debug.print("players: {d} last known position(s) → {s}/players.json\n", .{
+        snap.players.len, out_dir,
+    });
+}
+
 fn atomicWrite(io: std.Io, a: std.mem.Allocator, dir: []const u8, name: []const u8, data: []const u8) !void {
     const tmp = try std.fmt.allocPrint(a, "{s}/.{s}.tmp", .{ dir, name });
     const final = try std.fmt.allocPrint(a, "{s}/{s}", .{ dir, name });
@@ -2640,12 +2714,20 @@ const LiveServer = struct {
     /// prebake scan's inner loop cache-resident and allocation-free.
     focus_buf: [MAX_FOCUS_POINTS][2]i32 = undefined,
     focus_len: usize = 0,
-    /// Read-only after startup. The two fields below it belong solely to the
-    /// scan thread, so they need no lock.
+    /// Read-only after startup. The fields below it belong solely to the scan
+    /// thread, so they need no lock.
     focus_file: ?[]const u8 = null,
     /// Cheap change gate for the focus file: `{size, mtime}`.
     focus_stamp: ?[2]u64 = null,
     focus_complained: bool = false,
+    /// The focus file's own points, kept apart from the players' so that
+    /// re-reading either source doesn't drop the other's contribution.
+    focus_file_buf: [MAX_FOCUS_POINTS][2]i32 = undefined,
+    focus_file_len: usize = 0,
+    /// Live player positions served at `players.json`, and a second prebake
+    /// focus: a host that tells the map where its players are has also told it
+    /// which tiles to warm. Null when players are switched off.
+    player_feed: ?*players.Feed = null,
     /// Interactive fetches using the live-tile path. This is incremented
     /// before they take the state mutex: prebake's O(tiles * focus points)
     /// candidate scan holds that same mutex, so counting only at the bake
@@ -2807,11 +2889,16 @@ const LiveServer = struct {
     /// the map its warm-up. The complaint is printed once per bad state so a
     /// misconfigured path cannot flood the log every scan tick.
     fn refreshFocus(self: *LiveServer) void {
+        self.refreshFocusFile();
+        self.republishFocus();
+    }
+
+    fn refreshFocusFile(self: *LiveServer) void {
         const path = self.focus_file orelse return;
         const io = self.sh.io;
         const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
             // Not yet written, or deliberately removed — no host focus.
-            if (self.focus_stamp != null) self.publishFocus(&.{});
+            self.focus_file_len = 0;
             self.focus_stamp = null;
             // Absent is its own state, so a file that comes back malformed
             // is a new bad state and gets to complain again.
@@ -2830,13 +2917,38 @@ const LiveServer = struct {
             self.complainAboutFocus(@errorName(e));
             return;
         };
-        var buf: [MAX_FOCUS_POINTS][2]i32 = undefined;
-        const points = parseFocusPoints(a, bytes, self.sh.tile_chunks, &buf) catch |e| {
+        const points = parseFocusPoints(a, bytes, self.sh.tile_chunks, &self.focus_file_buf) catch |e| {
             self.complainAboutFocus(@errorName(e));
             return;
         };
         self.focus_complained = false;
-        self.publishFocus(points);
+        self.focus_file_len = points.len;
+    }
+
+    /// Combine the focus file's points with wherever the players are standing.
+    /// Both are hints about the same thing, and a host that supplies both means
+    /// both: de-duplication at tile granularity keeps a base full of players
+    /// from crowding out the other side of the map.
+    fn republishFocus(self: *LiveServer) void {
+        var candidates: [2 * MAX_FOCUS_POINTS][2]i32 = undefined;
+        var len: usize = 0;
+        if (self.player_feed) |feed| {
+            var player_points: [players.MAX_FOCUS][2]i32 = undefined;
+            for (feed.focusPoints(self.sh.io, &player_points)) |p| {
+                candidates[len] = p;
+                len += 1;
+            }
+        }
+        // The focus file arrives already reduced to tile coordinates; convert
+        // back so both sources go through one de-duplication.
+        const blocks_per_tile = self.sh.tile_chunks * 16;
+        for (self.focus_file_buf[0..self.focus_file_len]) |t| {
+            if (len == candidates.len) break;
+            candidates[len] = .{ t[0] * blocks_per_tile, t[1] * blocks_per_tile };
+            len += 1;
+        }
+        var tiles: [MAX_FOCUS_POINTS][2]i32 = undefined;
+        self.publishFocus(dedupeTilePoints(candidates[0..len], self.sh.tile_chunks, &tiles));
     }
 
     fn complainAboutFocus(self: *LiveServer, reason: []const u8) void {
@@ -2876,15 +2988,33 @@ fn parseFocusPoints(
     if (root != .object) return error.InvalidFocusDocument;
     const points = root.object.get("points") orelse return error.InvalidFocusDocument;
     if (points != .array) return error.InvalidFocusDocument;
+    var candidates: [MAX_FOCUS_POINTS][2]i32 = undefined;
     var len: usize = 0;
     for (points.array.items) |entry| {
         if (len == MAX_FOCUS_POINTS) break;
         if (entry != .object) continue;
         const x = focusCoordinate(entry.object.get("x")) orelse continue;
         const z = focusCoordinate(entry.object.get("z")) orelse continue;
+        candidates[len] = .{ x, z };
+        len += 1;
+    }
+    return dedupeTilePoints(candidates[0..len], tile_chunks, out);
+}
+
+/// Reduce block coordinates to distinct tile coordinates, in order, capped.
+/// De-duplication is what makes several players in one base a single prebake
+/// candidate instead of five copies of the same ring.
+fn dedupeTilePoints(
+    block_points: []const [2]i32,
+    tile_chunks: i32,
+    out: *[MAX_FOCUS_POINTS][2]i32,
+) []const [2]i32 {
+    var len: usize = 0;
+    for (block_points) |b| {
+        if (len == MAX_FOCUS_POINTS) break;
         const point: [2]i32 = .{
-            @divFloor(@divFloor(x, 16), tile_chunks),
-            @divFloor(@divFloor(z, 16), tile_chunks),
+            @divFloor(@divFloor(b[0], 16), tile_chunks),
+            @divFloor(@divFloor(b[1], 16), tile_chunks),
         };
         for (out[0..len]) |existing| {
             if (existing[0] == point[0] and existing[1] == point[1]) break;
@@ -2920,6 +3050,10 @@ fn scanLoop(self: *LiveServer, interval_ms: i64) void {
     const io = self.sh.io;
     while (true) {
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(interval_ms), .awake) catch {};
+        // Players move faster than the world changes, and prebake wants to know
+        // where they went whether or not anyone has the map open — so the feed
+        // is refreshed on the tick as well as on request.
+        if (self.player_feed) |feed| feed.refresh(io);
         self.refreshFocus();
         self.maybeRefresh();
     }
@@ -2929,11 +3063,15 @@ fn scanLoop(self: *LiveServer, interval_ms: i64) void {
 /// manifest, the texture atlas, and un-cached tiles — and fall through
 /// (null) to static disk serving for everything else.
 fn produce(ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, request: serve.ProduceRequest) !?serve.Produced {
-    _ = io;
     const self: *LiveServer = @ptrCast(@alignCast(ctx));
     const path = request.path;
     if (std.mem.eql(u8, path, "manifest.json"))
         return try manifestResponse(self, arena, request);
+    // The roster is a cached body, not work: answering a HEAD from it costs a
+    // stat and a copy. Doing so is also what keeps HEAD and GET agreeing about
+    // whether this deployment has players at all — falling through would let a
+    // stale file in the cache directory answer a probe that GET answers 404.
+    if (std.mem.eql(u8, path, "players.json")) return try playersResponse(self, io, arena);
     // A HEAD gets the catalog (that is how a viewer discovers the world) but
     // never enough of a foothold to make the host bake a tile or re-serialize
     // the atlas. Those fall through to whatever is already cached on disk.
@@ -2942,6 +3080,34 @@ fn produce(ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, request: serve
         return .{ .body = try liveAtlas(self, arena), .content_type = "application/octet-stream" };
     if (parseTilePath(path)) |xz| return try tileResponse(self, arena, xz[0], xz[1], request);
     return null; // not ours — static disk serves it (lowres, favicon, …)
+}
+
+/// The live player roster. Its body is derived from the source's own
+/// modification time rather than the clock, so a world where nobody moved
+/// re-serializes to the same bytes and the poll settles into a `304` — a map
+/// with an open player list costs a status line per second, not a document.
+///
+/// Answers 404 — not null — when players are switched off. Falling through
+/// would let a `players.json` left in the cache directory by an earlier run
+/// answer in its place, which would make `--players off` mean "off unless you
+/// forgot to delete something". This is also how a client discovers that a
+/// deployment doesn't offer a roster at all.
+fn playersResponse(self: *LiveServer, io: std.Io, arena: std.mem.Allocator) !?serve.Produced {
+    const missing: serve.Produced = .{
+        .body = "not found\n",
+        .content_type = "text/plain; charset=utf-8",
+        .status = .not_found,
+    };
+    const feed = self.player_feed orelse return missing;
+    const body = (try feed.snapshot(io, arena)) orelse return missing;
+    return .{
+        .body = body.bytes,
+        .content_type = "application/json",
+        .etag = body.etag,
+        // Storable but never usable without revalidating: positions are as
+        // private as the map, and a second-old roster is already wrong.
+        .cache_control = "private, no-cache",
+    };
 }
 
 /// Tiles are immutable for a `{session, revision}` pair, so they are the one
@@ -3812,6 +3978,8 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     var max_connections: usize = 64;
     var scan_interval_seconds: u32 = 5;
     var focus_file: ?[]const u8 = null;
+    var players_file: ?[]const u8 = null;
+    const players_flag = try parsePlayersFlag(args);
     // Prebake defaults on for `vantage server` (a persistent service whose
     // cache SHOULD converge on the whole world) and off for local `vantage
     // live` (whose pitch is instant startup with a footprint that follows
@@ -3875,6 +4043,10 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
             scan_interval_seconds = std.math.clamp(n, 1, 3600);
         } else if (server_mode and std.mem.eql(u8, arg, "--focus-file")) {
             focus_file = try flagValue(args, &argi);
+        } else if (std.mem.eql(u8, arg, "--players-file")) {
+            players_file = try flagValue(args, &argi);
+        } else if (std.mem.eql(u8, arg, "--players")) {
+            argi += 1; // value parsed by parsePlayersFlag above
         } else if (std.mem.eql(u8, arg, "--prebake")) {
             const v = try flagValue(args, &argi);
             if (std.mem.eql(u8, v, "on")) {
@@ -3990,6 +4162,29 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     const tiles_dir = try std.fmt.allocPrint(a, "{s}/tiles", .{out_dir});
     try std.Io.Dir.cwd().createDirPath(init.io, tiles_dir);
 
+    // Player positions: a host feed if one was named, else the save's own
+    // player files for the local commands. The feed owns its cached body with
+    // a real allocator (it replaces it on every change), so it takes the page
+    // allocator rather than the run arena.
+    const players_mode = playersMode(players_file, players_flag, server_mode);
+    const player_feed: ?*players.Feed = if (players_mode == .off) null else blk: {
+        const feed = try a.create(players.Feed);
+        feed.* = .{
+            .gpa = std.heap.page_allocator,
+            .mode = players_mode,
+            .path = players_file,
+            .save_dir = save,
+            .dimension_id = dim.id,
+        };
+        feed.refresh(init.io);
+        break :blk feed;
+    };
+    if (player_feed) |feed| switch (players_mode) {
+        .host_file => std.debug.print("players: live feed from {s} ({d} online)\n", .{ players_file.?, feed.count(init.io) }),
+        .save => std.debug.print("players: {d} last known position(s) from the save\n", .{feed.count(init.io)}),
+        .off => unreachable,
+    };
+
     const server = try a.create(LiveServer);
     var session_bytes: [8]u8 = undefined;
     init.io.random(&session_bytes);
@@ -4017,6 +4212,7 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         .snapshot = region_snapshot,
         .scan_interval_ns = @as(i96, scan_interval_seconds) * std.time.ns_per_s,
         .focus_file = focus_file,
+        .player_feed = player_feed,
         // A poll may lag the catalog by up to this long. The viewer polls
         // roughly every 1.2 s while anything is moving, so one window is
         // under one poll of latency in exchange for bounding manifest

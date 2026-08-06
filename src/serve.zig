@@ -50,6 +50,11 @@ pub const Produced = struct {
     /// re-transferring — a tile is immutable for its revision, so letting a
     /// client keep a revalidatable copy turns a repeat view into a 304.
     cache_control: ?[]const u8 = null,
+    /// Status for this response (a matched validator still answers 304).
+    /// A producer that *owns* a path but has nothing to serve answers 404 here
+    /// rather than returning null, which would let a stale file of the same
+    /// name in the cache directory answer in its place.
+    status: std.http.Status = .ok,
 };
 
 /// An on-demand content source (the `vantage live` server): given a
@@ -521,7 +526,7 @@ fn respondProduced(
         headers.add("vary", "Accept-Encoding");
     }
     return req.respond(if (unchanged) "" else resp.body, .{
-        .status = if (unchanged) .not_modified else .ok,
+        .status = if (unchanged) .not_modified else resp.status,
         .extra_headers = headers.slice(),
     });
 }
@@ -634,6 +639,7 @@ fn safePath(rel: []const u8) bool {
 fn safeArtifactPath(rel: []const u8) bool {
     if (!safePath(rel)) return false;
     if (std.mem.eql(u8, rel, "manifest.json") or std.mem.eql(u8, rel, "terrain.vtexarr")) return true;
+    if (std.mem.eql(u8, rel, "players.json")) return true;
     if (!std.mem.startsWith(u8, rel, "tiles/t.") or !std.mem.endsWith(u8, rel, ".vtile")) return false;
     const mid = rel["tiles/t.".len .. rel.len - ".vtile".len];
     const dot = std.mem.indexOfScalar(u8, mid, '.') orelse return false;
@@ -709,6 +715,11 @@ test "safePath rejects escapes and accepts render files" {
 test "server artifacts expose only protocol files" {
     try std.testing.expect(safeArtifactPath("manifest.json"));
     try std.testing.expect(safeArtifactPath("terrain.vtexarr"));
+    try std.testing.expect(safeArtifactPath("players.json"));
+    // The player feed is one document, not a directory the world can be
+    // browsed through.
+    try std.testing.expect(!safeArtifactPath("players.json.tmp"));
+    try std.testing.expect(!safeArtifactPath("players/91c71e4a-146c-4788-bbb9-39002556a24e.png"));
     try std.testing.expect(safeArtifactPath("tiles/t.-3.12.vtile"));
     try std.testing.expect(!safeArtifactPath("operator-notes.txt"));
     try std.testing.expect(!safeArtifactPath("tiles/not-a-tile.vtile"));

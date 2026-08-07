@@ -1936,10 +1936,13 @@ fn colorMapCachePath(a: std.mem.Allocator, dir: []const u8, level: u5, x: i32, z
     return std.fmt.allocPrint(a, "{s}/c.{d}.{d}.{d}.vcm", .{ dir, level, x, z });
 }
 
+/// Written atomically: in a live session a bake can replace a tile's colour map
+/// while the LOD worker is reading it for a rebuild, and a half-written file
+/// parses as terrain rather than failing.
 fn writeColorMapCache(io: std.Io, a: std.mem.Allocator, dir: []const u8, level: u5, x: i32, z: i32, m: lowres.ColorMap) !void {
-    const path = try colorMapCachePath(a, dir, level, x, z);
+    const name = try std.fmt.allocPrint(a, "c.{d}.{d}.{d}.vcm", .{ level, x, z });
     const data = try lowres.serializeCache(a, m);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
+    try atomicWrite(io, a, dir, name, data);
 }
 
 fn readColorMapCache(io: std.Io, a: std.mem.Allocator, dir: []const u8, level: u5, key: u64) !lowres.ColorMap {
@@ -2071,8 +2074,12 @@ fn buildLowresPyramid(
                 if (corner) |*m| m else null,
             );
             const zipped = try compress.gzipCompress(sa, blob, 6);
-            const path = try std.fmt.allocPrint(sa, "{s}/tiles/l{d}.{d}.{d}.vlr", .{ out_dir, level, px, pz });
-            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = zipped });
+            // Atomic, because a live rebuild republishes these paths while
+            // clients are fetching them: a direct write would hand somebody a
+            // truncated gzip stream and put a hole in their map until a retry.
+            const tiles_dir = try std.fmt.allocPrint(sa, "{s}/tiles", .{out_dir});
+            const name = try std.fmt.allocPrint(sa, "l{d}.{d}.{d}.vlr", .{ level, px, pz });
+            try atomicWrite(io, sa, tiles_dir, name, zipped);
             try entries.append(a, .{
                 .x = px,
                 .z = pz,
@@ -3181,6 +3188,7 @@ fn liveTile(
         return .{ .bytes = "", .revision = revision }; // the viewer marks it empty, no retry
     };
     self.record(key, revision, if (res.written) &res else null);
+    if (!res.cmap_written) retireLodSource(self, key);
     // Meshed to nothing (all air / cave-culled) is still a real answer.
     const bytes = if (res.written) try readCachedTile(self, arena, tx, tz) else "";
     return .{ .bytes = bytes, .revision = revision };
@@ -3276,6 +3284,7 @@ fn prebakeOne(self: *LiveServer) bool {
     self.bake_slots.post(io);
     if (baked) |_| {
         self.record(key, best_revision, if (res.written) &res else null);
+        if (!res.cmap_written) retireLodSource(self, key);
     } else |e| {
         std.debug.print("prebake: tile ({d},{d}) failed: {s} — leaving a gap\n", .{ tx, tz, @errorName(e) });
         self.record(key, best_revision, null);
@@ -3404,6 +3413,26 @@ fn rebuildLiveLod(self: *LiveServer) !i64 {
     return elapsed;
 }
 
+/// Drop a tile's colour map from the overview.
+///
+/// Called after a bake that produced no map: the tile meshed to nothing, which
+/// on a revised tile means the terrain that was there has been removed. Its
+/// previous map would otherwise stay an input to every rebuild — and, because
+/// the coordinate is still in the catalog, survive a restart through
+/// `seedLiveLod` — so deleted terrain would linger in the overview forever.
+/// Only reached on a SUCCESSFUL bake; a failure keeps what it had rather than
+/// erasing the map over a transient error.
+fn retireLodSource(self: *LiveServer, key: u64) void {
+    const io = self.sh.io;
+    const lod_dir = self.lod_dir orelse return;
+    self.mutex.lockUncancelable(io);
+    const had = self.lod_maps.remove(key);
+    if (had) self.lod_dirty = true;
+    self.mutex.unlock(io);
+    if (!had) return;
+    deleteColorMapLevel(io, lod_dir, 0, &.{key}); // outside the lock: it's I/O
+}
+
 /// Adopt the colour maps a previous session left in the cache. They describe
 /// terrain, not this session's texture atlas, so they stay valid across a
 /// restart — which is what lets a restarted server publish the whole explored
@@ -3456,23 +3485,89 @@ fn knownTile(self: *LiveServer, key: u64) bool {
     return self.known.contains(key);
 }
 
-/// Open (and validate) the colour-map cache for a live session.
-///
-/// The maps are reused across restarts, so they carry a stamp of everything
-/// that changes what they mean — the dimension they describe and the tile size
-/// they are cut to. A mismatch wipes the cache rather than mixing two worlds'
-/// overviews together.
-fn openLiveLodDir(a: std.mem.Allocator, io: std.Io, out_dir: []const u8, dim: dimension.Profile, tile_chunks: i32) ![]const u8 {
+/// Everything that changes what a colour map means. Reusing maps across
+/// restarts is the whole point of the cache, so its key has to cover every
+/// input to them — not just the geometry, but which world and which settings
+/// produced the colours.
+const LodStamp = struct {
+    /// The region directory being served. Two saves pointed at one `--out`
+    /// would otherwise share coordinates and show each other's terrain.
+    world: []const u8,
+    /// Assets decide the textures the colours are averaged from, and the biome
+    /// data those colours are tinted by.
+    assets: []const u8,
+    dim: []const u8,
+    tile_chunks: i32,
+    /// Trimming the grid moves which block is the surface.
+    ceiling: ?i32,
+    /// Sky light shades the maps, and the mode changes it.
+    light: mesh.LightQuality,
+    blend_biomes: bool,
+
+    fn write(self: LodStamp, a: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(a, "vantage-lod 2\nworld {s}\nassets {s}\ndim {s}\ntile {d}\nceiling {?d}\nlight {s}\nblend {}\n", .{
+            self.world,
+            self.assets,
+            self.dim,
+            self.tile_chunks,
+            self.ceiling,
+            @tagName(self.light),
+            self.blend_biomes,
+        });
+    }
+};
+
+/// Open (and validate) the colour-map cache for a live session. A stamp
+/// mismatch wipes the cache rather than mixing two worlds' — or two
+/// configurations' — overviews together.
+fn openLiveLodDir(a: std.mem.Allocator, io: std.Io, out_dir: []const u8, stamp_fields: LodStamp) ![]const u8 {
     const dir = try std.fmt.allocPrint(a, "{s}/.vantage-lod", .{out_dir});
     const stamp_path = try std.fmt.allocPrint(a, "{s}/stamp", .{dir});
-    const stamp = try std.fmt.allocPrint(a, "vantage-lod 1 {s} {d}\n", .{ dim.slug, tile_chunks });
-    const existing = std.Io.Dir.cwd().readFileAlloc(io, stamp_path, a, .limited(1024)) catch "";
+    const stamp = try stamp_fields.write(a);
+    const existing = std.Io.Dir.cwd().readFileAlloc(io, stamp_path, a, .limited(8192)) catch "";
     if (!std.mem.eql(u8, existing, stamp)) {
         std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     }
     try std.Io.Dir.cwd().createDirPath(io, dir);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = stamp_path, .data = stamp });
     return dir;
+}
+
+test "the LOD cache key covers every input to a colour map" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base: LodStamp = .{
+        .world = "/saves/A/region",
+        .assets = "/assets/1.21.11",
+        .dim = "overworld",
+        .tile_chunks = 8,
+        .ceiling = null,
+        .light = .smooth,
+        .blend_biomes = true,
+    };
+    const stamp = try base.write(a);
+    try std.testing.expectEqualStrings(stamp, try base.write(a)); // stable
+
+    // Every field must be able to invalidate the cache on its own: each of
+    // these produces different colour maps for the same tile coordinates.
+    var other_world = base;
+    other_world.world = "/saves/B/region";
+    var other_assets = base;
+    other_assets.assets = "/assets/26.2";
+    var other_dim = base;
+    other_dim.dim = "the_nether";
+    var other_tile = base;
+    other_tile.tile_chunks = 16;
+    var other_ceiling = base;
+    other_ceiling.ceiling = 104;
+    var other_light = base;
+    other_light.light = .flat;
+    var other_blend = base;
+    other_blend.blend_biomes = false;
+    for ([_]LodStamp{ other_world, other_assets, other_dim, other_tile, other_ceiling, other_light, other_blend }) |changed| {
+        try std.testing.expect(!std.mem.eql(u8, stamp, try changed.write(a)));
+    }
 }
 
 /// The tiles prebake warms outward from: every place a player is (from the
@@ -3863,7 +3958,15 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     // restarts (see `openLiveLodDir`), which is what lets a restarted session
     // publish the whole explored overview before re-baking anything.
     const lod_dir: ?[]const u8 = if (lod)
-        openLiveLodDir(a, init.io, out_dir, dim, tile_chunks) catch |e| blk: {
+        openLiveLodDir(a, init.io, out_dir, .{
+            .world = wl.region_dir,
+            .assets = wl.assets,
+            .dim = dim.slug,
+            .tile_chunks = tile_chunks,
+            .ceiling = dim.ceiling_cut,
+            .light = quality,
+            .blend_biomes = blend_biomes,
+        }) catch |e| blk: {
             std.debug.print("live: no LOD cache ({s}); the zoomed-out overview is disabled\n", .{@errorName(e)});
             break :blk null;
         }

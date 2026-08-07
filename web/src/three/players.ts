@@ -95,6 +95,9 @@ const MAX_LERP_MS = 2000;
 const MAX_HEAD_TURN = 55;
 /** Model height in blocks (32 skin pixels). */
 const MODEL_HEIGHT = 32 * PIXEL;
+/** Below this share of the viewport height a model is a few pixels of noise:
+ *  stop drawing it and let the name tag, which never shrinks, carry the player. */
+const MIN_MODEL_FRACTION = 0.004;
 
 interface Sample {
   x: number;
@@ -121,8 +124,8 @@ class PlayerModel {
   private skinCanvas: HTMLCanvasElement;
   private icon: string | null = null;
 
-  from: Sample;
-  to: Sample;
+  readonly from: Sample;
+  readonly to: Sample;
   startMs: number;
   durationMs = MIN_LERP_MS;
   /** Where the model is drawn right now, after interpolation. */
@@ -152,12 +155,17 @@ class PlayerModel {
     this.ownedTextures.push(this.texture);
     this.material = new THREE.MeshBasicMaterial({
       map: this.texture,
-      // One material for the base and the outer layer: the outer layer's
-      // transparent texels are cut away by the alpha test, which is what
-      // Minecraft does and what lets all six nodes share a single material.
-      alphaTest: 0.5,
+      // One material for the base and the outer layer: the outer layer's empty
+      // texels are cut away by the alpha test, which is what lets all six nodes
+      // share a single material. The threshold is deliberately *low*: the
+      // fragment's alpha is the texel's times `material.opacity`, so a 0.5 cut
+      // would erase a whole player until they had faded past half — turning
+      // every join and every last-known position into a pop.
+      alphaTest: 0.04,
       transparent: true,
-      side: THREE.DoubleSide,
+      // The winding is built face by face (see FACE_CORNERS), so back faces are
+      // genuinely inside the model and never need rasterizing.
+      side: THREE.FrontSide,
       vertexColors: true,
       depthWrite: true,
     });
@@ -201,13 +209,14 @@ class PlayerModel {
     this.tagLabel = ''; // force the tag to redraw with the real face
   }
 
-  /** Redraw the name tag when the label, the skin or the settings change. */
-  syncTag(names: boolean, doc: Document): void {
+  /** Redraw the name tag when the label, the skin, the settings or the
+   *  followed state change. */
+  syncTag(names: boolean, followed: boolean, doc: Document): void {
     const label = names ? this.state.name : '';
-    const key = `${label}|${this.state.stale ? 's' : ''}${this.state.foreign ? 'f' : ''}`;
+    const key = `${label}|${this.state.stale ? 's' : ''}${this.state.foreign ? 'f' : ''}${followed ? '*' : ''}`;
     if (this.tag && this.tagLabel === key) return;
     this.tagLabel = key;
-    const canvas = tagCanvas(this.skinCanvas, label, this.state, doc);
+    const canvas = tagCanvas(this.skinCanvas, label, this.state, followed, doc);
     this.tagAspect = canvas.width / canvas.height;
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
@@ -260,6 +269,22 @@ class PlayerModel {
 
 function sampleOf(p: PlayerState): Sample {
   return { x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch };
+}
+
+function copySample(into: Sample, from: Sample): void {
+  into.x = from.x;
+  into.y = from.y;
+  into.z = from.z;
+  into.yaw = from.yaw;
+  into.pitch = from.pitch;
+}
+
+function copyPlayerSample(into: Sample, from: PlayerState): void {
+  into.x = from.x;
+  into.y = from.y;
+  into.z = from.z;
+  into.yaw = from.yaw;
+  into.pitch = from.pitch;
 }
 
 function skinTexture(source: TexImageSource): THREE.Texture {
@@ -346,7 +371,13 @@ function pushBox(
 
 /** Draw a player tag: their face, and their name if names are on. Rendered
  *  once per player and re-used until something about them changes. */
-function tagCanvas(skin: CanvasImageSource, label: string, player: PlayerState, doc: Document): HTMLCanvasElement {
+function tagCanvas(
+  skin: CanvasImageSource,
+  label: string,
+  player: PlayerState,
+  followed: boolean,
+  doc: Document,
+): HTMLCanvasElement {
   const scale = 2; // drawn at 2× so the sprite stays sharp on hidpi displays
   const height = 26 * scale;
   const pad = 5 * scale;
@@ -362,13 +393,16 @@ function tagCanvas(skin: CanvasImageSource, label: string, player: PlayerState, 
   canvas.width = Math.max(1, Math.ceil(width));
   canvas.height = height;
   const g = canvas.getContext('2d')!;
-  g.fillStyle = player.stale ? 'rgba(10,13,18,0.55)' : 'rgba(10,13,18,0.74)';
+  g.fillStyle = followed ? 'rgba(16,38,72,0.86)' : player.stale ? 'rgba(10,13,18,0.55)' : 'rgba(10,13,18,0.74)';
   roundRect(g, 0, 0, canvas.width, canvas.height, height / 2);
   g.fill();
-  if (player.foreign || player.stale) {
-    g.strokeStyle = player.foreign ? 'rgba(160,140,255,0.55)' : 'rgba(255,255,255,0.16)';
-    g.lineWidth = 1 * scale;
-    roundRect(g, 0.5 * scale, 0.5 * scale, canvas.width - scale, canvas.height - scale, height / 2);
+  // A ring says something about this player: who the camera is following,
+  // who is somewhere else, and whose position is only a memory.
+  const ring = followed ? 'rgba(91,155,255,0.95)' : player.foreign ? 'rgba(160,140,255,0.55)' : player.stale ? 'rgba(255,255,255,0.16)' : null;
+  if (ring) {
+    g.strokeStyle = ring;
+    g.lineWidth = (followed ? 1.6 : 1) * scale;
+    roundRect(g, 0.8 * scale, 0.8 * scale, canvas.width - 1.6 * scale, canvas.height - 1.6 * scale, height / 2);
     g.stroke();
   }
 
@@ -420,6 +454,8 @@ export class PlayerLayer {
    *  doesn't re-fetch a skin every second. */
   private readonly skinRequests = new Set<string>();
   private settings: Required<PlayerSettings>;
+  /** Who the camera is following, so their tag can say so. */
+  private followed: string | null = null;
   private snapshot: PlayerSnapshot | null = null;
   private lastSnapshotMs = 0;
   private lastFrameMs = 0;
@@ -467,7 +503,40 @@ export class PlayerLayer {
   setSettings(settings: PlayerSettings): void {
     this.settings = { ...this.settings, ...settings };
     this.root.visible = this.settings.enabled;
-    if (this.snapshot) this.setSnapshot(this.snapshot, performance.now());
+    // Re-apply membership only. Re-running the whole snapshot would restart
+    // everyone's interpolation and reset the cadence the next poll is measured
+    // against, so toggling a checkbox would visibly stutter the map.
+    if (this.snapshot) this.resync();
+  }
+
+  /** Mark a player as the one the camera is following (`null` clears it). */
+  setFollowed(uuid: string | null): void {
+    if (this.followed === uuid) return;
+    this.followed = uuid;
+    for (const [id, model] of this.models) model.syncTag(this.settings.names, id === uuid, document);
+  }
+
+  /** Add or drop models so the scene matches the current roster and settings,
+   *  without touching anybody's interpolation. */
+  private resync(): void {
+    const live = new Set<string>();
+    for (const player of this.snapshot?.players ?? []) {
+      if (!this.shouldPlace(player)) continue;
+      live.add(player.uuid);
+      const model = this.models.get(player.uuid) ?? this.spawn(player);
+      model.removing = false;
+      model.syncTag(this.settings.names, player.uuid === this.followed, document);
+    }
+    for (const [uuid, model] of this.models) model.removing = !live.has(uuid);
+  }
+
+  private spawn(player: PlayerState): PlayerModel {
+    const model = new PlayerModel(player, defaultSlim(player.uuid), document);
+    model.material.color.setScalar(this.tone);
+    this.models.set(player.uuid, model);
+    this.root.add(model.group);
+    this.loadSkin(player, model);
+    return model;
   }
 
   /** Follow the viewer's exposure so players sit in the same light as the
@@ -492,23 +561,18 @@ export class PlayerLayer {
     for (const player of snapshot.players) {
       if (!this.shouldPlace(player)) continue;
       live.add(player.uuid);
-      let model = this.models.get(player.uuid);
-      if (!model) {
-        model = new PlayerModel(player, defaultSlim(player.uuid), document);
-        model.material.color.setScalar(this.tone);
-        this.models.set(player.uuid, model);
-        this.root.add(model.group);
-        this.loadSkin(player, model);
-      }
+      const model = this.models.get(player.uuid) ?? this.spawn(player);
       model.state = player;
       model.removing = false;
       // Interpolate from wherever the model actually is, not from the last
-      // sample: a snapshot that lands mid-move must not rewind it.
-      model.from = { ...model.draw };
-      model.to = sampleOf(player);
+      // sample: a snapshot that lands mid-move must not rewind it. Written in
+      // place — a roster arrives every second, and allocating two objects per
+      // player per second is garbage the collector has to chase for nothing.
+      copySample(model.from, model.draw);
+      copyPlayerSample(model.to, player);
       model.startMs = now;
       model.durationMs = Math.max(MIN_LERP_MS, Math.min(MAX_LERP_MS, cadence || MIN_LERP_MS));
-      model.syncTag(this.settings.names, document);
+      model.syncTag(this.settings.names, player.uuid === this.followed, document);
     }
     for (const [uuid, model] of this.models) {
       if (!live.has(uuid)) model.removing = true;
@@ -587,6 +651,15 @@ export class PlayerLayer {
 
       model.layoutTag(this.settings.tagSize, fovHeight, scale);
 
+      // Six draw calls per player buy nothing once a player is smaller than a
+      // few pixels — from a whole-world view the tag is the only thing anyone
+      // can actually see. Screen height falls straight out of the same
+      // projection the tag is sized with, so this needs no viewport size.
+      const eye = this.camera.position;
+      const distance = Math.hypot(eye.x - model.draw.x, eye.y - model.draw.y, eye.z - model.draw.z);
+      const screenFraction = distance > 0 ? (MODEL_HEIGHT * scale) / (fovHeight * distance) : 1;
+      model.body.visible = screenFraction > MIN_MODEL_FRACTION;
+
       // Fade: joining players appear, leaving players dissolve, and a
       // last-known position is drawn faint because that is what it is.
       const target = model.removing ? 0 : model.state.stale ? 0.55 : 1;
@@ -635,7 +708,7 @@ export class PlayerLayer {
         const bitmap = await createImageBitmap(blob);
         if (this.disposed || !this.models.has(key)) return;
         model.setSkin(normalizeSkin(bitmap, bitmap.width, bitmap.height, document));
-        model.syncTag(this.settings.names, document);
+        model.syncTag(this.settings.names, key === this.followed, document);
       } catch {
         /* the default skin stands */
       }

@@ -971,10 +971,24 @@ export class VantageViewer {
    *  Panning the map releases it too: the pivot moving somewhere follow didn't
    *  put it is the user saying they want to look elsewhere. */
   followPlayer(uuid: string | null): boolean {
-    if (uuid !== null && !this.playersLayer?.positionOf(uuid)) return false;
+    const position = uuid === null ? null : this.playersLayer?.positionOf(uuid);
+    if (uuid !== null && !position) return false;
     if (this.following === uuid) return true;
     this.following = uuid;
-    if (uuid) this.followAnchor.set(this.controls.position.x, this.controls.position.z);
+    if (position) {
+      // Take the camera over cleanly. `setView` cancels any in-flight fly-to
+      // and zeroes the inertia buffers — without that, the easing left over
+      // from a `focusPlayer` would move the pivot on the next frame and read
+      // as the user panning, releasing the follow they just asked for.
+      this.controls.setView({
+        position,
+        distance: this.controls.distance,
+        rotation: this.controls.rotation,
+        angle: this.controls.angle,
+      });
+      this.followAnchor.set(position.x, position.z);
+    }
+    this.playersLayer?.setFollowed(uuid);
     this.emitter.emit('follow', { uuid });
     this.needsRender = true;
     return true;
@@ -1856,10 +1870,12 @@ export class VantageViewer {
     this.lastFrameMs = now;
 
     // Following runs before the controls so the pivot the camera is built from
-    // is already on the player this frame, not a frame behind.
+    // is already on the player this frame, not a frame behind — and so that any
+    // movement `update` then applies to the pivot is, by elimination, the user
+    // panning. That is what `applyFollow` checks for on the next frame, which is
+    // why the anchor must NOT be refreshed after `update` here.
     if (this.following) this.applyFollow();
     if (this.controls.update(dtMs)) this.needsRender = true;
-    if (this.following) this.followAnchor.set(this.controls.position.x, this.controls.position.z);
     // Players move between polls; the layer reports whether anything actually
     // did, which is what keeps an idle map from redrawing for nobody.
     if (this.playersLayer?.update(now)) this.needsRender = true;

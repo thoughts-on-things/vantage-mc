@@ -19,6 +19,8 @@ export interface PlayerListProps {
   title?: string;
   /** Start collapsed (header only). Default `false` — the roster is the point. */
   defaultCollapsed?: boolean;
+  /** Key that shows/hides players on the map. Default `'p'`; `null` disables. */
+  toggleKey?: string | null;
   /** Override the panel's placement/size. */
   style?: CSSProperties;
   className?: string;
@@ -56,7 +58,23 @@ function agoLabel(seen: number | undefined): string | null {
   return `${Math.round(seconds / 86_400)}d ago`;
 }
 
-export function PlayerList({ title = 'players', defaultCollapsed = false, style, className }: PlayerListProps) {
+/** Everything worth saying about a player in one hover. */
+function describe(player: PlayerView, ago: string | null): string {
+  const parts = [`${player.name} · ${Math.round(player.x)}, ${Math.round(player.y)}, ${Math.round(player.z)}`];
+  if (player.foreign && player.dimension) parts.push(player.dimension.split(':').pop()!);
+  if (player.gamemode) parts.push(player.gamemode);
+  if (player.health !== undefined) parts.push(`${Math.round(player.health * 10) / 10} hp`);
+  if (ago) parts.push(`last seen ${ago}`);
+  return parts.join(' · ');
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el || !el.tagName) return false;
+  return el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName);
+}
+
+export function PlayerList({ title = 'players', defaultCollapsed = false, toggleKey = 'p', style, className }: PlayerListProps) {
   const { viewer } = useVantage();
   const [players, setPlayers] = useState<PlayerView[]>([]);
   const [available, setAvailable] = useState(false);
@@ -64,8 +82,8 @@ export function PlayerList({ title = 'players', defaultCollapsed = false, style,
   const [following, setFollowing] = useState<string | null>(null);
   // The camera keeps moving between roster updates, so distances are re-read
   // on a slow tick of their own rather than per frame — this is a list, not a
-  // HUD, and a per-frame React commit for it would be absurd.
-  const [tick, setTick] = useState(0);
+  // HUD, and a React commit per frame for it would be absurd.
+  const [, setTick] = useState(0);
 
   useEffect(() => {
     if (!viewer) return;
@@ -84,15 +102,29 @@ export function PlayerList({ title = 'players', defaultCollapsed = false, style,
         setFollowing(null);
       }),
     ];
-    const timer = setInterval(() => setTick((t) => t + 1), 500);
+    const timer = setInterval(() => setTick((t) => t + 1), 1000);
     return () => {
       offs.forEach((off) => off());
       clearInterval(timer);
     };
   }, [viewer]);
 
+  // Keyboard toggle, in the same language as `B` for biomes and `C` for caves.
+  useEffect(() => {
+    if (!viewer || !toggleKey) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key.toLowerCase() !== toggleKey.toLowerCase()) return;
+      setLive((on) => {
+        viewer.setPlayers({ enabled: !on });
+        return !on;
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [viewer, toggleKey]);
+
   if (!viewer || !available || players.length === 0) return null;
-  void tick; // distances are recomputed on each tick
 
   const focus = viewer.controls.position;
   const rows = players
@@ -118,7 +150,7 @@ export function PlayerList({ title = 'players', defaultCollapsed = false, style,
           type="button"
           className={`vtg-toggle${live ? ' vtg-on' : ''}`}
           aria-pressed={live}
-          title={live ? 'Hide players on the map' : 'Show players on the map'}
+          title={`${live ? 'Hide' : 'Show'} players on the map${toggleKey ? ` (${toggleKey.toUpperCase()})` : ''}`}
           onClick={toggle}
         >
           {online > 0 ? `${online} on` : `${players.length}`}
@@ -129,15 +161,14 @@ export function PlayerList({ title = 'players', defaultCollapsed = false, style,
         {rows.map(({ p, distance }) => {
           const ago = p.stale ? agoLabel(p.seen) : null;
           const icon = viewer.playerIcon(p.uuid);
+          const followed = following === p.uuid;
           return (
             <div
               key={p.uuid}
-              className={`vtg-row vtg-player${p.stale ? ' vtg-dim' : ''}${following === p.uuid ? ' vtg-sel' : ''}`}
+              className={`vtg-row vtg-player${p.stale ? ' vtg-dim' : ''}${followed ? ' vtg-sel' : ''}`}
               role="button"
               tabIndex={0}
-              title={`${p.name} · ${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)}${
-                p.foreign && p.dimension ? ` · ${p.dimension}` : ''
-              }${ago ? ` · last seen ${ago}` : ''}`}
+              title={describe(p, ago)}
               onClick={() => viewer.focusPlayer(p.uuid)}
               onKeyDown={(e) => {
                 if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -156,12 +187,12 @@ export function PlayerList({ title = 'players', defaultCollapsed = false, style,
               {p.visible && (
                 <button
                   type="button"
-                  className={`vtg-follow${following === p.uuid ? ' vtg-on' : ''}`}
-                  aria-pressed={following === p.uuid}
-                  title={following === p.uuid ? 'Stop following' : `Follow ${p.name}`}
+                  className={`vtg-follow${followed ? ' vtg-on' : ''}`}
+                  aria-pressed={followed}
+                  title={followed ? 'Stop following' : `Follow ${p.name}`}
                   onClick={(e) => {
                     e.stopPropagation();
-                    viewer.followPlayer(following === p.uuid ? null : p.uuid);
+                    viewer.followPlayer(followed ? null : p.uuid);
                   }}
                 >
                   {PIN}

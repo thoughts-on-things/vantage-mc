@@ -3337,16 +3337,34 @@ fn rebuildLiveLod(self: *LiveServer) !i64 {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const a = arena.allocator();
     var sources: std.ArrayList(TileEntry) = .empty;
+    // Terrain the world no longer has must leave the overview too: a region
+    // deleted between snapshots drops out of the catalog, and its colour map
+    // would otherwise keep it drawable forever. Dead entries are collected
+    // rather than removed mid-iteration, and their files deleted after the
+    // lock is released.
+    var retired: std.ArrayList(u64) = .empty;
+    var ok = true;
     var it = self.lod_maps.keyIterator();
     while (it.next()) |key| {
+        if (!knownTile(self, key.*)) {
+            retired.append(a, key.*) catch {
+                ok = false;
+                break;
+            };
+            continue;
+        }
         sources.append(a, .{
             .tx = @bitCast(@as(u32, @truncate(key.* >> 32))),
             .tz = @bitCast(@as(u32, @truncate(key.*))),
             .bytes = 0,
-        }) catch break;
+        }) catch {
+            ok = false;
+            break;
+        };
     }
-    const count = sources.items.len;
-    const expected = self.lod_maps.count();
+    if (ok) {
+        for (retired.items) |key| _ = self.lod_maps.remove(key);
+    }
     self.mutex.unlock(io);
     errdefer {
         arena.deinit();
@@ -3355,7 +3373,21 @@ fn rebuildLiveLod(self: *LiveServer) !i64 {
         self.lod_dirty = true; // whatever failed is still unpublished
         self.mutex.unlock(io);
     }
-    if (count != expected) return error.OutOfMemory;
+    if (!ok) return error.OutOfMemory;
+    if (retired.items.len > 0) deleteColorMapLevel(io, lod_dir, 0, retired.items);
+    if (sources.items.len == 0) {
+        // Every source retired: publish an empty overview rather than a stale one.
+        self.mutex.lockUncancelable(io);
+        var stale = self.lod_arena;
+        self.lod_arena = null;
+        self.lod_levels = &.{};
+        self.lod_building = false;
+        self.manifest_generation +%= 1;
+        self.mutex.unlock(io);
+        if (stale) |*old| old.deinit();
+        arena.deinit();
+        return 0;
+    }
 
     const t0 = std.Io.Timestamp.now(io, .awake);
     const pyramid = try buildLowresPyramid(a, io, self.sh.out_dir, lod_dir, sources.items, @as(i64, self.sh.tile_chunks) * 16, true);
@@ -3417,7 +3449,8 @@ test "colour-map cache names round-trip through the pyramid key" {
 
 /// Whether the current catalog still lists a tile coordinate. The server's
 /// authority is its live snapshot; a local `live` session's is the immutable
-/// tile list it started from.
+/// tile list it started from. Both are guarded by `mutex`, which the rebuild
+/// holds while it scans; startup seeding runs before any worker exists.
 fn knownTile(self: *LiveServer, key: u64) bool {
     if (self.snapshot) |current| return current.tile_revisions.contains(key);
     return self.known.contains(key);

@@ -316,6 +316,12 @@ pub fn guessTint(name: []const u8) Tint {
     return .grass;
 }
 
+test "Tint.count covers the enum" {
+    // The mesher sizes its per-biome colour table with `count` and indexes it by
+    // `@intFromEnum`, so a kind added without bumping this reads past its row.
+    try std.testing.expectEqual(Tint.count, std.enums.values(Tint).len);
+}
+
 test "blockTint mirrors the blocks vanilla actually registers" {
     try std.testing.expectEqual(Tint.grass, blockTint("minecraft:grass_block").?);
     try std.testing.expectEqual(Tint.grass, blockTint("minecraft:short_grass").?);

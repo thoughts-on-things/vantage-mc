@@ -1832,7 +1832,10 @@ fn blendedTint(ctx: *const MeshCtx, kind: biome.Tint, lx: f32, ly: f32, lz: f32)
 fn buildTintTable(arena: std.mem.Allocator, g: grid.Grid, maps: biome.Colormaps, reg: *biome.Registry) ![][3]u8 {
     const nkind = @as(usize, biome.Tint.count);
     const nbiome = @max(1, g.biome_names.len);
-    const kinds = [_]biome.Tint{ .none, .grass, .foliage, .water, .spruce, .birch, .lily, .redstone, .stem };
+    // Every kind, straight off the enum: a hand-written list silently leaves the
+    // slot of a newly added tint uninitialized, and faces using it then read
+    // whatever the arena happened to hold.
+    const kinds = std.enums.values(biome.Tint);
     const out = try arena.alloc([3]u8, nbiome * nkind);
     for (0..nbiome) |bi| {
         const name = if (bi < g.biome_names.len) g.biome_names[bi] else "";

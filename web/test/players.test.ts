@@ -136,11 +136,15 @@ describe('parsePlayers', () => {
 });
 
 describe('angles', () => {
-  it('wraps to (-180, 180]', () => {
+  it('wraps to [-180, 180)', () => {
     expect(wrapDegrees(0)).toBe(0);
     expect(wrapDegrees(190)).toBeCloseTo(-170);
     expect(wrapDegrees(-190)).toBeCloseTo(170);
     expect(wrapDegrees(720)).toBeCloseTo(0);
+    // The seam: half a turn lands on the negative end, which is the same
+    // direction and the same distance from anywhere.
+    expect(wrapDegrees(180)).toBe(-180);
+    expect(wrapDegrees(-180)).toBe(-180);
   });
 
   it('takes the short way around when interpolating', () => {
@@ -161,5 +165,35 @@ describe('samePlayers', () => {
   it('is false once anyone moves or joins', () => {
     expect(samePlayers(snap(1), snap(2))).toBe(false);
     expect(samePlayers(snap(1), parsePlayers({ players: [] }))).toBe(false);
+  });
+
+  it('ignores the order the source listed them in', () => {
+    // A directory listing, a map iteration, or a host that sorts by rank can
+    // reorder freely. Nothing about the world changed, so nothing should redraw.
+    const one = { uuid: 'a', name: 'A', x: 1, y: 0, z: 0 };
+    const two = { uuid: 'b', name: 'B', x: 2, y: 0, z: 0 };
+    expect(samePlayers(parsePlayers({ players: [one, two] }), parsePlayers({ players: [two, one] }))).toBe(true);
+  });
+
+  it('notices a change to anything a consumer renders', () => {
+    const base = { uuid: 'a', name: 'A', x: 1, y: 0, z: 0, health: 20, gamemode: 'survival', dimension: 'minecraft:overworld' };
+    const changed = (patch: Record<string, unknown>) =>
+      samePlayers(parsePlayers({ players: [base] }), parsePlayers({ players: [{ ...base, ...patch }] }));
+    // A stationary player who is renamed, hurt, teleported to the nether, or
+    // handed a skin must still repaint their tag and their roster row.
+    expect(changed({ name: 'Renamed' })).toBe(false);
+    expect(changed({ health: 6 })).toBe(false);
+    expect(changed({ gamemode: 'spectator' })).toBe(false);
+    expect(changed({ dimension: 'minecraft:the_nether' })).toBe(false);
+    expect(changed({ skin: 'skins/a.png' })).toBe(false);
+    expect(changed({ stale: true })).toBe(false);
+    expect(changed({ yaw: 90 })).toBe(false);
+    expect(changed({})).toBe(true);
+  });
+
+  it('is false when the same count describes different people', () => {
+    const a = parsePlayers({ players: [{ uuid: 'a', name: 'A', x: 0, y: 0, z: 0 }] });
+    const b = parsePlayers({ players: [{ uuid: 'b', name: 'B', x: 0, y: 0, z: 0 }] });
+    expect(samePlayers(a, b)).toBe(false);
   });
 });

@@ -706,9 +706,16 @@ export class PlayerLayer {
           ? await (await fetch(url, { credentials: 'omit', mode: 'cors' })).blob()
           : new Blob([await this.fetchSkin!(path!)], { type: 'image/png' });
         const bitmap = await createImageBitmap(blob);
-        if (this.disposed || !this.models.has(key)) return;
-        model.setSkin(normalizeSkin(bitmap, bitmap.width, bitmap.height, document));
-        model.syncTag(this.settings.names, key === this.followed, document);
+        try {
+          if (this.disposed || !this.models.has(key)) return;
+          model.setSkin(normalizeSkin(bitmap, bitmap.width, bitmap.height, document));
+          model.syncTag(this.settings.names, key === this.followed, document);
+        } finally {
+          // The bitmap has been drawn into a canvas by now; releasing it here
+          // returns the decoded image immediately instead of leaving a crowd's
+          // worth of them for the collector to find.
+          bitmap.close();
+        }
       } catch {
         /* the default skin stands */
       }

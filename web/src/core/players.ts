@@ -69,8 +69,10 @@ function str(value: unknown, max: number): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value.slice(0, max) : undefined;
 }
 
-/** Wrap to (-180, 180] so interpolating between two samples takes the short way
- *  around instead of spinning a player through a full turn. */
+/** Wrap to [-180, 180) so interpolating between two samples takes the short way
+ *  around instead of spinning a player through a full turn. The seam sits at
+ *  half a turn, where `180` comes back as `-180` — the same direction, and the
+ *  same distance from anywhere. */
 export function wrapDegrees(deg: number): number {
   const wrapped = ((deg + 180) % 360 + 360) % 360;
   return wrapped - 180;
@@ -159,16 +161,35 @@ export function parsePlayers(data: unknown, mapDimension?: string): PlayerSnapsh
   };
 }
 
-/** Whether two snapshots describe the same players in the same places — the
- *  test the viewer uses to skip re-rendering and re-notifying on a poll that
- *  brought nothing new. */
+/** Everything about one player that a consumer can see: where they are, and
+ *  everything the tag, the model and the roster row are drawn from. A field
+ *  missing here is a field that can silently go stale on screen. */
+function samePlayer(p: PlayerState, q: PlayerState): boolean {
+  return (
+    p.x === q.x && p.y === q.y && p.z === q.z &&
+    p.yaw === q.yaw && p.pitch === q.pitch &&
+    p.name === q.name && p.foreign === q.foreign && p.stale === q.stale &&
+    p.dimension === q.dimension && p.skin === q.skin &&
+    p.health === q.health && p.gamemode === q.gamemode && p.seen === q.seen
+  );
+}
+
+/**
+ * Whether two snapshots describe the same roster — the test the viewer uses to
+ * skip re-rendering and re-notifying on a poll that brought nothing new.
+ *
+ * Matched by uuid rather than by position in the list. A source is free to
+ * reorder (a directory listing, a map iteration, a host that sorts by rank),
+ * and re-drawing the world because two names swapped places would defeat the
+ * quiet-poll behaviour this exists to enable. Uuids are unique after parsing,
+ * so equal lengths plus a match for every entry means the same set of people.
+ */
 export function samePlayers(a: PlayerSnapshot, b: PlayerSnapshot): boolean {
   if (a.players.length !== b.players.length) return false;
-  for (let i = 0; i < a.players.length; i++) {
-    const p = a.players[i]!;
-    const q = b.players[i]!;
-    if (p.uuid !== q.uuid || p.x !== q.x || p.y !== q.y || p.z !== q.z) return false;
-    if (p.yaw !== q.yaw || p.pitch !== q.pitch || p.foreign !== q.foreign || p.stale !== q.stale) return false;
+  const byId = new Map(b.players.map((p) => [p.uuid, p]));
+  for (const player of a.players) {
+    const other = byId.get(player.uuid);
+    if (!other || !samePlayer(player, other)) return false;
   }
   return true;
 }

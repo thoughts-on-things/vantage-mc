@@ -189,7 +189,7 @@
         "operationId": "headWorldPlayers",
         "tags": ["Artifacts"],
         "summary": "Probe the roster path without producing it",
-        "description": "HEAD never reaches the dynamic producer, and the roster is never persisted to the cache directory, so this always answers 404. Use GET to read it.",
+        "description": "On this data plane a HEAD is answered from the cache directory alone — it never reaches the dynamic producer. Vantage never writes the roster there, so this answers 404 unless an operator has placed a file of that name in the cache. Use GET to read the roster.",
         "responses": {
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" }

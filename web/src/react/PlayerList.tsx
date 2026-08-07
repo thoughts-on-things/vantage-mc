@@ -189,6 +189,10 @@ export function PlayerList({ title = 'players', defaultCollapsed = false, toggle
                   type="button"
                   className={`vtg-follow${followed ? ' vtg-on' : ''}`}
                   aria-pressed={followed}
+                  // The button is a bare glyph, so it needs a name of its own —
+                  // `title` is a tooltip, not something every screen reader
+                  // reads out.
+                  aria-label={followed ? `Stop following ${p.name}` : `Follow ${p.name}`}
                   title={followed ? 'Stop following' : `Follow ${p.name}`}
                   onClick={(e) => {
                     e.stopPropagation();

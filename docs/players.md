@@ -231,7 +231,7 @@ A live player map is a live location feed for real people. Treat it that way.
 
 | Risk | What Vantage does |
 | --- | --- |
-| Positions exposed to anyone who can reach the map | The roster is a protected artifact behind the same authorization as the terrain; `private, no-store`/`no-cache`, never in a shared cache. |
+| Positions exposed to anyone who can reach the map | The roster is a protected artifact behind the same authorization as the terrain, served `private, no-cache`: a client may keep a copy but can never use it without asking again, and no shared cache may hold one. |
 | Offline players' last known positions leaking | `vantage server` reads no player files unless asked (`--players on`); the local commands, where the map and the save belong to the same person, default to on. |
 | A roster pointing the viewer at another origin | `skin` accepts only a plain relative path inside the map's own directory; anything else is dropped, not forwarded. |
 | A third party learning who plays and who watches | No skin service is contacted by default. |

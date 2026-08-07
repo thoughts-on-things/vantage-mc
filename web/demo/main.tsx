@@ -126,20 +126,13 @@ function mount(entry: Entry, serverWorld?: WorldSource): void {
 
 /** Whether a JSON file sits at `path` — how the viewer decides which entry
  *  point a render directory offers without fetching a body it may not use.
- *
- *  HEAD answers that for a static render. `vantage live` and `vantage server`
- *  synthesize their manifest on demand and deliberately answer HEAD from disk
- *  alone (a metadata probe must never trigger a bake), so a cold on-demand
- *  cache has no file to stat and the probe has to ask properly — cancelling
- *  the body the moment the headers say what we needed to know. */
+ *  An on-demand server answers this for its synthesized manifest too: HEAD
+ *  reaches the producer, which serves cheap resources and declines the ones a
+ *  probe should never be able to trigger. */
 async function hasJson(path: string): Promise<boolean> {
-  const isJson = (r: Response) => r.ok && (r.headers.get('content-type') ?? '').includes('json');
   try {
-    if (isJson(await fetch(path, { method: 'HEAD' }))) return true;
-    const res = await fetch(path);
-    const answer = isJson(res);
-    void res.body?.cancel();
-    return answer;
+    const r = await fetch(path, { method: 'HEAD' });
+    return r.ok && (r.headers.get('content-type') ?? '').includes('json');
   } catch {
     return false;
   }

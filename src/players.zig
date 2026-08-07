@@ -351,7 +351,18 @@ pub fn readSaveSnapshot(
         }
     }
 
-    return .{ .players = try out.toOwnedSlice(arena), .origin = .playerdata, .updated_ms = updated_ms };
+    // Directory iteration order is whatever the filesystem feels like, and it
+    // is not promised to be stable between scans. Ordering by uuid is what
+    // makes an idle save serialize to byte-identical JSON every time — which
+    // is the whole basis of the ETag settling into a 304 instead of shipping
+    // the same roster again in a different order.
+    const list = try out.toOwnedSlice(arena);
+    std.mem.sort(Player, list, {}, lessByUuid);
+    return .{ .players = list, .origin = .playerdata, .updated_ms = updated_ms };
+}
+
+fn lessByUuid(_: void, a: Player, b: Player) bool {
+    return std.mem.order(u8, a.uuid, b.uuid) == .lt;
 }
 
 /// The singleplayer player, from `level.dat`'s `Data.Player` compound.
@@ -888,6 +899,33 @@ test "serialize round-trips through the parser and stays BlueMap-shaped" {
     try testing.expectApproxEqAbs(@as(f64, 383.22), back.players[0].x, 0.005);
     try testing.expect(back.players[0].stale);
     try testing.expect(!back.players[0].foreign);
+}
+
+test "save-derived rosters are ordered, whatever order the directory gave" {
+    // The ETag settling into a 304 depends on identical bytes for an unchanged
+    // world, so the roster's order cannot be the filesystem's to choose.
+    var players_a = [_]Player{
+        .{ .uuid = "c0000000-0000-4000-8000-000000000000", .name = "C" },
+        .{ .uuid = "a0000000-0000-4000-8000-000000000000", .name = "A" },
+        .{ .uuid = "b0000000-0000-4000-8000-000000000000", .name = "B" },
+    };
+    var players_b = [_]Player{
+        .{ .uuid = "b0000000-0000-4000-8000-000000000000", .name = "B" },
+        .{ .uuid = "c0000000-0000-4000-8000-000000000000", .name = "C" },
+        .{ .uuid = "a0000000-0000-4000-8000-000000000000", .name = "A" },
+    };
+    std.mem.sort(Player, &players_a, {}, lessByUuid);
+    std.mem.sort(Player, &players_b, {}, lessByUuid);
+    for (players_a, players_b) |x, y| try testing.expectEqualStrings(x.uuid, y.uuid);
+    try testing.expectEqualStrings("A", players_a[0].name);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings(
+        try serialize(a, .{ .players = &players_a, .origin = .playerdata, .updated_ms = 5 }),
+        try serialize(a, .{ .players = &players_b, .origin = .playerdata, .updated_ms = 5 }),
+    );
 }
 
 test "an idle roster serializes to identical bytes" {

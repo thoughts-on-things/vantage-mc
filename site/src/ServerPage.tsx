@@ -40,6 +40,7 @@ const ENDPOINTS = [
   ['GET', '/v1/worlds/default/manifest.json', 'protected', 'Current tile catalog, progress, and per-tile revisions.'],
   ['GET', '/v1/worlds/default/terrain.vtexarr', 'protected', 'Append-only texture array used by streamed tiles.'],
   ['GET', '/v1/worlds/default/tiles/t.X.Z.vtile', 'protected', 'Cached or on-demand geometry for one advertised tile.'],
+  ['GET', '/v1/worlds/default/players.json', 'protected', 'Live player roster, when the host configures one.'],
 ] as const;
 
 export function ServerPage() {
@@ -216,6 +217,7 @@ await VantageViewer.mount(container, { world });`}
             <p><strong><code>HEAD</code> never starts a render.</strong> It answers from file metadata when a cache entry exists.</p>
             <p><strong>Tile revisions are opaque.</strong> Clients compare strings and replace only coordinates whose revision changed.</p>
             <p><strong>One process exposes one world today.</strong> The world-list response leaves room for a future multi-world supervisor.</p>
+            <p><strong>Players come from you, not from the game.</strong> The sidecar serves the roster your supervisor writes — a superset of BlueMap&apos;s <code>live/players.json</code> — and draws it as real player models.</p>
           </div>
         </section>
 
@@ -306,8 +308,8 @@ vantage server /data/world \\
             <p className="kicker">clear boundaries</p>
             <h2>What protocol v1 renders</h2>
             <div className="scope-columns">
-              <div><h3>Included</h3><ul><li>Persisted Java Edition overworld terrain</li><li>On-demand textured geometry</li><li>Biome, lighting, and cave-ready data</li><li>Continuous tile replacement after saves</li></ul></div>
-              <div><h3>Not included—by design</h3><ul><li>Players, inventories, chat, or live packets</li><li>Remote commands, save, start, or stop</li><li>Bedrock Edition worlds</li><li>Public TLS termination inside the sidecar</li></ul></div>
+              <div><h3>Included</h3><ul><li>Persisted Java Edition overworld terrain</li><li>On-demand textured geometry</li><li>Biome, lighting, and cave-ready data</li><li>Continuous tile replacement after saves</li><li>Live player positions your host supplies</li></ul></div>
+              <div><h3>Not included—by design</h3><ul><li>Inventories, chat, or live game packets</li><li>Reading player positions out of the game itself</li><li>Remote commands, save, start, or stop</li><li>Bedrock Edition worlds</li><li>Public TLS termination inside the sidecar</li></ul></div>
             </div>
           </div>
         </section>

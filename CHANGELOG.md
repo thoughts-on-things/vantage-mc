@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.12.0...v0.13.0) (2026-08-07)
+
+
+### Features
+
+* show live players on the map ([#73](https://github.com/thoughts-on-things/vantage-mc/issues/73)) ([90a37ea](https://github.com/thoughts-on-things/vantage-mc/commit/90a37eaca319cfa9eb250a01330504c50e38a717))
+
 ## [0.12.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.11.0...v0.12.0) (2026-07-27)
 
 

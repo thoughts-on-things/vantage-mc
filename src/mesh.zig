@@ -1903,8 +1903,9 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
 
             for (el.faces) |mf| {
                 const tf = texFaceFor(mf.dir);
-                const layer: f32 = @floatFromInt(tex.layerFor(mf.texture));
-                const tint: biome.Tint = if (mf.tintindex >= 0) biome.blockTint(name) else .none;
+                const layer_idx = tex.layerFor(mf.texture);
+                const layer: f32 = @floatFromInt(layer_idx);
+                const tint: biome.Tint = if (mf.tintindex >= 0) biome.tintFor(name, tex, layer_idx) else .none;
                 // The cullface direction must rotate with the model, or rotated
                 // blocks (logs, deepslate axis variants) cull against the wrong
                 // neighbor and punch holes.
@@ -2063,27 +2064,117 @@ fn partsHaveGeometry(parts: []const model.ResolvedModel) bool {
 /// markers like light or structure_void, which also resolve to no geometry).
 const EntityBox = struct { color: [3]u8, height: f32 };
 
+/// Vanilla `DyeColor` texture colours. Sixteen beds, banners and shulker boxes
+/// differ *only* by their dye, so a single colour per family turns a built-up
+/// base into a uniform smear — this is what makes them read as themselves.
+const dye_colors = std.StaticStringMap([3]u8).initComptime(.{
+    .{ "white", [3]u8{ 0xF9, 0xFF, 0xFE } },      .{ "orange", [3]u8{ 0xF9, 0x80, 0x1D } },
+    .{ "magenta", [3]u8{ 0xC7, 0x4E, 0xBD } },    .{ "light_blue", [3]u8{ 0x3A, 0xB3, 0xDA } },
+    .{ "yellow", [3]u8{ 0xFE, 0xD8, 0x3D } },     .{ "lime", [3]u8{ 0x80, 0xC7, 0x1F } },
+    .{ "pink", [3]u8{ 0xF3, 0x8B, 0xAA } },       .{ "gray", [3]u8{ 0x47, 0x4F, 0x52 } },
+    .{ "light_gray", [3]u8{ 0x9D, 0x9D, 0x97 } }, .{ "cyan", [3]u8{ 0x16, 0x9C, 0x9C } },
+    .{ "purple", [3]u8{ 0x89, 0x32, 0xB8 } },     .{ "blue", [3]u8{ 0x3C, 0x44, 0xAA } },
+    .{ "brown", [3]u8{ 0x83, 0x54, 0x32 } },      .{ "green", [3]u8{ 0x5E, 0x7C, 0x16 } },
+    .{ "red", [3]u8{ 0xB0, 0x2E, 0x26 } },        .{ "black", [3]u8{ 0x1D, 0x1D, 0x21 } },
+});
+
+/// Mob heads/skulls, which are otherwise all bone-white.
+const skull_colors = std.StaticStringMap([3]u8).initComptime(.{
+    .{ "skeleton", [3]u8{ 0xD6, 0xD2, 0xCB } }, .{ "wither_skeleton", [3]u8{ 0x34, 0x34, 0x34 } },
+    .{ "zombie", [3]u8{ 0x4C, 0x7F, 0x33 } },   .{ "creeper", [3]u8{ 0x60, 0xAC, 0x5B } },
+    .{ "dragon", [3]u8{ 0x24, 0x1C, 0x28 } },   .{ "piglin", [3]u8{ 0xE3, 0x92, 0x8C } },
+    .{ "player", [3]u8{ 0xB4, 0x88, 0x64 } },
+});
+
+/// Copper oxidation stages, shared by the copper chests and copper golem
+/// statues added in the 1.21.9 copper drop.
+const copper_colors = std.StaticStringMap([3]u8).initComptime(.{
+    .{ "", [3]u8{ 0xC0, 0x6C, 0x50 } },           .{ "exposed_", [3]u8{ 0x9C, 0x7A, 0x65 } },
+    .{ "weathered_", [3]u8{ 0x6E, 0x9A, 0x74 } }, .{ "oxidized_", [3]u8{ 0x4F, 0xA4, 0x7B } },
+});
+
+/// The dye in a `<dye>_<suffix>` block name, or null if either half doesn't fit.
+fn dyedColor(name: []const u8, suffix: []const u8) ?[3]u8 {
+    if (!std.mem.endsWith(u8, name, suffix)) return null;
+    return dye_colors.get(name[0 .. name.len - suffix.len]);
+}
+
+/// The oxidation colour of a `[waxed_][stage_]copper_<thing>` block name, or
+/// null when `name` isn't that thing.
+fn copperColor(name: []const u8, suffix: []const u8) ?[3]u8 {
+    if (!std.mem.endsWith(u8, name, suffix)) return null;
+    var stage = name[0 .. name.len - suffix.len];
+    // Wax only changes whether it oxidizes further, never how it looks.
+    if (std.mem.startsWith(u8, stage, "waxed_")) stage = stage["waxed_".len..];
+    return copper_colors.get(stage);
+}
+
 fn blockEntityBox(name: []const u8) ?EntityBox {
     const b = model.stripNs(name);
     if (std.mem.eql(u8, b, "chest") or std.mem.eql(u8, b, "trapped_chest"))
         return .{ .color = .{ 140, 100, 45 }, .height = 0.875 };
     if (std.mem.eql(u8, b, "ender_chest"))
         return .{ .color = .{ 25, 55, 60 }, .height = 0.875 };
+    if (copperColor(b, "copper_chest")) |c| return .{ .color = c, .height = 0.875 };
+    if (copperColor(b, "copper_golem_statue")) |c| return .{ .color = c, .height = 1.0 };
+    if (dyedColor(b, "_bed")) |c| return .{ .color = c, .height = 0.5625 };
     if (std.mem.endsWith(u8, b, "_bed"))
         return .{ .color = .{ 180, 60, 60 }, .height = 0.5625 };
     if (std.mem.endsWith(u8, b, "sign"))
         return .{ .color = .{ 120, 95, 60 }, .height = 1.0 };
+    if (dyedColor(b, "_wall_banner") orelse dyedColor(b, "_banner")) |c|
+        return .{ .color = c, .height = 1.0 };
     if (std.mem.endsWith(u8, b, "banner"))
         return .{ .color = .{ 205, 205, 205 }, .height = 1.0 };
-    if (std.mem.endsWith(u8, b, "_skull") or std.mem.endsWith(u8, b, "_head"))
-        return .{ .color = .{ 225, 220, 200 }, .height = 0.5 };
+    if (std.mem.endsWith(u8, b, "_skull") or std.mem.endsWith(u8, b, "_head")) {
+        const kind = b[0 .. b.len - (if (std.mem.endsWith(u8, b, "_skull")) "_skull".len else "_head".len)];
+        // `_wall_skull`/`_wall_head` name the same mob mounted sideways.
+        const mob = if (std.mem.endsWith(u8, kind, "_wall")) kind[0 .. kind.len - "_wall".len] else kind;
+        return .{ .color = skull_colors.get(mob) orelse .{ 225, 220, 200 }, .height = 0.5 };
+    }
+    if (dyedColor(b, "_shulker_box")) |c| return .{ .color = c, .height = 1.0 };
     if (std.mem.endsWith(u8, b, "shulker_box"))
         return .{ .color = .{ 150, 105, 160 }, .height = 1.0 };
     if (std.mem.eql(u8, b, "decorated_pot"))
         return .{ .color = .{ 160, 90, 60 }, .height = 1.0 };
     if (std.mem.eql(u8, b, "conduit"))
         return .{ .color = .{ 130, 180, 170 }, .height = 0.5 };
+    // The portal surfaces are drawn by an entity renderer as a near-black
+    // starfield; leaving them invisible opens a hole through a stronghold's
+    // floor into the terrain below.
+    if (std.mem.eql(u8, b, "end_portal")) return .{ .color = .{ 10, 8, 20 }, .height = 0.75 };
+    if (std.mem.eql(u8, b, "end_gateway")) return .{ .color = .{ 10, 8, 20 }, .height = 1.0 };
     return null;
+}
+
+test "block-entity stand-ins keep each block recognizable" {
+    // Dyed families: the dye is the only thing that distinguishes them.
+    try std.testing.expectEqual([3]u8{ 0x3C, 0x44, 0xAA }, blockEntityBox("minecraft:blue_bed").?.color);
+    try std.testing.expectEqual([3]u8{ 0x5E, 0x7C, 0x16 }, blockEntityBox("minecraft:green_banner").?.color);
+    try std.testing.expectEqual([3]u8{ 0x5E, 0x7C, 0x16 }, blockEntityBox("minecraft:green_wall_banner").?.color);
+    try std.testing.expectEqual([3]u8{ 0xFE, 0xD8, 0x3D }, blockEntityBox("minecraft:yellow_shulker_box").?.color);
+    // An undyed shulker box is still the vanilla purple one.
+    try std.testing.expectEqual([3]u8{ 150, 105, 160 }, blockEntityBox("minecraft:shulker_box").?.color);
+
+    // Copper chests and golem statues (1.21.9) rendered as nothing at all
+    // before they were listed here; wax doesn't change the colour.
+    try std.testing.expectEqual([3]u8{ 0xC0, 0x6C, 0x50 }, blockEntityBox("minecraft:copper_chest").?.color);
+    try std.testing.expectEqual([3]u8{ 0x4F, 0xA4, 0x7B }, blockEntityBox("minecraft:oxidized_copper_chest").?.color);
+    try std.testing.expectEqual(
+        blockEntityBox("minecraft:weathered_copper_chest").?.color,
+        blockEntityBox("minecraft:waxed_weathered_copper_chest").?.color,
+    );
+    try std.testing.expectEqual([3]u8{ 0x9C, 0x7A, 0x65 }, blockEntityBox("minecraft:exposed_copper_golem_statue").?.color);
+
+    // Skulls by mob, wall-mounted or not.
+    try std.testing.expectEqual([3]u8{ 0x4C, 0x7F, 0x33 }, blockEntityBox("minecraft:zombie_head").?.color);
+    try std.testing.expectEqual([3]u8{ 0x4C, 0x7F, 0x33 }, blockEntityBox("minecraft:zombie_wall_head").?.color);
+    try std.testing.expectEqual([3]u8{ 0x34, 0x34, 0x34 }, blockEntityBox("minecraft:wither_skeleton_skull").?.color);
+
+    // Markers stay invisible: they have no geometry in game either.
+    try std.testing.expect(blockEntityBox("minecraft:barrier") == null);
+    try std.testing.expect(blockEntityBox("minecraft:structure_void") == null);
+    try std.testing.expect(blockEntityBox("minecraft:moving_piston") == null);
 }
 
 /// Like `bakeFullCube` but `height` (0..1] scales Y — a squashed cube for

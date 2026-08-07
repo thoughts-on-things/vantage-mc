@@ -55,6 +55,9 @@ pub const Builder = struct {
     layers: std.ArrayList([]u8) = .empty,
     anims: std.ArrayList(AnimEntry) = .empty,
     map: std.StringHashMap(u32),
+    /// Memoized `layerIsGrey` answers, parallel to `layers` (grown lazily —
+    /// only the handful of layers on tinted faces are ever asked about).
+    grey: std.ArrayList(Greyness) = .empty,
     /// Guards `layers`/`map` — tiles mesh on multiple threads and each new
     /// texture appends a layer. `arena` must be thread-safe too (the render
     /// path hands in a locked allocator).
@@ -195,7 +198,92 @@ pub const Builder = struct {
         defer self.mutex.unlock(self.io);
         return @intCast(self.layers.items.len);
     }
+
+    /// Whether a layer's texture is (near-)greyscale.
+    ///
+    /// This is the signal that the game must be COLOURING a block: vanilla
+    /// ships grass, foliage and water textures desaturated and multiplies a
+    /// biome tint into them, while blocks it does not tint carry their colour
+    /// in the texture (cherry blossom pink, bamboo green). The mesher only asks
+    /// about blocks outside `biome.blockTint`'s table — modded blocks, and
+    /// whatever the next Minecraft version adds — where it beats guessing from
+    /// the name. Memoized: each layer is scanned at most once.
+    pub fn layerIsGrey(self: *Builder, idx: u32) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (idx >= self.layers.items.len) return false;
+        while (self.grey.items.len <= idx) self.grey.append(self.arena, .unknown) catch return false;
+        switch (self.grey.items[idx]) {
+            .grey => return true,
+            .coloured => return false,
+            .unknown => {},
+        }
+        const answer: Greyness = if (isGreyscale(self.layers.items[idx])) .grey else .coloured;
+        self.grey.items[idx] = answer;
+        return answer == .grey;
+    }
 };
+
+const Greyness = enum { unknown, grey, coloured };
+
+/// Mean HSV saturation over a layer's opaque texels, against a threshold with
+/// room on both sides: vanilla's tinted textures measure ≤0.08 (grass 0.00,
+/// oak leaves 0.02, jungle leaves 0.08 — the highest) and its untinted ones
+/// ≥0.24 (bamboo 0.77, azalea 0.60, cherry 0.33). Fully transparent texels are
+/// skipped: their RGB is arbitrary in most PNG encoders.
+fn isGreyscale(layer: []const u8) bool {
+    var total: f32 = 0;
+    var n: usize = 0;
+    var p: usize = 0;
+    while (p < layer.len) : (p += 4) {
+        if (layer[p + 3] < 128) continue;
+        const mx = @max(layer[p], @max(layer[p + 1], layer[p + 2]));
+        const mn = @min(layer[p], @min(layer[p + 1], layer[p + 2]));
+        if (mx > 0) total += @as(f32, @floatFromInt(mx - mn)) / @as(f32, @floatFromInt(mx));
+        n += 1;
+    }
+    if (n == 0) return false;
+    return total / @as(f32, @floatFromInt(n)) < 0.15;
+}
+
+test "greyscale detection separates tinted textures from coloured ones" {
+    const a = std.testing.allocator;
+    const layer = try a.alloc(u8, TILE * TILE * 4);
+    defer a.free(layer);
+
+    // A grey texture (vanilla ships every biome-tinted texture this way).
+    for (0..TILE * TILE) |i| {
+        layer[i * 4 + 0] = 128;
+        layer[i * 4 + 1] = 128;
+        layer[i * 4 + 2] = 128;
+        layer[i * 4 + 3] = 255;
+    }
+    try std.testing.expect(isGreyscale(layer));
+
+    // Cherry-blossom pink is nowhere near grey.
+    for (0..TILE * TILE) |i| {
+        layer[i * 4 + 0] = 229;
+        layer[i * 4 + 1] = 173;
+        layer[i * 4 + 2] = 194;
+    }
+    try std.testing.expect(!isGreyscale(layer));
+
+    // Transparent texels don't vote. Cutout plants (a leaf or flower on a
+    // transparent field) commonly encode their holes as opaque-looking black,
+    // which would otherwise drag any texture toward "grey".
+    for (0..TILE * TILE) |i| {
+        const hole = i % 2 == 1;
+        layer[i * 4 + 0] = if (hole) 0 else 229;
+        layer[i * 4 + 1] = if (hole) 0 else 173;
+        layer[i * 4 + 2] = if (hole) 0 else 194;
+        layer[i * 4 + 3] = if (hole) 0 else 255;
+    }
+    try std.testing.expect(!isGreyscale(layer));
+
+    // A fully transparent layer has nothing to tint either way.
+    for (0..TILE * TILE) |i| layer[i * 4 + 3] = 0;
+    try std.testing.expect(!isGreyscale(layer));
+}
 
 pub const Decoded = struct { width: u32, height: u32, pixels: []u8 };
 

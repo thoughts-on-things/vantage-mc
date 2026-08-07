@@ -2927,6 +2927,10 @@ fn produce(ctx: *anyopaque, io: std.Io, arena: std.mem.Allocator, request: serve
     const path = request.path;
     if (std.mem.eql(u8, path, "manifest.json"))
         return try manifestResponse(self, arena, request);
+    // A HEAD gets the catalog (that is how a viewer discovers the world) but
+    // never enough of a foothold to make the host bake a tile or re-serialize
+    // the atlas. Those fall through to whatever is already cached on disk.
+    if (request.head) return null;
     if (std.mem.eql(u8, path, "terrain.vtexarr"))
         return .{ .body = try liveAtlas(self, arena), .content_type = "application/octet-stream" };
     if (parseTilePath(path)) |xz| return try tileResponse(self, arena, xz[0], xz[1], request);

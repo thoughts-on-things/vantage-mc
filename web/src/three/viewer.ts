@@ -689,7 +689,11 @@ export class VantageViewer {
         settings: this.options.players,
       });
       this.playersLayer.setTone(this.light.exposure);
-      void this.pollPlayers(source, this.playersLayer, manifest.dimension?.id);
+      // A manifest with no dimension block predates dimension support, and the
+      // format's own meaning for that is "the overworld" — so a roster that
+      // names dimensions can still be filtered against an older render instead
+      // of dropping nether players onto overworld coordinates.
+      void this.pollPlayers(source, this.playersLayer, manifest.dimension?.id ?? 'minecraft:overworld');
     }
 
     // Progressive render: poll the manifest and stream tiles in as they bake.

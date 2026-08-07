@@ -24,6 +24,12 @@ pub const ProduceRequest = struct {
     validator: ?[]const u8 = null,
     /// Whether the client accepts a gzip content-coding.
     accept_gzip: bool = false,
+    /// A HEAD: the client wants this resource's headers, not its bytes. The
+    /// transport elides the body either way, so this exists for producers to
+    /// refuse work a probe should never cause — baking a tile, serializing an
+    /// atlas — by returning null for those paths. Cheap resources (the
+    /// manifest) should still answer, or nothing can discover the world.
+    head: bool = false,
 };
 
 /// A dynamic response a {@link Producer} synthesized for a request path.
@@ -225,15 +231,20 @@ fn serveRequest(
     // (its hashed asset names can't collide) but before static disk, so the live
     // manifest/atlas always win over any stale copy a prior render left in `dir`.
     // Anything the producer doesn't own (returns null) falls through to disk.
-    // A HEAD probe must never allocate an atlas or trigger a tile bake. Cached
-    // files can still answer below; dynamic-only resources return 404.
-    if (req.head.method != .HEAD) if (producer) |p| {
+    //
+    // HEAD reaches the producer too — the viewer discovers which entry point a
+    // directory offers by probing for manifest.json, and a live world has no
+    // manifest on disk to find. The producer is what decides: it answers cheap
+    // resources and declines anything a probe should not be able to trigger
+    // (a tile bake, an atlas serialization), which then falls through to
+    // whatever the cache already holds. The transport elides the body.
+    if (producer) |p| {
         var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena_inst.deinit();
         if (try p.produce(io, arena_inst.allocator(), producerRequest(req, target[1..]))) |resp| {
             return respondProduced(req, resp, "no-cache", null);
         }
-    };
+    }
 
     const rel = target[1..];
     if (!safePath(rel)) return req.respond("bad path\n", .{ .status = .bad_request, .extra_headers = security_headers[0..] });
@@ -434,6 +445,7 @@ fn producerRequest(req: *const std.http.Server.Request, path: []const u8) Produc
         .path = path,
         .validator = if (inm.duplicate) null else inm.value,
         .accept_gzip = !enc.duplicate and enc.value != null and acceptsGzip(enc.value.?),
+        .head = req.head.method == .HEAD,
     };
 }
 

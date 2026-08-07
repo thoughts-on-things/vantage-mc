@@ -267,14 +267,20 @@ pub const Resolver = struct {
     }
 
     /// Resolve a face's texture reference (e.g. "#all") through the textures map
-    /// to a final path. Non-`#` values are treated as direct paths.
+    /// to a final path.
+    ///
+    /// The game strips a leading `#` and then looks the name up in the model's
+    /// texture slots either way, so a bare slot name is a reference too — and
+    /// vanilla ships models that rely on it (`block/heavy_core` binds every
+    /// face to `"all"`, no `#`). Slot names never contain a `/`, so a real
+    /// texture path can't be mistaken for one.
     fn resolveTexture(self: Resolver, textures: std.StringHashMap([]const u8), ref: []const u8, depth: u8) ?[]const u8 {
         if (depth > 16 or ref.len == 0) return null;
-        if (ref[0] == '#') {
-            const key = ref[1..];
-            const next = textures.get(key) orelse return null;
-            return self.resolveTexture(textures, next, depth + 1);
+        const key = if (ref[0] == '#') ref[1..] else ref;
+        if (std.mem.indexOfScalar(u8, key, '/') == null) {
+            if (textures.get(key)) |next| return self.resolveTexture(textures, next, depth + 1);
         }
+        if (ref[0] == '#') return null; // an explicit reference to a slot nothing defines
         return stripNs(ref);
     }
 
@@ -507,6 +513,11 @@ test "texture variable resolution chains through the map" {
     try std.testing.expectEqualStrings("block/stone", r.resolveTexture(m, "#all", 0).?);
     try std.testing.expectEqualStrings("block/dirt", r.resolveTexture(m, "block/dirt", 0).?);
     try std.testing.expect(r.resolveTexture(m, "#missing", 0) == null);
+    // Vanilla's own block/heavy_core binds its faces to "all" with no `#`, and
+    // the game resolves it as a slot all the same.
+    try std.testing.expectEqualStrings("block/stone", r.resolveTexture(m, "all", 0).?);
+    // A path that happens to share a slot's name is still a path.
+    try std.testing.expectEqualStrings("block/all", r.resolveTexture(m, "block/all", 0).?);
 }
 
 test "textureSprite accepts legacy strings and 26.2 sprite objects" {

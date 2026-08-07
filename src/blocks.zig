@@ -132,6 +132,13 @@ const table = std.StaticStringMap([3]u8).initComptime(.{
     .{ "birch_leaves", [3]u8{ 80, 120, 55 } },
     .{ "jungle_leaves", [3]u8{ 60, 120, 30 } },
     .{ "dark_oak_leaves", [3]u8{ 60, 100, 40 } },
+    .{ "acacia_leaves", [3]u8{ 88, 124, 42 } },
+    .{ "mangrove_leaves", [3]u8{ 58, 105, 44 } },
+    // Untinted in game, so their own colours are the whole story here.
+    .{ "cherry_leaves", [3]u8{ 229, 173, 194 } },
+    .{ "pale_oak_leaves", [3]u8{ 117, 122, 115 } },
+    .{ "azalea_leaves", [3]u8{ 90, 115, 44 } },
+    .{ "flowering_azalea_leaves", [3]u8{ 100, 111, 61 } },
 
     // nether / misc
     .{ "netherrack", [3]u8{ 97, 38, 38 } },

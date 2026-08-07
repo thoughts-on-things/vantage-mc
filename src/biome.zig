@@ -35,6 +35,7 @@ pub const Tint = enum(u8) {
     none = 0,
     grass,
     foliage,
+    dry_foliage,
     water,
     spruce,
     birch,
@@ -42,7 +43,7 @@ pub const Tint = enum(u8) {
     redstone,
     stem,
 
-    pub const count = 9;
+    pub const count = 10;
 };
 
 /// `grass_color_modifier` from the biome's effects — a post-process the game
@@ -121,16 +122,19 @@ pub const Registry = struct {
     }
 };
 
-/// Loaded 256×256 RGBA colormaps. Either may be empty if the asset is missing,
-/// in which case a plains-ish fallback colour is used.
+/// Loaded 256×256 RGBA colormaps. Any may be empty if the asset is missing (the
+/// dry-foliage map only exists from 1.21.5 on), in which case a plains-ish
+/// fallback colour is used.
 pub const Colormaps = struct {
     grass: []const u8 = &.{},
     foliage: []const u8 = &.{},
+    dry_foliage: []const u8 = &.{},
 
     pub fn load(arena: std.mem.Allocator, io: std.Io, root: []const u8) Colormaps {
         return .{
             .grass = loadOne(arena, io, root, "grass"),
             .foliage = loadOne(arena, io, root, "foliage"),
+            .dry_foliage = loadOne(arena, io, root, "dry_foliage"),
         };
     }
 
@@ -145,6 +149,7 @@ pub const Colormaps = struct {
 /// Plains-ish fallbacks for when a colormap asset is absent.
 const grass_fallback: [3]u8 = .{ 121, 182, 91 };
 const foliage_fallback: [3]u8 = .{ 110, 160, 80 };
+const dry_foliage_fallback: [3]u8 = .{ 0xA3, 0x75, 0x46 };
 
 /// Final RGB for a tint kind in a given biome. Pure given the colormaps.
 pub fn colorFor(maps: Colormaps, tint: Tint, info: BiomeInfo) [3]u8 {
@@ -152,6 +157,7 @@ pub fn colorFor(maps: Colormaps, tint: Tint, info: BiomeInfo) [3]u8 {
         .none => .{ 255, 255, 255 },
         .grass => grassColor(maps, info),
         .foliage => if (info.foliage) |c| unpackRgb(c) else colormapColor(maps.foliage, info, foliage_fallback),
+        .dry_foliage => if (info.dry_foliage) |c| unpackRgb(c) else colormapColor(maps.dry_foliage, info, dry_foliage_fallback),
         .water => unpackRgb(info.water),
         .spruce => .{ 0x61, 0x99, 0x61 }, // FoliageColor.getSpruceColor
         .birch => .{ 0x80, 0xa7, 0x55 }, // FoliageColor.getBirchColor
@@ -229,49 +235,134 @@ fn asF32(v: ?json.Value, default: f32) f32 {
     };
 }
 
+/// `BlockColors.createDefault()` in table form: the blocks the game registers a
+/// colour provider for, grouped by which provider. Everything else the game
+/// draws WHITE, even when its model marks a `tintindex` — see `blockTint`.
+const grass_blocks = [_][]const u8{
+    "grass_block", "short_grass", "fern",        "tall_grass",  "large_fern",
+    "potted_fern", "sugar_cane",  "pink_petals", "wildflowers",
+    // `short_grass` was plain `grass` before 1.20.3; worlds still hold it.
+    "grass",
+};
+const foliage_blocks = [_][]const u8{
+    "oak_leaves",      "jungle_leaves", "acacia_leaves", "dark_oak_leaves",
+    "mangrove_leaves", "vine",          "bush",
+};
+const dry_foliage_blocks = [_][]const u8{"leaf_litter"};
+const water_blocks = [_][]const u8{ "water", "bubble_column", "water_cauldron" };
+const stem_blocks = [_][]const u8{
+    "melon_stem", "pumpkin_stem", "attached_melon_stem", "attached_pumpkin_stem",
+};
+
+/// Blocks whose models DO carry a `tintindex` that the game never registers a
+/// provider for, so it draws them white. They are listed rather than left to
+/// the texture heuristic below because several of them (the stonecutter's saw
+/// blade, a cauldron's contents) are greyscale for reasons that have nothing to
+/// do with biome colour.
+const untinted_blocks = [_][]const u8{
+    "cherry_leaves",        "pale_oak_leaves", "azalea_leaves", "flowering_azalea_leaves",
+    "bamboo",               "bamboo_sapling",  "stonecutter",   "lava_cauldron",
+    "powder_snow_cauldron",
+};
+
+fn inList(name: []const u8, list: []const []const u8) bool {
+    for (list) |candidate| if (std.mem.eql(u8, name, candidate)) return true;
+    return false;
+}
+
 /// Which tint a block's faces use *when the model marks them with a tintindex*.
-/// This mapping has no data source — Minecraft hard-codes it in Java (the
-/// `BlockColors` registry) — so it stays a heuristic here. Only consulted for
-/// tintindex>=0 faces, so the default (grass) is harmless for everything else;
-/// new `*_leaves`/`*vine*` blocks classify correctly without changes.
-pub fn blockTint(name: []const u8) Tint {
+///
+/// This mapping has no data source — Minecraft hard-codes it in Java, in the
+/// `BlockColors` registry — so the tables above mirror it. A block missing from
+/// them renders white in game: cherry and pale-oak leaves inherit `block/leaves`
+/// (tintindex and all) but ship their colour in the texture, so tinting them
+/// foliage-green turns a blossoming cherry grove into an ordinary forest.
+///
+/// Null means "not in the vanilla table" — a modded block, or one from a
+/// version newer than these tables. The caller resolves that against the
+/// texture (see `mesh.zig`): greyscale means the game must be colouring it
+/// somehow, anything already coloured is left alone.
+pub fn blockTint(name: []const u8) ?Tint {
     const b = stripNs(name);
-    if (std.mem.endsWith(u8, b, "_leaves") or std.mem.eql(u8, b, "leaves")) {
-        if (std.mem.indexOf(u8, b, "spruce") != null) return .spruce;
-        if (std.mem.indexOf(u8, b, "birch") != null) return .birch;
-        return .foliage;
-    }
+    if (inList(b, &grass_blocks)) return .grass;
+    if (inList(b, &foliage_blocks)) return .foliage;
+    if (inList(b, &dry_foliage_blocks)) return .dry_foliage;
+    if (inList(b, &water_blocks)) return .water;
+    if (inList(b, &stem_blocks)) return .stem;
+    if (inList(b, &untinted_blocks)) return .none;
+    if (std.mem.eql(u8, b, "spruce_leaves")) return .spruce;
+    if (std.mem.eql(u8, b, "birch_leaves")) return .birch;
     if (std.mem.eql(u8, b, "lily_pad")) return .lily;
-    if (std.mem.indexOf(u8, b, "vine") != null) return .foliage;
-    if (std.mem.eql(u8, b, "water") or
-        std.mem.eql(u8, b, "bubble_column") or
-        std.mem.eql(u8, b, "water_cauldron")) return .water;
-    // Tinted but not biome-driven: redstone dust (power gradient in game) and
-    // melon/pumpkin stems (age gradient) get fixed representative colours.
     if (std.mem.eql(u8, b, "redstone_wire")) return .redstone;
-    if (std.mem.endsWith(u8, b, "_stem") and
-        (std.mem.indexOf(u8, b, "melon") != null or std.mem.indexOf(u8, b, "pumpkin") != null)) return .stem;
-    // grass family, sugar cane, and anything else tinted defaults to grass.
+    return null;
+}
+
+/// The colour source for one tinted face: `blockTint`'s table where it knows
+/// the block, else what the face's own texture implies (see `layerIsGrey`).
+/// Callers pass the layer they already resolved for the face, so the fallback
+/// costs one memoized scan per texture at most.
+pub fn tintFor(name: []const u8, tex: *texture.Builder, layer: u32) Tint {
+    return blockTint(name) orelse
+        (if (tex.layerIsGrey(layer)) guessTint(name) else .none);
+}
+
+/// The colormap an unknown tinted block most likely wants. Only consulted once
+/// the caller has established that the block's texture is greyscale — i.e. that
+/// something must be colouring it — so the question is which map, not whether.
+pub fn guessTint(name: []const u8) Tint {
+    const b = stripNs(name);
+    if (std.mem.endsWith(u8, b, "_leaves") or std.mem.eql(u8, b, "leaves")) return .foliage;
+    if (std.mem.indexOf(u8, b, "vine") != null) return .foliage;
     return .grass;
 }
 
-test "blockTint classification" {
-    try std.testing.expectEqual(Tint.grass, blockTint("minecraft:grass_block"));
-    try std.testing.expectEqual(Tint.grass, blockTint("minecraft:short_grass"));
-    try std.testing.expectEqual(Tint.grass, blockTint("minecraft:sugar_cane"));
-    try std.testing.expectEqual(Tint.foliage, blockTint("minecraft:oak_leaves"));
-    try std.testing.expectEqual(Tint.foliage, blockTint("minecraft:jungle_leaves"));
-    try std.testing.expectEqual(Tint.spruce, blockTint("minecraft:spruce_leaves"));
-    try std.testing.expectEqual(Tint.birch, blockTint("minecraft:birch_leaves"));
-    try std.testing.expectEqual(Tint.water, blockTint("minecraft:water"));
-    try std.testing.expectEqual(Tint.lily, blockTint("minecraft:lily_pad"));
-    try std.testing.expectEqual(Tint.foliage, blockTint("minecraft:vine"));
-    try std.testing.expectEqual(Tint.redstone, blockTint("minecraft:redstone_wire"));
-    try std.testing.expectEqual(Tint.stem, blockTint("minecraft:melon_stem"));
-    try std.testing.expectEqual(Tint.stem, blockTint("minecraft:attached_pumpkin_stem"));
-    // mushroom_stem has no tintindex, but if it ever lands here it must NOT
-    // classify as a crop stem.
-    try std.testing.expectEqual(Tint.grass, blockTint("minecraft:mushroom_stem"));
+test "Tint.count covers the enum" {
+    // The mesher sizes its per-biome colour table with `count` and indexes it by
+    // `@intFromEnum`, so a kind added without bumping this reads past its row.
+    try std.testing.expectEqual(Tint.count, std.enums.values(Tint).len);
+}
+
+test "blockTint mirrors the blocks vanilla actually registers" {
+    try std.testing.expectEqual(Tint.grass, blockTint("minecraft:grass_block").?);
+    try std.testing.expectEqual(Tint.grass, blockTint("minecraft:short_grass").?);
+    try std.testing.expectEqual(Tint.grass, blockTint("minecraft:sugar_cane").?);
+    try std.testing.expectEqual(Tint.grass, blockTint("minecraft:pink_petals").?);
+    try std.testing.expectEqual(Tint.foliage, blockTint("minecraft:oak_leaves").?);
+    try std.testing.expectEqual(Tint.foliage, blockTint("minecraft:jungle_leaves").?);
+    try std.testing.expectEqual(Tint.foliage, blockTint("minecraft:mangrove_leaves").?);
+    try std.testing.expectEqual(Tint.foliage, blockTint("minecraft:bush").?);
+    try std.testing.expectEqual(Tint.dry_foliage, blockTint("minecraft:leaf_litter").?);
+    try std.testing.expectEqual(Tint.spruce, blockTint("minecraft:spruce_leaves").?);
+    try std.testing.expectEqual(Tint.birch, blockTint("minecraft:birch_leaves").?);
+    try std.testing.expectEqual(Tint.water, blockTint("minecraft:water").?);
+    try std.testing.expectEqual(Tint.lily, blockTint("minecraft:lily_pad").?);
+    try std.testing.expectEqual(Tint.foliage, blockTint("minecraft:vine").?);
+    try std.testing.expectEqual(Tint.redstone, blockTint("minecraft:redstone_wire").?);
+    try std.testing.expectEqual(Tint.stem, blockTint("minecraft:melon_stem").?);
+    try std.testing.expectEqual(Tint.stem, blockTint("minecraft:attached_pumpkin_stem").?);
+}
+
+test "tintindex-bearing blocks the game leaves white are not tinted" {
+    // The bug this table exists for: `block/leaves` marks every face with a
+    // tintindex, but cherry and pale oak are absent from BlockColors, so the
+    // game multiplies by white and their own pink/pale texture shows through.
+    try std.testing.expectEqual(Tint.none, blockTint("minecraft:cherry_leaves").?);
+    try std.testing.expectEqual(Tint.none, blockTint("minecraft:pale_oak_leaves").?);
+    try std.testing.expectEqual(Tint.none, blockTint("minecraft:azalea_leaves").?);
+    // Bamboo leaves, a stonecutter's saw and a cauldron's lava are all tinted
+    // in their models and all drawn white.
+    try std.testing.expectEqual(Tint.none, blockTint("minecraft:bamboo").?);
+    try std.testing.expectEqual(Tint.none, blockTint("minecraft:stonecutter").?);
+    try std.testing.expectEqual(Tint.none, blockTint("minecraft:lava_cauldron").?);
+}
+
+test "blocks outside the table defer to the texture" {
+    // Unknown to vanilla's registry: the caller decides from the texture, and
+    // `guessTint` only picks WHICH map once it knows one is needed.
+    try std.testing.expect(blockTint("mymod:rainbow_leaves") == null);
+    try std.testing.expect(blockTint("minecraft:mushroom_stem") == null);
+    try std.testing.expectEqual(Tint.foliage, guessTint("mymod:rainbow_leaves"));
+    try std.testing.expectEqual(Tint.grass, guessTint("mymod:tall_weeds"));
 }
 
 test "parseColor accepts hex strings and integers" {

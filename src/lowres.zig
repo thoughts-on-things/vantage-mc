@@ -109,7 +109,7 @@ pub const SurfaceColors = struct {
         const face = chosen orelse return fallbackBase(name);
         const layer = self.tex.layerFor(face.texture);
         const avg = averageLayer(self.tex.layerPixels(layer)) orelse return fallbackBase(name);
-        const tint: biome.Tint = if (face.tintindex >= 0) biome.blockTint(name) else .none;
+        const tint: biome.Tint = if (face.tintindex >= 0) biome.tintFor(name, self.tex, layer) else .none;
         return .{ .rgb = avg, .tint = tint };
     }
 };

@@ -155,6 +155,7 @@ Useful server-specific flags are:
 | `--allow-origin <origin>` | none | Exact browser origin allowed by CORS; repeatable. |
 | `--token-env <name>` | `VANTAGE_SERVER_TOKEN` | Environment variable holding the internal bearer. |
 | `--prebake on\|off` | `on` | Background-bake the world with idle bake slots (see below). |
+| `--lod on\|off` | `on` | Build the zoomed-out overview from baked tiles (see below). |
 | `--focus-file <path>` | none | JSON file of block coordinates prebake warms around (see below). |
 
 All `vantage live` render controls also apply, including `--radius`,
@@ -176,6 +177,7 @@ world-list shape leaves room for a future multi-world supervisor.
 | `GET /v1/worlds/default/manifest.json` | required | Current world manifest. |
 | `GET /v1/worlds/default/terrain.vtexarr` | required | Current texture array. |
 | `GET /v1/worlds/default/tiles/t.X.Z.vtile` | required | Cached or on-demand geometry tile. |
+| `GET /v1/worlds/default/tiles/lN.X.Z.vlr` | required | Overview (LOD) tile, as listed by the manifest. |
 
 `HEAD` may inspect an existing static cache entry but never starts a bake or
 builds an atlas. `OPTIONS` supports a strict CORS preflight. Other methods are
@@ -252,6 +254,25 @@ Concurrency is what prebake throughput and cold-start latency actually scale
 with. `--threads` is a ceiling on simultaneous bake arenas, and prebake takes
 all but one of them, so `--threads 1` leaves a viewer's first look queued
 behind a background bake. Give a dedicated sidecar at least two.
+
+### The zoomed-out overview
+
+Streamed tiles only cover the ring around a camera, so on their own the map
+ends wherever streaming stops and every reload starts from nothing. Each bake
+therefore also spills the tile's lowres colour map, and a background worker
+folds those into the same quadtree pyramid `vantage render` bakes — the
+manifest's `lowres` section, published as it fills in and rebuilt when a saved
+world edit re-bakes a tile. The result is byte-identical to a batch render's
+pyramid, costs well under 1% of the tiles' bytes, and lets a viewer draw the
+whole explored world at any zoom.
+
+The maps live beside the tile cache in `.vantage-lod`, stamped with the
+dimension and tile size that produced them. They describe terrain rather than
+this session's texture atlas, so a restart adopts them and republishes the
+overview before re-baking a single tile. Rebuilds are throttled to a fraction
+of the time they take, yield to interactive fetches, and can be turned off
+entirely with `--lod off`, at the cost of a map that is only visible where
+tiles are resident.
 
 ### Pointing the warm-up at your players
 
@@ -417,8 +438,9 @@ body-size, header-size, idle-timeout, TLS, and audit policy at the edge proxy.
   or live chunk packets.
 - The sidecar is an HTTP data plane, not a Minecraft remote administration
   service. It cannot start, stop, save, or execute commands on the server.
-- Low-resolution whole-world pyramid generation remains a batch-render
-  feature. Continuous serving currently streams high-resolution tiles.
+- The overview pyramid covers the tiles that have been baked, not the whole
+  world up front: a coordinate no one has looked at and prebake has not reached
+  yet is absent from both the tiles and the overview.
 - Native TLS is intentionally out of scope; public deployments require a
   trusted TLS reverse proxy.
 

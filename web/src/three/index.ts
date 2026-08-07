@@ -23,6 +23,22 @@ export {
   type TerrainMaterialOptions,
 } from './materials.js';
 export { pickBiome } from './pick.js';
+export {
+  PlayerLayer,
+  type PlayerLayerOptions,
+  type PlayerSettings,
+  type PlayerView,
+} from './players.js';
+export {
+  boxFaces,
+  defaultSkinCanvas,
+  headIconCanvas,
+  normalizeSkin,
+  hashId,
+  SKIN_SIZE,
+  type BoxFaces,
+  type FaceRect,
+} from './skin.js';
 export { MapControls, type MapControlsOptions, type HeightSampler } from './controls.js';
 export {
   VantageViewer,
@@ -35,6 +51,7 @@ export {
   type ViewMode,
   type LightSettings,
   type DisplaySettings,
+  type PlayerOptions,
   VANILLA_DISPLAY,
   DEFAULT_ORBIT_ANGLE,
 } from './viewer.js';

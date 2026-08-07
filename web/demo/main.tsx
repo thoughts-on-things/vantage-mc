@@ -8,7 +8,7 @@ import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { worldFromVantageServer } from '../src/core/index.js';
 import type { WorldSource } from '../src/core/index.js';
-import { BiomeLayer, DepthSlider, DimensionPicker, LightPanel, MapNav, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
+import { BiomeLayer, DepthSlider, DimensionPicker, LightPanel, MapNav, PlayerList, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
@@ -37,7 +37,9 @@ function Hud() {
       style={{
         position: 'absolute',
         top: 16,
-        left: 16,
+        // Clear of <PlayerList>, which owns the top-left corner whenever the
+        // world serves a roster.
+        left: 248,
         padding: '12px 15px',
         font: '12px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
         color: '#e6eefb',
@@ -68,7 +70,9 @@ function Hud() {
           <>
             {k('drag')} pan · {k('right-drag')} orbit · {k('scroll')} zoom
             <br />
-            {k('WASD')} move · {k('Q/E')} turn · {k('R/F')} tilt · {k('B')} biomes · {k('C')} caves
+            {k('WASD')} move · {k('Q/E')} turn · {k('R/F')} tilt
+            <br />
+            {k('B')} biomes · {k('C')} caves · {k('P')} players
           </>
         )}
       </div>
@@ -98,6 +102,7 @@ function App({ entry, serverWorld }: { entry: Entry; serverWorld?: WorldSource }
     <VantageViewer ref={ref} {...source} view={view}>
       <Hud />
       <Reticle />
+      <PlayerList />
       <DimensionPicker />
       <BiomeLayer legend hover defaultEnabled={biomeOpen} />
       <LightPanel />
@@ -120,7 +125,10 @@ function mount(entry: Entry, serverWorld?: WorldSource): void {
 }
 
 /** Whether a JSON file sits at `path` — how the viewer decides which entry
- *  point a render directory offers without fetching a body it may not use. */
+ *  point a render directory offers without fetching a body it may not use.
+ *  An on-demand server answers this for its synthesized manifest too: HEAD
+ *  reaches the producer, which serves cheap resources and declines the ones a
+ *  probe should never be able to trigger. */
 async function hasJson(path: string): Promise<boolean> {
   try {
     const r = await fetch(path, { method: 'HEAD' });

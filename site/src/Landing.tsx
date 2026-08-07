@@ -5,6 +5,7 @@ import biomesShot from './assets/render-biomes-v2.png';
 import { DEMO_MANIFEST } from './App.js';
 import { RaceReplay } from './RaceReplay.js';
 import { CaveReveal } from './CaveReveal.js';
+import { PlayerShowcase } from './PlayerShowcase.js';
 import { DesktopShowcase } from './DesktopShowcase.js';
 
 const GITHUB = 'https://github.com/thoughts-on-things/vantage-mc';
@@ -78,6 +79,12 @@ const FEATURES = [
     body: 'Biome legend, day/night lighting, quality presets, free flight. Press B.',
     wide: false,
   },
+  {
+    icon: '🧍',
+    title: 'Players, as players',
+    body: 'Live positions drawn as real player models. One JSON file, no plugin needed.',
+    wide: false,
+  },
 ];
 
 export function Landing({ onDemo }: { onDemo: () => void }) {
@@ -114,6 +121,7 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
         <div className="nav-links">
           <a href="#desktop">download</a>
           <a href={SERVER}>multiplayer</a>
+          <a href="#players">live players</a>
           <a href="#numbers">numbers</a>
           <a href="#caves">cave view</a>
           <a href="#how">how it works</a>
@@ -244,6 +252,8 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
           <div><small>03 · ACCESS</small><strong>Launcher / proxy</strong><span>existing player session</span></div>
         </div>
       </section>
+
+      <PlayerShowcase />
 
       <section className="numbers" id="numbers">
         <p className="kicker reveal">the numbers</p>

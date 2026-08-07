@@ -12,6 +12,7 @@ export { BiomeLayer, type BiomeLayerProps } from './BiomeLayer.js';
 export { LightPanel, type LightPanelProps } from './LightPanel.js';
 export { SettingsPanel, QUALITY_PRESETS, type SettingsPanelProps, type QualityPreset } from './SettingsPanel.js';
 export { MapNav, type MapNavProps } from './MapNav.js';
+export { PlayerList, type PlayerListProps } from './PlayerList.js';
 export { DepthSlider, type DepthSliderProps } from './DepthSlider.js';
 export { DimensionPicker, type DimensionPickerProps } from './DimensionPicker.js';
 export { Reticle, type ReticleProps } from './Reticle.js';
@@ -28,6 +29,9 @@ export type {
   LightSettings,
   DisplaySettings,
   StreamingSettings,
+  PlayerOptions,
+  PlayerSettings,
+  PlayerView,
   BiomeEntry,
   DecodedTile,
   WorldDimension,

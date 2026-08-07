@@ -26,9 +26,11 @@ import {
   worldFromIndexEntry,
   worldFromUrl,
 } from '../core/index.js';
+import { NO_PLAYERS, parsePlayers, samePlayers, type PlayerSnapshot, type PlayerState } from '../core/players.js';
 import { Emitter } from './emitter.js';
 import { createLightmappedMaterial, createLowresMaterial, createSky, createTerrainMaterial, createWaterMaterial, setSkyColors, updateTerrainTextures, SKY_HORIZON, SKY_TOP } from './materials.js';
 import { pickBiome } from './pick.js';
+import { PlayerLayer, type PlayerSettings, type PlayerView } from './players.js';
 import { buildTerrain } from './terrain.js';
 import { TileManager, type TileStats } from './tiles.js';
 
@@ -111,6 +113,22 @@ export interface StreamingSettings {
   mapMemory?: number;
 }
 
+/** Live players: how the roster is fetched, and how the people in it are drawn.
+ *  The display fields are the same ones {@link VantageViewer.setPlayers} takes. */
+export interface PlayerOptions extends PlayerSettings {
+  /** Roster path, relative to the manifest. Default `'players.json'` — what
+   *  `vantage server`/`live` serves and what `vantage render` writes. */
+  path?: string;
+  /** Poll cadence in milliseconds while players are moving. A quiet roster
+   *  relaxes toward four times this. Default `1000`, matching BlueMap. */
+  pollMs?: number;
+  /** Turn a player into a skin image URL the browser loads directly. Vantage
+   *  ships no default: asking a public skin service for a player's face tells
+   *  that service who is on the server and who is watching. A host that
+   *  already runs (or proxies) one can wire it up here. */
+  resolveSkin?: (player: PlayerState) => string | null | undefined;
+}
+
 export interface VantageViewerOptions {
   /** Initial camera framing. Default `'orbit'`. */
   view?: ViewMode;
@@ -137,6 +155,10 @@ export interface VantageViewerOptions {
    *  frame it arrives. Default `true`; set `false` to render every frame
    *  (e.g. when driving external per-frame effects off the viewer's scene). */
   renderOnDemand?: boolean;
+  /** Live player positions, streamed from `players.json` beside the manifest.
+   *  Polling starts automatically when the world offers one and stops for good
+   *  when it doesn't; pass `{ enabled: false }` to keep players off entirely. */
+  players?: PlayerOptions;
   /** Cave-geometry draw policy for VTLA tiles (whose cave-dark quads sit in a
    *  toggleable tail per mesh). `'auto'` skips them whenever the camera is
    *  above ground with the depth slice closed — from up there they are hidden
@@ -193,6 +215,12 @@ interface ViewerEvents extends Record<string, unknown> {
   /** Progressive/live render progress. Finished batch renders flip false;
    *  continuous multiplayer sources keep rendering true for change polling. */
   progress: { done: number; total: number; rendering: boolean };
+  /** The player roster changed — someone moved, joined, or left. Fires only
+   *  when something actually differs, so it is safe to drive React state with.
+   *  `available` goes false when the world serves no roster at all. */
+  players: { players: PlayerView[]; source: PlayerSnapshot['source']; updated: number; available: boolean };
+  /** The camera started or stopped following a player. */
+  follow: { uuid: string | null };
 }
 
 async function fetchBuffer(url: string): Promise<ArrayBuffer> {
@@ -336,6 +364,18 @@ export class VantageViewer {
    *  poll coalesce onto one request instead of racing separate fetches. */
   private atlasRefresh: Promise<void> | null = null;
 
+  // Live players: the scene layer, the roster it was last given, and the poll
+  // that keeps it current. `playersAvailable` latches false once the world has
+  // proved it serves no roster, so a static render costs one failed fetch
+  // rather than one per second forever.
+  private playersLayer: PlayerLayer | null = null;
+  private playerSnapshot: PlayerSnapshot = NO_PLAYERS;
+  private playersAvailable = false;
+  /** Who the camera is glued to, and where follow last put the pivot — the
+   *  comparison that lets a pan of the user's own release it. */
+  private following: string | null = null;
+  private readonly followAnchor = new THREE.Vector2();
+
   // Biome layer state machine.
   private biomeEnabled = false;
   private highlight: number | null = null;
@@ -409,6 +449,7 @@ export class VantageViewer {
       urlState: options.urlState ?? false,
       renderOnDemand: options.renderOnDemand ?? true,
       caveGeometry: options.caveGeometry ?? 'auto',
+      players: options.players ?? {},
     };
     this.caveMode = this.options.caveGeometry;
     if (options.light) {
@@ -636,6 +677,25 @@ export class VantageViewer {
     });
     this.emitter.emit('dimension', { dimensions: this.worldIndex, current: this.currentDimension });
 
+    // Live players. The layer exists before the first roster arrives so a
+    // settings change or a follow request has something to talk to; the poll
+    // discovers whether this world serves one at all.
+    if (this.options.players.enabled !== false) {
+      this.playersLayer = new PlayerLayer({
+        scene: this.scene,
+        camera: this.camera,
+        fetchSkin: (path) => source.fetch(path),
+        ...(this.options.players.resolveSkin ? { resolveSkin: this.options.players.resolveSkin } : {}),
+        settings: this.options.players,
+      });
+      this.playersLayer.setTone(this.light.exposure);
+      // A manifest with no dimension block predates dimension support, and the
+      // format's own meaning for that is "the overworld" — so a roster that
+      // names dimensions can still be filtered against an older render instead
+      // of dropping nether players onto overworld coordinates.
+      void this.pollPlayers(source, this.playersLayer, manifest.dimension?.id ?? 'minecraft:overworld');
+    }
+
     // Progressive render: poll the manifest and stream tiles in as they bake.
     if (manifest.rendering) {
       this.progressiveManager = this.tiles;
@@ -799,6 +859,148 @@ export class VantageViewer {
         return;
       }
     }
+  }
+
+  // --- live players ----------------------------------------------------------
+
+  /**
+   * Follow `players.json` for as long as this world is loaded.
+   *
+   * The roster is small and changes constantly while anyone is moving, so this
+   * polls on its own short cadence rather than riding the manifest poll. A
+   * conditional source turns a still world into a `304` per tick, and repeated
+   * quiet ticks stretch the cadence — a map nobody is walking around on costs
+   * almost nothing, and a player who starts moving is on screen within a tick.
+   *
+   * A world that serves no roster answers 404: after a few consecutive
+   * failures the loop gives up for good rather than retrying forever against a
+   * static render that will never have one.
+   */
+  private async pollPlayers(source: WorldSource, layer: PlayerLayer, dimension: string | undefined): Promise<void> {
+    const path = this.options.players.path ?? 'players.json';
+    const base = Math.max(200, this.options.players.pollMs ?? VantageViewer.PLAYER_POLL_MS);
+    const dec = new TextDecoder();
+    let delay = base;
+    let etag: string | undefined;
+    let failures = 0;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, delay));
+      if (this.playersLayer !== layer) return; // world replaced or disposed
+
+      let snapshot: PlayerSnapshot;
+      try {
+        if (source.fetchConditional) {
+          const res = await source.fetchConditional(path, etag);
+          if (res === 'unchanged') {
+            failures = 0;
+            delay = Math.min(delay * 1.5, base * VantageViewer.PLAYER_POLL_RELAX);
+            continue;
+          }
+          snapshot = parsePlayers(JSON.parse(dec.decode(res.buffer)), dimension);
+          etag = res.etag;
+        } else {
+          snapshot = parsePlayers(JSON.parse(dec.decode(await source.fetch(path))), dimension);
+        }
+      } catch {
+        // A world that has never answered probably has no roster — a plain
+        // render doesn't — so after a few tries the loop gives up for good
+        // rather than polling something that will never be there. A world that
+        // has answered before demonstrably does have one, so a torn read or a
+        // restarting host just backs off and keeps trying.
+        if (!this.playersAvailable && ++failures >= VantageViewer.PLAYER_POLL_GIVE_UP) return;
+        delay = Math.min(delay * 2, base * VantageViewer.PLAYER_POLL_RELAX);
+        continue;
+      }
+      failures = 0;
+      if (this.playersLayer !== layer) return;
+
+      const changed = !this.playersAvailable || !samePlayers(this.playerSnapshot, snapshot);
+      this.playersAvailable = true;
+      this.playerSnapshot = snapshot;
+      layer.setSnapshot(snapshot, performance.now());
+      if (changed) {
+        this.needsRender = true;
+        this.emitPlayers();
+      }
+      delay = changed ? base : Math.min(delay * 1.5, base * VantageViewer.PLAYER_POLL_RELAX);
+    }
+  }
+
+  private emitPlayers(): void {
+    this.emitter.emit('players', {
+      players: this.playersLayer?.players ?? [],
+      source: this.playerSnapshot.source,
+      updated: this.playerSnapshot.updated,
+      available: this.playersAvailable,
+    });
+  }
+
+  /** The players on the map right now, with their live interpolated positions.
+   *  Empty when the world serves no roster. */
+  get players(): PlayerView[] {
+    return this.playersLayer?.players ?? [];
+  }
+
+  /** A player's face as a data URL, for HTML chrome outside the canvas (a
+   *  roster panel, a tooltip). Null until their model exists. */
+  playerIcon(uuid: string): string | null {
+    return this.playersLayer?.headIcon(uuid) ?? null;
+  }
+
+  /** Change how players are drawn — names, offline/foreign visibility, model
+   *  scale. Applied immediately, no reload. */
+  setPlayers(settings: PlayerSettings): void {
+    Object.assign(this.options.players, settings);
+    this.playersLayer?.setSettings(settings);
+    // Turning them off mid-session should also let go of anyone being followed.
+    if (settings.enabled === false) this.followPlayer(null);
+    this.needsRender = true;
+  }
+
+  /** Fly the camera to a player. Returns false if they aren't on this map. */
+  focusPlayer(uuid: string): boolean {
+    const position = this.playersLayer?.positionOf(uuid);
+    if (!position) return false;
+    this.controls.animateTo({
+      position,
+      // Coming in from a whole-world view, land close enough to actually see
+      // them; an already-close camera keeps the zoom the user chose.
+      ...(this.controls.distance > 260 ? { distance: 140 } : {}),
+    });
+    this.needsRender = true;
+    return true;
+  }
+
+  /** Keep the camera pinned to a player as they move — `null` releases it.
+   *  Panning the map releases it too: the pivot moving somewhere follow didn't
+   *  put it is the user saying they want to look elsewhere. */
+  followPlayer(uuid: string | null): boolean {
+    const position = uuid === null ? null : this.playersLayer?.positionOf(uuid);
+    if (uuid !== null && !position) return false;
+    if (this.following === uuid) return true;
+    this.following = uuid;
+    if (position) {
+      // Take the camera over cleanly. `setView` cancels any in-flight fly-to
+      // and zeroes the inertia buffers — without that, the easing left over
+      // from a `focusPlayer` would move the pivot on the next frame and read
+      // as the user panning, releasing the follow they just asked for.
+      this.controls.setView({
+        position,
+        distance: this.controls.distance,
+        rotation: this.controls.rotation,
+        angle: this.controls.angle,
+      });
+      this.followAnchor.set(position.x, position.z);
+    }
+    this.playersLayer?.setFollowed(uuid);
+    this.emitter.emit('follow', { uuid });
+    this.needsRender = true;
+    return true;
+  }
+
+  /** Who the camera is following, if anyone. */
+  get followedPlayer(): string | null {
+    return this.following;
   }
 
   /** Ensure the terrain atlas covers at least `layers` texture-array layers,
@@ -1162,6 +1364,10 @@ export class VantageViewer {
     this.shader.uniforms['uAmbient']!.value = ambient;
     this.shader.uniforms['uDay']!.value = this.light.daylight;
     this.shader.uniforms['uExposure']!.value = this.light.exposure;
+    // Players are unlit by design (there is nothing in the scene to light them
+    // with), so exposure is the one grade they can follow — without it a night
+    // map would have brightly lit people standing in the dark.
+    this.playersLayer?.setTone(this.light.exposure);
     this.needsRender = true;
   }
 
@@ -1656,11 +1862,27 @@ export class VantageViewer {
    *  changes — a saved world edit still shows up within ~one ceiling. */
   private static readonly POLL_MAX_MS = 5000;
 
+  /** Player roster cadence, and how far a quiet one is allowed to relax. */
+  private static readonly PLAYER_POLL_MS = 1000;
+  private static readonly PLAYER_POLL_RELAX = 2.5;
+  /** Consecutive failed roster fetches before concluding this world has none. */
+  private static readonly PLAYER_POLL_GIVE_UP = 3;
+
   private frame(): void {
     const now = performance.now();
     const dtMs = this.lastFrameMs ? now - this.lastFrameMs : 16.7;
     this.lastFrameMs = now;
+
+    // Following runs before the controls so the pivot the camera is built from
+    // is already on the player this frame, not a frame behind — and so that any
+    // movement `update` then applies to the pivot is, by elimination, the user
+    // panning. That is what `applyFollow` checks for on the next frame, which is
+    // why the anchor must NOT be refreshed after `update` here.
+    if (this.following) this.applyFollow();
     if (this.controls.update(dtMs)) this.needsRender = true;
+    // Players move between polls; the layer reports whether anything actually
+    // did, which is what keeps an idle map from redrawing for nobody.
+    if (this.playersLayer?.update(now)) this.needsRender = true;
 
     // Streamed worlds: re-plan tile residency around wherever the user is
     // looking (the map pivot, or the eye itself in free-flight). Tile
@@ -1718,6 +1940,30 @@ export class VantageViewer {
     this.needsRender = false;
     this.lastRenderMs = now;
     this.draw(now);
+  }
+
+  /** Glue the pivot to the followed player, unless the user has moved it
+   *  themselves since the last frame — a deliberate pan outranks follow. */
+  private applyFollow(): void {
+    const uuid = this.following;
+    if (!uuid) return;
+    const position = this.playersLayer?.positionOf(uuid);
+    if (!position) {
+      // They left, or are no longer placed on this map.
+      this.followPlayer(null);
+      return;
+    }
+    // Only X/Z: the pivot's height is owned by the terrain-follow in the
+    // controls, and comparing it would read as a pan on every slope.
+    const panned = Math.abs(this.controls.position.x - this.followAnchor.x) > 0.05 ||
+      Math.abs(this.controls.position.z - this.followAnchor.y) > 0.05;
+    if (panned) {
+      this.followPlayer(null);
+      return;
+    }
+    this.controls.position.set(position.x, position.y, position.z);
+    this.followAnchor.set(position.x, position.z);
+    this.needsRender = true;
   }
 
   private draw(now: number): void {
@@ -1791,6 +2037,15 @@ export class VantageViewer {
       this.tiles = null;
       this.manifest = null;
       this.progressiveManager = null; // stops any in-flight progressive poll
+    }
+    // Dropping the layer is also what stops its poll: the loop checks that the
+    // layer it was started for is still the current one.
+    if (this.playersLayer) {
+      this.playersLayer.dispose();
+      this.playersLayer = null;
+      this.playerSnapshot = NO_PLAYERS;
+      this.playersAvailable = false;
+      this.following = null;
     }
     if (this.shader) {
       (this.shader.uniforms['map']?.value as THREE.Texture | null)?.dispose();

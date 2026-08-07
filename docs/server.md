@@ -157,6 +157,8 @@ Useful server-specific flags are:
 | `--prebake on\|off` | `on` | Background-bake the world with idle bake slots (see below). |
 | `--lod on\|off` | `on` | Build the zoomed-out overview from baked tiles (see below). |
 | `--focus-file <path>` | none | JSON file of block coordinates prebake warms around (see below). |
+| `--players-file <path>` | none | JSON file of live player positions the host rewrites (see [Live players](./players.md)). |
+| `--players on\|off` | `off` | Read last-known player positions out of the save. Off here by design. |
 
 All `vantage live` render controls also apply, including `--radius`,
 `--tile-chunks`, `--caves`, `--light`, `--biome-blend`, `--gz`, `--memory`, and
@@ -178,6 +180,7 @@ world-list shape leaves room for a future multi-world supervisor.
 | `GET /v1/worlds/default/terrain.vtexarr` | required | Current texture array. |
 | `GET /v1/worlds/default/tiles/t.X.Z.vtile` | required | Cached or on-demand geometry tile. |
 | `GET /v1/worlds/default/tiles/lN.X.Z.vlr` | required | Overview (LOD) tile, as listed by the manifest. |
+| `GET /v1/worlds/default/players.json` | required | Live player roster, when one is configured. |
 
 `HEAD` may inspect an existing static cache entry but never starts a bake or
 builds an atlas. `OPTIONS` supports a strict CORS preflight. Other methods are
@@ -303,6 +306,22 @@ This deliberately stays a file rather than an endpoint. The sidecar's data
 plane is GET-only with no remote mutation surface, and the privileged
 supervisor that owns the save path already owns a filesystem it can write to.
 
+### Showing the players themselves
+
+`--players-file <path>` is the same idea carried one step further: the host
+writes where its players are, and Vantage both warms tiles around them *and*
+serves the roster at `players.json` so the map can draw them as real player
+models. The accepted document is a superset of BlueMap's `live/players.json`,
+so a server already running that plugin can point this flag at the file it is
+already writing. A feed configured here also supplies prebake focus, so
+`--focus-file` becomes redundant unless the host wants to warm somewhere no
+player is standing.
+
+Reading positions out of the save instead (`--players on`) is off by default
+here, and only here: "where every player who ever logged in was last standing"
+is a different disclosure from "who is online right now", and a public server
+map should choose it deliberately. See [Live players](./players.md).
+
 ## Host integration
 
 A server host that already authenticates its players has the right trust
@@ -419,6 +438,7 @@ cache size, not the expensive resident bake working set.
 | Save races | Stable location-table reads and reference-counted epochs; failed scans retain the last good snapshot. |
 | Stored tile copies | Tiles are `private` and `no-cache`: shared caches are excluded and a stored copy is unusable without a revalidation the host still authorizes. |
 | Focus-file tampering | Read-only, size-capped, schedule-only: it can reorder prebake, never widen what is served or advertised. Keep it writable by the supervisor alone. |
+| Player position disclosure | The roster is a protected artifact like any other, off by default on the server, and served verbatim — the host decides who appears. See [Live players](./players.md#privacy). |
 
 The map can disclose player builds, explored terrain, and—in full-cave mode—
 underground structures. Treat it as private server data. Run the process as a
@@ -434,8 +454,10 @@ body-size, header-size, idle-timeout, TLS, and audit policy at the edge proxy.
   than filesystem parameters supplied by a client — for now, run one sidecar
   per dimension behind the same proxy. Batch `vantage render` has no such
   limit: it writes every dimension of a save at once.
-- Vantage renders persisted terrain, not players, entities, inventories, chat,
-  or live chunk packets.
+- Vantage renders persisted terrain, not entities, inventories, chat, or live
+  chunk packets. Players are the exception, and only because the host supplies
+  them: Vantage serves and draws a roster it is handed, it does not observe one
+  ([Live players](./players.md)).
 - The sidecar is an HTTP data plane, not a Minecraft remote administration
   service. It cannot start, stop, save, or execute commands on the server.
 - The overview pyramid covers the tiles that have been baked, not the whole

@@ -147,6 +147,55 @@
         }
       }
     },
+    "/v1/worlds/{worldId}/players.json": {
+      "parameters": [
+        { "$ref": "#/components/parameters/WorldId" }
+      ],
+      "get": {
+        "operationId": "getWorldPlayers",
+        "tags": ["Artifacts"],
+        "summary": "Read the live player roster",
+        "description": "Present only when the deployment configures a player source (`--players-file`, or `--players on`). The document is a superset of BlueMap's `live/players.json`, so an existing plugin's output is accepted verbatim. `updated` comes from the source's modification time rather than the clock, so an unchanged roster re-serializes to identical bytes and a poll costs a `304` instead of a body. `404` means this world serves no roster.",
+        "parameters": [
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Entity-tag list from a previous roster response. A match short-circuits to `304 Not Modified` with no body.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current player roster",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-cache" } },
+              "ETag": { "description": "Strong validator over the exact roster body.", "schema": { "type": "string" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlayerRoster" } } }
+          },
+          "304": {
+            "description": "The roster is byte-identical to the presented validator; no body.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-cache" } },
+              "ETag": { "description": "The (still-current) strong validator.", "schema": { "type": "string" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "head": {
+        "operationId": "headWorldPlayers",
+        "tags": ["Artifacts"],
+        "summary": "Probe the roster path without producing it",
+        "description": "On this data plane a HEAD is answered from the cache directory alone — it never reaches the dynamic producer. Vantage never writes the roster there, so this answers 404 unless an operator has placed a file of that name in the cache. Use GET to read the roster.",
+        "responses": {
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
     "/v1/worlds/{worldId}/tiles/{tile}": {
       "parameters": [
         { "$ref": "#/components/parameters/WorldId" },
@@ -303,6 +352,47 @@
           "path": { "type": "string", "pattern": "^tiles/t\\.(0|-?[1-9][0-9]*)\\.(0|-?[1-9][0-9]*)\\.vtile$" },
           "bytes": { "type": "integer", "minimum": 0 },
           "revision": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Opaque source revision; compare for equality only." }
+        }
+      },
+      "PlayerRoster": {
+        "type": "object",
+        "required": ["players"],
+        "properties": {
+          "format": { "type": "integer", "const": 1, "description": "Roster schema version." },
+          "source": { "type": "string", "enum": ["host", "playerdata"], "description": "A live host feed, or last-known positions read out of the save." },
+          "updated": { "type": "integer", "description": "Epoch milliseconds the source was last modified. Stable while the roster is unchanged." },
+          "players": { "type": "array", "items": { "$ref": "#/components/schemas/PlayerState" } }
+        }
+      },
+      "PlayerState": {
+        "type": "object",
+        "required": ["uuid", "name", "position"],
+        "properties": {
+          "uuid": { "type": "string", "description": "Stable identity across polls; compared, never parsed." },
+          "name": { "type": "string" },
+          "foreign": { "type": "boolean", "description": "The player is not in the dimension this world covers; the viewer lists them but does not place them." },
+          "position": {
+            "type": "object",
+            "required": ["x", "y", "z"],
+            "properties": {
+              "x": { "type": "number" },
+              "y": { "type": "number", "description": "The player's feet." },
+              "z": { "type": "number" }
+            }
+          },
+          "rotation": {
+            "type": "object",
+            "properties": {
+              "yaw": { "type": "number", "description": "Degrees; 0 faces south (+Z), increasing toward west." },
+              "pitch": { "type": "number", "description": "Degrees; negative looking up." }
+            }
+          },
+          "dimension": { "type": "string", "description": "Resource id, e.g. `minecraft:overworld`." },
+          "stale": { "type": "boolean", "description": "The position is the last one persisted, not a live report." },
+          "seen": { "type": "integer", "description": "Epoch milliseconds the position was observed." },
+          "health": { "type": "number" },
+          "gamemode": { "type": "string" },
+          "skin": { "type": "string", "description": "Skin image path relative to the manifest's own directory. Absolute URLs, schemes and traversals are rejected." }
         }
       }
     }

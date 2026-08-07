@@ -155,6 +155,23 @@ heightfields): the viewer keeps coarse rings resident far beyond the hires
 disc — level 1 also underlays it as a loading placeholder — so the whole world
 stays visible at any zoom, right out to a satellite view.
 
+**Live players** appear as real Minecraft player models when the world serves a
+`players.json` (`vantage live --players-file`, `vantage server`, or the
+last-known positions `vantage render` writes out of the save). The viewer finds
+it on its own, interpolates between roster polls so players walk rather than
+teleport, and gives each one a constant-size name tag drawn through terrain.
+Drop in `<PlayerList />` for a roster panel with click-to-fly and follow, or
+drive it yourself: `viewer.players`, `viewer.setPlayers({ names, offline,
+foreign, scale })`, `viewer.focusPlayer(uuid)`, `viewer.followPlayer(uuid |
+null)`, and `'players'` / `'follow'` events. Full guide:
+[docs/players.md](../docs/players.md).
+
+```tsx
+<VantageViewer world="/manifest.json" players={{ offline: false }}>
+  <PlayerList />
+</VantageViewer>
+```
+
 A single standalone tile (from `vantage meshtex`) still works:
 
 ```tsx
@@ -254,22 +271,26 @@ returns only the fields a given version carries (`textured`, `hasBiome`, `fluid`
 `worldFromHttp`, `worldFromVantageServer`; types `DecodedTile`,
 `MeshSection`, `SurfaceMap`, `DecodedTextureArray`, `WorldManifest`,
 `ManifestTile`, `LowresTile`, `BiomeEntry`, `Rgb`, `WorldSource`,
-`WorldConditionalFetch`, `HttpWorldOptions`, `VantageServerOptions`.
+`WorldConditionalFetch`, `HttpWorldOptions`, `VantageServerOptions`,
+`PlayerState`, `PlayerSnapshot`; `parsePlayers`, `samePlayers`.
 
 **`@thoughts-on-things/vantage-mc/three`** — `buildTerrain`, `buildTileMeshes`,
 `buildQuantizedTileMeshes`, `buildLowresMesh`, `TileManager`,
 `createTerrainMaterial`, `createWaterMaterial`, `createLowresMaterial`,
-`createSky`, `pickBiome`, `MapControls`, `VantageViewer` (engine),
-`VANILLA_DISPLAY`, `DEFAULT_ORBIT_ANGLE`; types `TerrainObjects`,
+`createSky`, `pickBiome`, `MapControls`, `PlayerLayer`, `boxFaces`,
+`defaultSkinCanvas`, `headIconCanvas`, `normalizeSkin`, `VantageViewer`
+(engine), `VANILLA_DISPLAY`, `DEFAULT_ORBIT_ANGLE`; types `TerrainObjects`,
 `TileMeshes`, `TileManagerOptions`, `TileStats`, `VantageViewerOptions`,
 `LoadOptions`, `StreamingSettings`, `LightSettings`, `DisplaySettings`,
-`TileInfo`, `ViewMode`. Re-exports all of `core`.
+`PlayerOptions`, `PlayerSettings`, `PlayerView`, `TileInfo`, `ViewMode`.
+Re-exports all of `core`.
 
 **`@thoughts-on-things/vantage-mc/react`** — `<VantageViewer>`, `<BiomeLayer>`, `<SettingsPanel>`,
-`<LightPanel>`, `<MapNav>`, `<DepthSlider>`, `<Reticle>`, `<Panel>`, `useVantage`,
-`injectStyles`, `QUALITY_PRESETS`; types `VantageViewerProps`,
-`BiomeLayerProps`, `SettingsPanelProps`, `VantageContextValue`,
-`VantageStatus`. Re-exports the engine and core types.
+`<LightPanel>`, `<MapNav>`, `<DepthSlider>`, `<PlayerList>`, `<Reticle>`,
+`<Panel>`, `useVantage`, `injectStyles`, `QUALITY_PRESETS`; types
+`VantageViewerProps`, `BiomeLayerProps`, `SettingsPanelProps`,
+`PlayerListProps`, `VantageContextValue`, `VantageStatus`. Re-exports the
+engine and core types.
 
 ## Develop
 

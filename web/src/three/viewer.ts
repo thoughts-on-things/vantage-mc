@@ -772,8 +772,20 @@ export class VantageViewer {
       // Stream in new tiles. Continuous on-demand servers also revise and
       // remove existing coordinates as the multiplayer world is saved.
       const changed = m.dynamic ? manager.syncTiles(m.tiles) : manager.addTiles(m.tiles);
+      // A live session folds each baked tile into its LOD pyramid, so the
+      // zoomed-out overview arrives (and grows) mid-session instead of only at
+      // the end of a batch bake. Once any of it is resident the world is
+      // drawable beyond the streaming ring, so the view limits switch from
+      // hugging the hires frontier to framing the whole world.
+      const lowresChanged = m.lowres ? manager.syncLowres(m.lowres) : false;
+      if (lowresChanged) {
+        this.manifest = m;
+        this.updateWorldBounds(m);
+        this.applyViewLimits();
+        this.needsRender = true;
+      }
       const progressed = this.emitProgress(m);
-      delay = !m.dynamic || changed || atlasGrew || progressed ? VantageViewer.POLL_MS : Math.min(delay * 2, VantageViewer.POLL_MAX_MS);
+      delay = !m.dynamic || changed || lowresChanged || atlasGrew || progressed ? VantageViewer.POLL_MS : Math.min(delay * 2, VantageViewer.POLL_MAX_MS);
 
       if (!m.rendering) {
         // Final manifest: install the lowres pyramid and open the zoom range to

@@ -102,15 +102,18 @@ fn printUsage() void {
         \\                  [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
         \\                  [--dimension <name>] [--ceiling <y>|keep]
         \\                  [--threads <n>] [--memory <MiB>] [--gz <1..12>] [--port <n>] [--host <addr>] [--open]
-        \\                  [--prebake on|off]
+        \\                  [--prebake on|off] [--lod on|off]
         \\      Open a world in the browser NOW — no full pre-render. Every tile is
         \\      listed up front and baked on demand as it scrolls into view, caching
         \\      into --out (default web/public) so panning back is instant.
         \\      Streams one dimension per session (--dimension, default overworld).
         \\      --prebake on also bakes the rest of the world in the background.
+        \\      Baked tiles also feed a zoomed-out overview that fills in as they
+        \\      land and survives a reload (--lod off to skip it).
         \\  vantage server  <world-save-dir> [live render flags] [--port <n>] [--host <addr>]
         \\                  [--token-env <name>] [--allow-origin <origin>] [--max-connections <n>]
-        \\                  [--scan-interval <seconds>] [--prebake on|off] [--focus-file <path>]
+        \\                  [--scan-interval <seconds>] [--prebake on|off] [--lod on|off]
+        \\                  [--focus-file <path>]
         \\      Run the hardened Vantage server data plane for launchers and web apps.
         \\      Binds to 127.0.0.1 by default for an authenticating reverse proxy.
         \\      Non-loopback binds require a >=32-byte bearer secret in the environment
@@ -1327,7 +1330,7 @@ fn renderDimension(
     // coarse levels resident far beyond the hires ring, so zooming out shows
     // the whole world instead of a fogged edge.
     const lod_node = root.start("lowres pyramid", 0);
-    const pyramid = try buildLowresPyramid(a, init.io, out_dir, lod_cache_dir, manifest_tiles.items, tile_blocks);
+    const pyramid = try buildLowresPyramid(a, init.io, out_dir, lod_cache_dir, manifest_tiles.items, tile_blocks, false);
     const lowres_levels = pyramid.levels;
     const lowres_count = pyramid.count;
     const lowres_bytes = pyramid.bytes;
@@ -1710,6 +1713,9 @@ const TileResult = struct {
     err: ?anyerror = null,
     /// False for empty tiles (nothing meshed) — skipped in the manifest.
     written: bool = false,
+    /// Whether this bake also wrote the tile's lowres colour map (`keep_cmap`),
+    /// which is what lets a live session fold the tile into its LOD pyramid.
+    cmap_written: bool = false,
     entry: TileEntry = .{ .tx = 0, .tz = 0, .bytes = 0 },
     /// World-Y extent of this tile's grid (min inclusive, max exclusive) —
     /// aggregated into the manifest's `yRange` for the viewer's depth slider.
@@ -1876,6 +1882,7 @@ fn bakeTileFromRegions(
         const tile_blocks: i64 = @as(i64, tile_chunks) * 16;
         const cmap = try lowres.buildColorMap(ta, g2, interior, &sh.surf_colors, @intCast(bx0), @intCast(bz0), @intCast(tile_blocks), sh.shading());
         try writeColorMapCache(io, ta, sh.lod_cache_dir.?, 0, tx, tz, cmap);
+        res.cmap_written = true;
     }
 
     // Tiles ship gzip-wrapped (~8× smaller): any static host can serve
@@ -1908,7 +1915,10 @@ const TileEntry = struct {
 };
 
 /// One lowres tile / one pyramid level, for the manifest's `lowres` section.
-const LowresTileEntry = struct { x: i32, z: i32, bytes: usize };
+/// `revision` fingerprints the serialized tile so a live viewer can tell a
+/// rebuilt overview tile from an unchanged one; a batch render's pyramid never
+/// changes, so it omits the field.
+const LowresTileEntry = struct { x: i32, z: i32, bytes: usize, revision: u64 = 0 };
 const LowresLevel = struct {
     level: u5,
     tile_blocks: i64,
@@ -1955,6 +1965,10 @@ fn deleteColorMapLevel(io: std.Io, dir: []const u8, level: u5, keys: []const u64
 /// External-memory quadtree construction. Only a four-child parent group (or a
 /// tile plus its three apron neighbours) is resident at once. World size now
 /// grows temporary disk by ~80 KiB/tile, while process memory remains flat.
+///
+/// `retain_source` keeps the level-0 colour maps on disk instead of consuming
+/// them. A batch render builds its pyramid once and wants the space back; a
+/// live session rebuilds as more tiles bake, so its sources have to survive.
 fn buildLowresPyramid(
     a: std.mem.Allocator,
     io: std.Io,
@@ -1962,6 +1976,7 @@ fn buildLowresPyramid(
     cache_dir: []const u8,
     hires: []const TileEntry,
     tile_blocks: i64,
+    retain_source: bool,
 ) !LowresPyramid {
     var initial: std.ArrayList(u64) = .empty;
     for (hires) |t| try initial.append(a, world.packChunk(t.tx, t.tz));
@@ -2025,7 +2040,7 @@ fn buildLowresPyramid(
                 return x < y;
             }
         }.lt);
-        deleteColorMapLevel(io, cache_dir, current_level, current);
+        if (current_level > 0 or !retain_source) deleteColorMapLevel(io, cache_dir, current_level, current);
 
         var next_index = std.AutoHashMap(u64, void).init(a);
         for (next) |key| try next_index.put(key, {});
@@ -2058,7 +2073,12 @@ fn buildLowresPyramid(
             const zipped = try compress.gzipCompress(sa, blob, 6);
             const path = try std.fmt.allocPrint(sa, "{s}/tiles/l{d}.{d}.{d}.vlr", .{ out_dir, level, px, pz });
             try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = zipped });
-            try entries.append(a, .{ .x = px, .z = pz, .bytes = zipped.len });
+            try entries.append(a, .{
+                .x = px,
+                .z = pz,
+                .bytes = zipped.len,
+                .revision = std.hash.Wyhash.hash(LOWRES_REVISION_SEED, zipped),
+            });
             total_count += 1;
             total_bytes += zipped.len;
         }
@@ -2071,7 +2091,7 @@ fn buildLowresPyramid(
         current = next;
         current_level = level;
     }
-    deleteColorMapLevel(io, cache_dir, current_level, current);
+    if (current_level > 0 or !retain_source) deleteColorMapLevel(io, cache_dir, current_level, current);
     return .{ .levels = try levels.toOwnedSlice(a), .count = total_count, .bytes = total_bytes };
 }
 
@@ -2257,9 +2277,17 @@ fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
                 lvl.level, lvl.tile_blocks, lvl.span,
             });
             for (lvl.tiles, 0..) |t, i| {
-                try out.print(a, "        {{ \"x\": {d}, \"z\": {d}, \"path\": \"tiles/l{d}.{d}.{d}.vlr\", \"bytes\": {d} }}{s}\n", .{
-                    t.x, t.z, lvl.level, t.x, t.z, t.bytes, if (i + 1 < lvl.tiles.len) "," else "",
-                });
+                // A live pyramid is rebuilt as tiles bake, so its entries carry
+                // the fingerprint that tells the viewer which ones to re-fetch.
+                if (m.dynamic) {
+                    try out.print(a, "        {{ \"x\": {d}, \"z\": {d}, \"path\": \"tiles/l{d}.{d}.{d}.vlr\", \"bytes\": {d}, \"revision\": \"{x}\" }}{s}\n", .{
+                        t.x, t.z, lvl.level, t.x, t.z, t.bytes, t.revision, if (i + 1 < lvl.tiles.len) "," else "",
+                    });
+                } else {
+                    try out.print(a, "        {{ \"x\": {d}, \"z\": {d}, \"path\": \"tiles/l{d}.{d}.{d}.vlr\", \"bytes\": {d} }}{s}\n", .{
+                        t.x, t.z, lvl.level, t.x, t.z, t.bytes, if (i + 1 < lvl.tiles.len) "," else "",
+                    });
+                }
             }
             try out.print(a, "      ] }}{s}\n", .{if (li + 1 < m.lowres.len) "," else ""});
         }
@@ -2628,6 +2656,30 @@ const LiveServer = struct {
     /// appended within a session, so an early tile stays valid as it grows.
     session_tag: u64 = 0,
 
+    // --- progressive LOD pyramid ---------------------------------------------
+    //
+    // A streamed world used to be visible only where hires tiles were resident:
+    // beyond that ring there was nothing to draw, so the map ended at a fog wall
+    // and a page reload started from an empty map again. Live sessions now keep
+    // each baked tile's lowres colour map and rebuild the same quadtree pyramid
+    // `vantage render` bakes, publishing it in the manifest as it fills in. The
+    // pyramid is a fraction of a percent of the tiles' bytes, has no dependency
+    // on this session's texture atlas, and lives in the tile cache — so it
+    // survives a reload, and a restart republishes it before anything re-bakes.
+
+    /// Colour-map cache directory, or null when the pyramid is disabled.
+    lod_dir: ?[]const u8 = null,
+    /// Tiles whose level-0 colour map is on disk (the pyramid's source set).
+    lod_maps: std.AutoHashMap(u64, void) = undefined,
+    /// A colour map landed since the last rebuild.
+    lod_dirty: bool = false,
+    /// A rebuild is in flight — its worker owns the sources until it finishes.
+    lod_building: bool = false,
+    /// The published pyramid, and the arena owning it. Swapped whole on every
+    /// rebuild; readers copy what they need out from under `mutex`.
+    lod_levels: []const LowresLevel = &.{},
+    lod_arena: ?std.heap.ArenaAllocator = null,
+
     fn producer(self: *LiveServer) serve.Producer {
         return .{ .ctx = self, .func = produce };
     }
@@ -2649,6 +2701,10 @@ const LiveServer = struct {
             self.max_section_verts = @max(self.max_section_verts, @max(r.solid_verts, r.fluid_verts));
             self.y_min = @min(self.y_min, r.y_min);
             self.y_max = @max(self.y_max, r.y_max);
+            if (r.cmap_written) {
+                self.lod_maps.put(key, {}) catch {};
+                self.lod_dirty = true; // fold it into the overview
+            }
         }
         self.manifest_generation +%= 1; // the served catalog moved
     }
@@ -2913,6 +2969,9 @@ fn tileEtag(arena: std.mem.Allocator, session_tag: u64, revision: u64) ![]const 
 /// The manifest ETag seed ("VANTETAG").
 const MANIFEST_ETAG_SEED: u64 = 0x5641_4e54_4554_4147;
 
+/// Seed for lowres tile fingerprints ("VANTELOD").
+const LOWRES_REVISION_SEED: u64 = 0x5641_4e54_454c_4f44;
+
 /// Serve the live manifest through a generation-keyed cache. A strong
 /// validator over the exact raw bytes lets idle pollers trade the full
 /// catalog for a 304 — and with the cache, that 304 costs a generation
@@ -3112,7 +3171,7 @@ fn liveTile(
     defer self.bake_slots.post(self.sh.io);
 
     var res: TileResult = .{};
-    bakeTileFromRegions(self.sh, arena, regions, tx, tz, false, &res) catch |e| {
+    bakeTileFromRegions(self.sh, arena, regions, tx, tz, self.lod_dir != null, &res) catch |e| {
         std.debug.print("live: tile ({d},{d}) failed: {s} — leaving a gap\n", .{ tx, tz, @errorName(e) });
         self.record(key, revision, null);
         return .{ .bytes = "", .revision = revision }; // the viewer marks it empty, no retry
@@ -3209,7 +3268,7 @@ fn prebakeOne(self: *LiveServer) bool {
     const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
     const tz: i32 = @bitCast(@as(u32, @truncate(key)));
     var res: TileResult = .{};
-    const baked = bakeTileFromRegions(self.sh, arena.allocator(), regions, tx, tz, false, &res);
+    const baked = bakeTileFromRegions(self.sh, arena.allocator(), regions, tx, tz, self.lod_dir != null, &res);
     self.bake_slots.post(io);
     if (baked) |_| {
         self.record(key, best_revision, if (res.written) &res else null);
@@ -3218,6 +3277,165 @@ fn prebakeOne(self: *LiveServer) bool {
         self.record(key, best_revision, null);
     }
     return true;
+}
+
+/// Shortest wait between LOD rebuilds. Tiles that bake inside one window are
+/// folded into the overview together.
+const LOD_MIN_INTERVAL_MS: u64 = 3000;
+/// …and at most this fraction of the time is spent rebuilding: a world large
+/// enough for a rebuild to take a second waits proportionally longer, so the
+/// overview never competes with the bakes that feed it.
+const LOD_DUTY: u64 = 8;
+
+/// Background pyramid builder: fold newly baked tiles' colour maps into the
+/// published LOD pyramid. One worker; it yields to interactive fetches exactly
+/// like prebake, and backs off in proportion to how long its own rebuilds take.
+fn liveLodLoop(self: *LiveServer) void {
+    const io = self.sh.io;
+    var wait: u64 = LOD_MIN_INTERVAL_MS;
+    var complained = false;
+    while (true) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@intCast(wait)), .awake) catch {};
+        if (self.interactive_demand.load(.acquire) > 0) continue;
+        const ms = rebuildLiveLod(self) catch |e| {
+            if (!complained) {
+                std.debug.print("live: LOD pyramid rebuild failed: {s} — the zoomed-out overview will lag\n", .{@errorName(e)});
+                complained = true;
+            }
+            wait = LOD_MIN_INTERVAL_MS * LOD_DUTY; // don't spin on a broken cache
+            continue;
+        };
+        wait = @max(LOD_MIN_INTERVAL_MS, @as(u64, @intCast(@max(0, ms))) * LOD_DUTY);
+    }
+}
+
+/// Rebuild the pyramid from every colour map baked so far and publish it.
+/// Returns how long the rebuild took, or 0 when there was nothing to do.
+///
+/// The whole pyramid is rebuilt rather than patched: it is pure downsampling
+/// over ~80 KiB per tile, the level-0 maps are the only inputs, and one
+/// rebuild covers however many tiles landed since the last one. Sharing
+/// `buildLowresPyramid` with the batch renderer also means a live world's
+/// overview is byte-identical to the one `vantage render` bakes.
+fn rebuildLiveLod(self: *LiveServer) !i64 {
+    const io = self.sh.io;
+    const lod_dir = self.lod_dir orelse return 0;
+
+    self.mutex.lockUncancelable(io);
+    if (self.lod_building or !self.lod_dirty or self.lod_maps.count() == 0) {
+        self.mutex.unlock(io);
+        return 0;
+    }
+    self.lod_building = true;
+    // Cleared before the sources are read, so a tile baked mid-rebuild sets it
+    // again and gets its own pass rather than being missed.
+    self.lod_dirty = false;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const a = arena.allocator();
+    var sources: std.ArrayList(TileEntry) = .empty;
+    var it = self.lod_maps.keyIterator();
+    while (it.next()) |key| {
+        sources.append(a, .{
+            .tx = @bitCast(@as(u32, @truncate(key.* >> 32))),
+            .tz = @bitCast(@as(u32, @truncate(key.*))),
+            .bytes = 0,
+        }) catch break;
+    }
+    const count = sources.items.len;
+    const expected = self.lod_maps.count();
+    self.mutex.unlock(io);
+    errdefer {
+        arena.deinit();
+        self.mutex.lockUncancelable(io);
+        self.lod_building = false;
+        self.lod_dirty = true; // whatever failed is still unpublished
+        self.mutex.unlock(io);
+    }
+    if (count != expected) return error.OutOfMemory;
+
+    const t0 = std.Io.Timestamp.now(io, .awake);
+    const pyramid = try buildLowresPyramid(a, io, self.sh.out_dir, lod_dir, sources.items, @as(i64, self.sh.tile_chunks) * 16, true);
+    const elapsed = t0.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
+
+    self.mutex.lockUncancelable(io);
+    var old = self.lod_arena;
+    self.lod_arena = arena; // the arena now owns the published levels
+    self.lod_levels = pyramid.levels;
+    self.lod_building = false;
+    self.manifest_generation +%= 1; // the overview moved
+    self.mutex.unlock(io);
+    if (old) |*stale| stale.deinit();
+    return elapsed;
+}
+
+/// Adopt the colour maps a previous session left in the cache. They describe
+/// terrain, not this session's texture atlas, so they stay valid across a
+/// restart — which is what lets a restarted server publish the whole explored
+/// overview before it has re-baked a single tile. Only coordinates the current
+/// catalog still lists are adopted, and each is replaced as soon as its tile
+/// re-bakes. Runs at startup, before any worker thread exists, so it touches
+/// the ledger without the mutex.
+fn seedLiveLod(self: *LiveServer) void {
+    const io = self.sh.io;
+    const lod_dir = self.lod_dir orelse return;
+    var dir = std.Io.Dir.cwd().openDir(io, lod_dir, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+    var known: usize = 0;
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const key = parseColorMapName(entry.name) orelse continue;
+        if (!knownTile(self, key)) continue;
+        self.lod_maps.put(key, {}) catch continue;
+        known += 1;
+    }
+    if (known == 0) return;
+    self.lod_dirty = true;
+    std.debug.print("lod:     {d} tile(s) of a previous session's overview reused\n", .{known});
+}
+
+/// `c.0.<x>.<z>.vcm` -> the tile key it holds a level-0 colour map for.
+fn parseColorMapName(name: []const u8) ?u64 {
+    if (!std.mem.startsWith(u8, name, "c.0.") or !std.mem.endsWith(u8, name, ".vcm")) return null;
+    const mid = name["c.0.".len .. name.len - ".vcm".len];
+    const dot = std.mem.indexOfScalar(u8, mid, '.') orelse return null;
+    const x = std.fmt.parseInt(i32, mid[0..dot], 10) catch return null;
+    const z = std.fmt.parseInt(i32, mid[dot + 1 ..], 10) catch return null;
+    return world.packChunk(x, z);
+}
+
+test "colour-map cache names round-trip through the pyramid key" {
+    try std.testing.expectEqual(world.packChunk(3, -7), parseColorMapName("c.0.3.-7.vcm").?);
+    try std.testing.expect(parseColorMapName("c.1.3.-7.vcm") == null); // a derived level, not a source
+    try std.testing.expect(parseColorMapName("t.3.-7.vtile") == null);
+    try std.testing.expect(parseColorMapName("c.0.3.vcm") == null);
+}
+
+/// Whether the current catalog still lists a tile coordinate. The server's
+/// authority is its live snapshot; a local `live` session's is the immutable
+/// tile list it started from.
+fn knownTile(self: *LiveServer, key: u64) bool {
+    if (self.snapshot) |current| return current.tile_revisions.contains(key);
+    return self.known.contains(key);
+}
+
+/// Open (and validate) the colour-map cache for a live session.
+///
+/// The maps are reused across restarts, so they carry a stamp of everything
+/// that changes what they mean — the dimension they describe and the tile size
+/// they are cut to. A mismatch wipes the cache rather than mixing two worlds'
+/// overviews together.
+fn openLiveLodDir(a: std.mem.Allocator, io: std.Io, out_dir: []const u8, dim: dimension.Profile, tile_chunks: i32) ![]const u8 {
+    const dir = try std.fmt.allocPrint(a, "{s}/.vantage-lod", .{out_dir});
+    const stamp_path = try std.fmt.allocPrint(a, "{s}/stamp", .{dir});
+    const stamp = try std.fmt.allocPrint(a, "vantage-lod 1 {s} {d}\n", .{ dim.slug, tile_chunks });
+    const existing = std.Io.Dir.cwd().readFileAlloc(io, stamp_path, a, .limited(1024)) catch "";
+    if (!std.mem.eql(u8, existing, stamp)) {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    }
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = stamp_path, .data = stamp });
+    return dir;
 }
 
 /// The tiles prebake warms outward from: every place a player is (from the
@@ -3371,6 +3589,12 @@ fn liveManifest(self: *LiveServer, arena: std.mem.Allocator) ![]const u8 {
     const msv = self.max_section_verts;
     const ymin = self.y_min;
     const ymax = self.y_max;
+    // Copied out under the lock: a rebuild landing between here and
+    // `buildManifest` frees the arena these levels live in.
+    const lod = copyLowresLevels(arena, self.lod_levels) catch |e| {
+        self.mutex.unlock(io);
+        return e;
+    };
     self.mutex.unlock(io);
 
     self.sh.world_mutex.lockUncancelable(io);
@@ -3386,6 +3610,7 @@ fn liveManifest(self: *LiveServer, arena: std.mem.Allocator) ![]const u8 {
         .spawn = self.spawn,
         .biomes = biomes,
         .tiles = tiles,
+        .lowres = lod,
         .max_section_verts = msv,
         .caves = self.sh.cave_y == null,
         .y_range = if (ymin < ymax) .{ ymin, ymax } else null,
@@ -3396,6 +3621,17 @@ fn liveManifest(self: *LiveServer, arena: std.mem.Allocator) ![]const u8 {
         .progress = .{ done, tile_keys.len },
         .texture_layers = self.sh.builder.layerCount(),
     });
+}
+
+/// Deep-copy the published pyramid into a caller-owned arena, so the manifest
+/// can be formatted after the state mutex is released.
+fn copyLowresLevels(a: std.mem.Allocator, levels: []const LowresLevel) ![]const LowresLevel {
+    const out = try a.alloc(LowresLevel, levels.len);
+    for (levels, out) |src, *dst| {
+        dst.* = src;
+        dst.tiles = try a.dupe(LowresTileEntry, src.tiles);
+    }
+    return out;
 }
 
 /// Serialize + gzip the current atlas into the request arena — a fresh snapshot
@@ -3449,6 +3685,11 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
     // live` (whose pitch is instant startup with a footprint that follows
     // what you actually looked at). `--prebake on|off` overrides either.
     var prebake: bool = server_mode;
+    // The zoomed-out overview. Cheap (a colour map is a fraction of a tile's
+    // bake, and the whole pyramid is well under 1% of a world's bytes) and it
+    // is what makes a streamed world readable beyond the streaming ring, so it
+    // defaults on for both commands; `--lod off` skips it.
+    var lod = true;
     const quality = try parseLightQuality(args);
     const blend_biomes = try parseBiomeBlend(args);
     const requested_caves = try parseCaveY(args);
@@ -3509,6 +3750,13 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
             } else if (std.mem.eql(u8, v, "off")) {
                 prebake = false;
             } else return badValue("--prebake", v, "on|off");
+        } else if (std.mem.eql(u8, arg, "--lod")) {
+            const v = try flagValue(args, &argi);
+            if (std.mem.eql(u8, v, "on")) {
+                lod = true;
+            } else if (std.mem.eql(u8, v, "off")) {
+                lod = false;
+            } else return badValue("--lod", v, "on|off");
         } else if (std.mem.eql(u8, arg, "--light") or std.mem.eql(u8, arg, "--biome-blend") or
             std.mem.eql(u8, arg, "--caves") or std.mem.eql(u8, arg, "--threads") or
             std.mem.eql(u8, arg, "--memory") or std.mem.eql(u8, arg, "--ceiling") or
@@ -3574,6 +3822,17 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         worker_bytes / MiB,
     });
 
+    // Where each baked tile spills its lowres colour map. Reused across
+    // restarts (see `openLiveLodDir`), which is what lets a restarted session
+    // publish the whole explored overview before re-baking anything.
+    const lod_dir: ?[]const u8 = if (lod)
+        openLiveLodDir(a, init.io, out_dir, dim, tile_chunks) catch |e| blk: {
+            std.debug.print("live: no LOD cache ({s}); the zoomed-out overview is disabled\n", .{@errorName(e)});
+            break :blk null;
+        }
+    else
+        null;
+
     const sh = try setupShared(init.io, a, wl.assets, wl.loaded, .{
         .dim = dim,
         .tile_chunks = tile_chunks,
@@ -3585,6 +3844,7 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         // Each tile meshes single-threaded; parallelism comes from serving
         // several tile fetches (browser connections) at once.
         .mesh_threads = 1,
+        .lod_cache_dir = lod_dir,
     });
 
     const tiles_dir = try std.fmt.allocPrint(a, "{s}/tiles", .{out_dir});
@@ -3623,7 +3883,10 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         // rebuilds to one per window no matter how many clients are watching.
         .manifest_coalesce_ns = if (server_mode) 1 * std.time.ns_per_s else 0,
         .session_tag = session_tag,
+        .lod_dir = lod_dir,
+        .lod_maps = std.AutoHashMap(u64, void).init(sh.sa),
     };
+    seedLiveLod(server);
 
     // Seed the nearest tile synchronously: fail fast if assets/pipeline are
     // broken (rather than per-request in the browser), and start the atlas +
@@ -3637,7 +3900,7 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         const regions = if (region_snapshot) |snapshot| snapshot.loaded else sh.loaded;
         const revision = if (region_snapshot) |snapshot| snapshot.tile_revisions.get(seed_keys[0]).? else 0;
         var res: TileResult = .{};
-        bakeTileFromRegions(sh, seed.allocator(), regions, tx, tz, false, &res) catch |e| {
+        bakeTileFromRegions(sh, seed.allocator(), regions, tx, tz, lod_dir != null, &res) catch |e| {
             std.debug.print("live: initial bake failed ({s}) — check the world/assets\n", .{@errorName(e)});
             return e;
         };
@@ -3658,6 +3921,17 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
             spawned += 1;
         }
         if (spawned > 0) std.debug.print("prebake: {d} background worker(s) warming the tile cache\n", .{spawned});
+    }
+
+    // Fold baked tiles into the zoomed-out overview as they land, so the map
+    // beyond the streaming ring fills in instead of ending at a fog wall.
+    if (lod_dir != null) {
+        if (std.Thread.spawn(.{}, liveLodLoop, .{server})) |t| {
+            t.detach();
+            std.debug.print("lod:     building the zoomed-out overview as tiles bake\n", .{});
+        } else |e| {
+            std.debug.print("live: no LOD thread ({s}); only streamed tiles will be visible\n", .{@errorName(e)});
+        }
     }
 
     // The world/focus tick. Only the server needs it: local `live` has no

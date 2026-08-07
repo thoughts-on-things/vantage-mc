@@ -27,10 +27,20 @@ system, page cache, and viewer.
 
 Low-resolution color maps used to remain in the render's root arena until the
 entire world pyramid was complete. They are now small checkpoint files under a
-temporary `.vantage-lod` directory. Each LOD pass reads at most four children,
-writes their parent, and deletes the previous level. The bulk retained heap
-therefore depends on tile size and admitted concurrency; only compact manifest
-and coordinate metadata continue to scale with world area.
+`.vantage-lod` directory. Each LOD pass reads at most four children, writes
+their parent, and deletes the previous level. The bulk retained heap therefore
+depends on tile size and admitted concurrency; only compact manifest and
+coordinate metadata continue to scale with world area.
+
+A live session builds the same pyramid from the same checkpoints, on a
+background worker, as tiles bake — its output is byte-identical to a batch
+render's. It keeps the level-0 maps instead of consuming them, because more
+tiles keep arriving and because a restart can then republish the overview
+before re-baking anything. Rebuilds are whole rather than patched: the sources
+are ~80 KiB per tile, one pass covers everything that landed since the last
+one, and the worker sleeps for a multiple of its own last duration, so a world
+big enough for a rebuild to cost a second waits proportionally longer instead
+of competing with the bakes that feed it.
 
 Dimensions bake one after another into one process, sharing the model resolver,
 texture atlas and biome tables but never their tile arenas — so a save's nether

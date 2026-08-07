@@ -211,8 +211,12 @@ export class TileManager {
   private readonly records = new Map<string, Record_>();
   private readonly emitter = new Emitter<TileEvents>();
   private readonly tileBlocks: number;
-  /** Lowres pyramid levels, finest first ([] when the manifest has none). */
+  /** Lowres pyramid levels, finest first ([] when the manifest has none).
+   *  A live world's pyramid grows mid-session — see {@link syncLowres}. */
   private readonly lowLevels: LowresLevel[];
+  /** On-demand world (`vantage live`/`server`): tiles and the LOD pyramid are
+   *  produced as the map is watched, so both keep being reconciled. */
+  private readonly dynamic: boolean;
   /** Tile-existence index per lowres level (for the coverage pass). */
   private readonly lowIndex = new Map<number, Map<string, ManifestTile>>();
   /** Set when residency changed and lowres visibility needs recomputing. */
@@ -280,6 +284,7 @@ export class TileManager {
     this.ensureAtlas = ensureAtlas ?? null;
     this.atlasLayers = ensureAtlas ? (options.manifest.textureLayers ?? 0) : Infinity;
     this.tileBlocks = options.manifest.tileBlocks;
+    this.dynamic = options.manifest.dynamic ?? false;
     // Pre-size the shared quad index to the biggest section in the world, so
     // streaming never grows (= re-uploads) it mid-pan.
     if (options.manifest.maxSectionVerts) sharedQuadIndex(options.manifest.maxSectionVerts);
@@ -289,10 +294,12 @@ export class TileManager {
       this.lowIndex.set(lvl.level, new Map(lvl.tiles.map((t) => [tileKey(t.x, t.z), t])));
     }
     // Map memory: only worth spinning up when nothing else covers the world
-    // beyond the streaming ring (a baked lowres pyramid does that better).
+    // beyond the streaming ring. A *baked* lowres pyramid does that better and
+    // wins outright; a live one describes only the tiles baked so far and is
+    // coarser than a snapshot, so a streamed world keeps both.
     this.renderer = renderer ?? null;
     const res = mapMemory ?? 64;
-    if (renderer && res > 0 && !options.manifest.lowres) {
+    if (renderer && res > 0 && (!options.manifest.lowres || this.dynamic)) {
       this.impostors = new ImpostorLayer(renderer, options.scene, options.material, this.tileBlocks, res, this.readySurface);
       this.applyHazeFloor();
     }
@@ -679,21 +686,78 @@ export class TileManager {
   }
 
   /** Install the lowres pyramid once a progressive render finishes (its earlier
-   *  manifests carried no lowres). No-op without a lowres material, or if a
-   *  pyramid is already present. Forces a re-plan so the coarse rings stream in. */
+   *  manifests carried no lowres). Forces a re-plan so the coarse rings stream
+   *  in. No-op without a lowres material. */
   ingestLowres(lowres: { grid: number; levels: LowresLevel[] }): void {
-    if (!this.lowresMaterial || this.lowLevels.length > 0) return;
+    if (!this.lowresMaterial) return;
+    this.syncLowres(lowres);
+    // A finished bake's pyramid covers the whole world at real fidelity —
+    // retire the provisional map memory in its favour. A live session keeps
+    // both: its pyramid describes only what has baked so far, and remembered
+    // tiles are the crisper record of everywhere the camera has actually been.
+    if (!this.dynamic) {
+      this.impostors?.dispose();
+      this.impostors = null;
+    }
+  }
+
+  /**
+   * Reconcile the lowres pyramid from a continuous manifest.
+   *
+   * A live/server session builds its pyramid as tiles bake, so levels appear
+   * and individual overview tiles are rebuilt while the map is being watched.
+   * Tiles whose fingerprint moved are evicted so the next plan re-fetches
+   * them; everything unchanged stays on the GPU. Returns whether anything
+   * moved (the caller re-applies view limits and redraws).
+   */
+  syncLowres(lowres: { grid: number; levels: LowresLevel[] }): boolean {
+    if (!this.lowresMaterial) return false;
     const levels = [...lowres.levels].sort((a, b) => a.level - b.level);
+    const stamp = (t: ManifestTile) => t.revision ?? `b${t.bytes}`;
+    let changed = false;
+
+    const live = new Set<string>();
+    for (const lvl of levels) {
+      const index = this.lowIndex.get(lvl.level);
+      for (const t of lvl.tiles) {
+        const key = recKey(lvl.level, t.x, t.z);
+        live.add(key);
+        const previous = index?.get(tileKey(t.x, t.z));
+        if (!previous) {
+          changed = true; // a new patch of the overview exists
+          continue;
+        }
+        if (stamp(previous) === stamp(t)) continue;
+        // Rebuilt from newly baked terrain: drop the stale mesh so the plan
+        // fetches this coordinate again.
+        const rec = this.records.get(key);
+        if (rec) this.unload(key, rec);
+        changed = true;
+      }
+    }
+    // Coordinates that left the pyramid (a shrinking world, or a deeper root
+    // replacing a level) stop being planned for, and stop drawing.
+    for (const [lvl, index] of this.lowIndex) {
+      for (const previous of index.values()) {
+        const key = recKey(lvl, previous.x, previous.z);
+        if (live.has(key)) continue;
+        const rec = this.records.get(key);
+        if (rec) this.unload(key, rec);
+        changed = true;
+      }
+    }
+
+    this.lowLevels.length = 0;
     this.lowLevels.push(...levels);
+    this.lowIndex.clear();
     for (const lvl of levels) this.lowIndex.set(lvl.level, new Map(lvl.tiles.map((t) => [tileKey(t.x, t.z), t])));
-    // The baked pyramid covers the whole world at real fidelity — retire the
-    // provisional map memory in its favour.
-    this.impostors?.dispose();
-    this.impostors = null;
-    this.lastFocusX = Infinity;
-    this.lastFocusZ = Infinity;
-    this.coverageDirty = true;
-    this.invalidate();
+    if (changed) {
+      this.lastFocusX = Infinity; // re-plan the rings around the same focus
+      this.lastFocusZ = Infinity;
+      this.coverageDirty = true;
+      this.invalidate();
+    }
+    return changed;
   }
 
   /** Show or hide every resident tile's cave-dark geometry (VTLA tiles order
@@ -729,7 +793,7 @@ export class TileManager {
     if (settings.mapMemory !== undefined && settings.mapMemory !== this.mapMemoryResolution) {
       this.impostors?.dispose();
       this.impostors = null;
-      if (this.renderer && settings.mapMemory > 0 && this.lowLevels.length === 0) {
+      if (this.renderer && settings.mapMemory > 0 && (this.lowLevels.length === 0 || this.dynamic)) {
         this.impostors = new ImpostorLayer(this.renderer, this.opts.scene, this.opts.material, this.tileBlocks, settings.mapMemory, this.readySurface);
       }
       this.invalidate();

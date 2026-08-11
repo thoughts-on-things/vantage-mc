@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { worldFromHttp, type WorldSource } from 'vantage-mc/core';
 import type { DesktopSettings } from './settings.js';
 
 /** The geometry-affecting settings a render was baked with. */
@@ -67,6 +68,47 @@ export interface SystemProfile {
   platform: string;
 }
 
+/** A saved connection to a `vantage server`. The access token never crosses
+ *  into this process — only whether one is remembered. */
+export interface HostEntry {
+  id: string;
+  label: string;
+  endpoint: string;
+  worldId: string;
+  hasToken: boolean;
+  addedAtMs: number;
+  lastConnectedMs: number | null;
+}
+
+/** What an address turned out to be, before it is saved. */
+export interface HostProbe {
+  /** The address as it will actually be stored. */
+  endpoint: string;
+  protocol: number | null;
+  auth: string | null;
+  worlds: string[];
+  unauthorized: boolean;
+  note: string | null;
+}
+
+export interface HostConnection {
+  id: string;
+  label: string;
+  manifestUrl: string;
+  origin: string;
+}
+
+/** The add/edit form's payload. Omitting `token` on an edit keeps the saved
+ *  one, which is how the form can offer it without ever displaying it. */
+export interface HostInput {
+  id?: string;
+  label: string;
+  endpoint: string;
+  worldId?: string;
+  token?: string;
+  forgetToken?: boolean;
+}
+
 export interface SavedImage {
   path: string;
   name: string;
@@ -129,6 +171,29 @@ const mockRenders: RenderEntry[] = [
     thumbnailUrl: null,
   },
 ];
+
+const mockHosts: HostEntry[] = [
+  {
+    id: 'mock-survival',
+    label: 'Survival SMP',
+    endpoint: 'https://map.example.net/',
+    worldId: 'default',
+    hasToken: true,
+    addedAtMs: Date.now() - 9 * 24 * HOUR,
+    lastConnectedMs: Date.now() - 3 * HOUR,
+  },
+];
+
+/** The browser preview's stand-in for the native address normalizer. */
+function mockEndpoint(raw: string): string {
+  const trimmed = raw.trim();
+  const scheme = trimmed.includes('://') ? '' : /^(localhost|127\.|\[?::1)/.test(trimmed) ? 'http://' : 'https://';
+  const url = new URL(`${scheme}${trimmed}`);
+  url.search = '';
+  url.hash = '';
+  if (!url.pathname.endsWith('/')) url.pathname += '/';
+  return url.toString();
+}
 
 function inTauri(): boolean {
   return '__TAURI_INTERNALS__' in window;
@@ -234,6 +299,138 @@ export async function getSystemProfile(): Promise<SystemProfile> {
     };
   }
   return invoke<SystemProfile>('system_profile');
+}
+
+export async function listHosts(): Promise<HostEntry[]> {
+  if (!inTauri()) return mockHosts;
+  return invoke<HostEntry[]>('list_hosts');
+}
+
+export async function saveHost(input: HostInput): Promise<HostEntry> {
+  if (!inTauri()) {
+    const entry: HostEntry = {
+      id: input.id ?? `mock-${mockHosts.length + 1}`,
+      label: input.label || new URL(mockEndpoint(input.endpoint)).hostname,
+      endpoint: mockEndpoint(input.endpoint),
+      worldId: input.worldId || 'default',
+      hasToken: Boolean(input.token) && !input.forgetToken,
+      addedAtMs: Date.now(),
+      lastConnectedMs: null,
+    };
+    const index = mockHosts.findIndex((host) => host.id === entry.id);
+    index >= 0 ? (mockHosts[index] = entry) : mockHosts.push(entry);
+    return entry;
+  }
+  return invoke<HostEntry>('save_host', { input });
+}
+
+export async function deleteHost(id: string): Promise<void> {
+  if (!inTauri()) {
+    const index = mockHosts.findIndex((host) => host.id === id);
+    if (index >= 0) mockHosts.splice(index, 1);
+    return;
+  }
+  return invoke<void>('delete_host', { id });
+}
+
+export async function probeHost(endpoint: string, token?: string): Promise<HostProbe> {
+  if (!inTauri()) {
+    await new Promise((resolve) => window.setTimeout(resolve, 400));
+    return {
+      endpoint: mockEndpoint(endpoint),
+      protocol: 1,
+      auth: token ? 'bearer' : 'proxy',
+      worlds: ['default'],
+      unauthorized: false,
+      note: null,
+    };
+  }
+  return invoke<HostProbe>('probe_host', { endpoint, token: token || null });
+}
+
+export async function connectHost(id: string): Promise<HostConnection> {
+  if (!inTauri()) throw new Error('Connecting to a server needs the native Vantage window.');
+  return invoke<HostConnection>('connect_host', { id });
+}
+
+/**
+ * A remote world, streamed through the native side.
+ *
+ * The viewer only ever asks for manifest-relative paths, and `worldFromHttp`
+ * resolves and confines them before handing each one to this transport. The
+ * native side confines them again — that is the check that actually gates the
+ * credential, since it lives on the side of the boundary that holds it.
+ */
+export async function remoteWorldSource(connection: HostConnection): Promise<WorldSource> {
+  return worldFromHttp(connection.manifestUrl, {
+    label: connection.label,
+    fetch: (input, init) => hostFetch(connection.id, input, init),
+  });
+}
+
+/** Status line and validator the native side frames in front of the body. */
+interface FramedHeader {
+  status: number;
+  etag: string | null;
+  contentType: string | null;
+}
+
+/**
+ * One protocol artifact, as a real `Response`.
+ *
+ * A command answers with a single value and a tile is megabytes of binary, so
+ * the native side returns `[u32 length][header JSON][body]` rather than paying
+ * to serialize the bytes as JSON numbers.
+ */
+async function hostFetch(id: string, input: string, init?: RequestInit): Promise<Response> {
+  const signal = init?.signal ?? undefined;
+  throwIfAborted(signal);
+  const framed = await withAbort(
+    invoke<ArrayBuffer>('host_fetch', {
+      id,
+      url: input,
+      ifNoneMatch: headerValue(init?.headers, 'if-none-match'),
+    }),
+    signal,
+  );
+
+  const headerLength = new DataView(framed).getUint32(0, true);
+  const header = JSON.parse(
+    new TextDecoder().decode(new Uint8Array(framed, 4, headerLength)),
+  ) as FramedHeader;
+  const body = framed.slice(4 + headerLength);
+  const headers = new Headers();
+  if (header.etag) headers.set('etag', header.etag);
+  if (header.contentType) headers.set('content-type', header.contentType);
+  // 204/304 are null-body statuses: handing `Response` any body for one of
+  // them throws, and the server sends none anyway.
+  const nullBody = header.status === 204 || header.status === 304;
+  return new Response(nullBody ? null : body, { status: header.status, headers });
+}
+
+function headerValue(headers: HeadersInit | undefined, name: string): string | null {
+  if (!headers) return null;
+  return new Headers(headers).get(name);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+}
+
+/**
+ * Settles as soon as the caller gives up.
+ *
+ * A command in flight cannot be recalled, so the reply is discarded rather than
+ * cancelled — but the viewer aborts a tile the moment it pans away from it, and
+ * making it wait for a fetch nobody wants would stall the ones it does.
+ */
+function withAbort<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return pending;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    pending.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
 }
 
 export async function onRenderProgress(handler: (progress: RenderProgress) => void): Promise<UnlistenFn> {

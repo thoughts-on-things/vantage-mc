@@ -12,6 +12,7 @@ Vantage is a fast, native renderer that turns Minecraft Java Edition worlds into
 | I want to… | Start here |
 | --- | --- |
 | Map worlds on my computer | [Download Vantage Desktop](https://vantage.beacon-mc.io/#desktop) |
+| Explore a multiplayer server's map | Vantage Desktop → **Servers** → the address your admin gave you ([details](./docs/server.md#connecting-from-vantage-desktop)) |
 | Render or host maps from the command line | [Download the latest CLI release](https://github.com/thoughts-on-things/vantage-mc/releases/latest) |
 | Add the viewer to a web app | [`@thoughts-on-things/vantage-mc`](https://www.npmjs.com/package/@thoughts-on-things/vantage-mc) · [package guide](./web/README.md) |
 | Run Vantage beside a multiplayer server | [Server overview](https://vantage.beacon-mc.io/server/) · [integration guide](./docs/server.md) |

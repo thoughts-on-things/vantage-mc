@@ -7,6 +7,7 @@ SHOT = Path(os.environ.get("VANTAGE_UI_SCREENSHOT", Path(tempfile.gettempdir()) 
 SETTINGS_SHOT = SHOT.with_name(f"{SHOT.stem}-settings{SHOT.suffix}")
 RESET_SHOT = SHOT.with_name(f"{SHOT.stem}-reset-confirmation{SHOT.suffix}")
 RENDERS_SHOT = SHOT.with_name(f"{SHOT.stem}-renders{SHOT.suffix}")
+SERVERS_SHOT = SHOT.with_name(f"{SHOT.stem}-servers{SHOT.suffix}")
 SHORTCUTS_SHOT = SHOT.with_name(f"{SHOT.stem}-shortcuts{SHOT.suffix}")
 
 with sync_playwright() as p:
@@ -42,7 +43,8 @@ with sync_playwright() as p:
     assert stale_card.count() == 1
     assert "played since" in stale_card.locator(".ready-badge.stale").inner_text().lower()
     stale_card.click()
-    assert page.get_by_role("button", name="Re-render").is_visible()
+    # `exact` matters: the card's own button is labelled "Re-render <world>".
+    assert page.get_by_role("button", name="Re-render", exact=True).is_visible()
     assert "played after its render" in page.locator(".detail-note.warn").inner_text()
 
     # Filters and sorting narrow the grid and are remembered.
@@ -95,6 +97,26 @@ with sync_playwright() as p:
     confirm_delete.get_by_role("button", name="Delete render").click()
     page.wait_for_function("document.querySelectorAll('.render-row').length === 1")
 
+    # Servers: the connect form probes an address and reports what answered,
+    # and a saved connection never displays its access token.
+    page.keyboard.press("Control+3")
+    page.get_by_role("heading", name="Servers", exact=True).wait_for()
+    page.wait_for_function("document.querySelectorAll('.server-row').length === 1")
+    assert "access token saved" in page.locator(".server-row").first.inner_text()
+    page.get_by_role("button", name="Add a server").click()
+    address = page.locator(".server-fields input[type=text]").first
+    address.fill("127.0.0.1:8268")
+    page.get_by_role("button", name="Test connection").click()
+    verdict = page.locator(".probe-verdict")
+    verdict.wait_for()
+    assert "protocol 1" in verdict.inner_text()
+    # A loopback address resolves to plaintext; anything else gets https.
+    assert "http://127.0.0.1:8268/" in verdict.inner_text()
+    page.screenshot(path=str(SERVERS_SHOT), full_page=True)
+    page.get_by_role("button", name="Add server").click()
+    page.wait_for_function("document.querySelectorAll('.server-row').length === 2")
+    assert page.locator("input[type=password]").count() == 0
+
     # The shortcut sheet opens from the keyboard and closes with Escape.
     page.keyboard.press("?")
     page.get_by_role("heading", name="Shortcuts").wait_for()
@@ -108,7 +130,8 @@ with sync_playwright() as p:
     # one action and lock every conflicting control before the native call ends.
     first_card = page.locator(".world-card:not(.skeleton)").first
     first_card.click()
-    play = page.get_by_role("button", name="Open Green Valley")
+    # An unrendered world's card button is labelled for what it will do.
+    play = page.get_by_role("button", name="Render Green Valley")
     play.evaluate("el => { el.click(); el.click(); }")
     first_card.locator(".card-busy").wait_for()
     assert "rendering" in first_card.locator(".card-busy").inner_text().lower()
@@ -153,5 +176,6 @@ with sync_playwright() as p:
     print(f"settings_screenshot={SETTINGS_SHOT}")
     print(f"reset_screenshot={RESET_SHOT}")
     print(f"renders_screenshot={RENDERS_SHOT}")
+    print(f"servers_screenshot={SERVERS_SHOT}")
     print(f"shortcuts_screenshot={SHORTCUTS_SHOT}")
     browser.close()

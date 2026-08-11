@@ -17,8 +17,14 @@ interface HotkeyOptions {
   openShortcuts: () => void;
 }
 
+const SCREEN_KEYS: Record<string, Screen | undefined> = {
+  '1': 'library',
+  '2': 'renders',
+  '3': 'servers',
+};
+
 /**
- * Library keyboard model: Ctrl/Cmd+K or / focuses search, Ctrl/Cmd+1/2 switch
+ * Library keyboard model: Ctrl/Cmd+K or / focuses search, Ctrl/Cmd+1/2/3 switch
  * screens, ? opens the shortcut sheet, arrows move the world selection, Enter
  * opens it, Escape closes an open sheet. Everything that touches a world is
  * suspended while an action holds the lock.
@@ -57,10 +63,11 @@ export function useLibraryHotkeys({
         searchRef.current?.select();
         return;
       }
-      if ((event.ctrlKey || event.metaKey) && (event.key === '1' || event.key === '2')) {
+      const screen = SCREEN_KEYS[event.key];
+      if (screen && (event.ctrlKey || event.metaKey)) {
         if (actionRef.current) return;
         event.preventDefault();
-        goTo(event.key === '1' ? 'library' : 'renders');
+        goTo(screen);
         return;
       }
       if (event.key === '?' && !typing) {

@@ -16,6 +16,17 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 base64 = "0.23"
 percent-encoding = "2.3"
+# Already in the tree via the updater plugin; declared here for the remote
+# world transport in `hosts.rs`. `rustls-no-provider` deliberately does not
+# name a crypto backend: rustls selects the one its features enable, which is
+# the `ring` build the updater already pulls in. Asking for `rustls` instead
+# adds a second provider (`aws-lc-rs`, and with it a CMake build dependency)
+# beside the one this app already ships.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls-no-provider",
+] }
+# The provider that pairs with it, already in the tree for the same reason.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }

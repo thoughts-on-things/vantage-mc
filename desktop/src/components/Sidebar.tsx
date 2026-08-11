@@ -1,11 +1,12 @@
-import { ArrowDownToLine, Keyboard, Layers3, LoaderCircle, Map, Settings } from 'lucide-react';
+import { ArrowDownToLine, Keyboard, Layers3, LoaderCircle, Map, Plug, Settings } from 'lucide-react';
 import type { RefObject } from 'react';
 import type { Screen } from '../hooks/useLibrary.js';
 import type { UpdatesController } from '../hooks/useUpdates.js';
 
-export function Sidebar({ worldCount, renderCount, screen, updates, onNavigate, settingsButtonRef, shortcutsButtonRef, onOpenSettings, onOpenShortcuts }: {
+export function Sidebar({ worldCount, renderCount, serverCount, screen, updates, onNavigate, settingsButtonRef, shortcutsButtonRef, onOpenSettings, onOpenShortcuts }: {
   worldCount: number;
   renderCount: number;
+  serverCount: number;
   screen: Screen;
   updates: UpdatesController;
   onNavigate: (screen: Screen) => void;
@@ -31,6 +32,13 @@ export function Sidebar({ worldCount, renderCount, screen, updates, onNavigate, 
           onClick={() => onNavigate('renders')}
         >
           <Layers3 size={17} /> Renders {renderCount > 0 && <span>{renderCount}</span>}
+        </button>
+        <button
+          className={`nav-item${screen === 'servers' ? ' active' : ''}`}
+          aria-current={screen === 'servers' ? 'page' : undefined}
+          onClick={() => onNavigate('servers')}
+        >
+          <Plug size={17} /> Servers {serverCount > 0 && <span>{serverCount}</span>}
         </button>
       </nav>
       <UpdateNotice updates={updates} />

@@ -1,6 +1,8 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import type { WorldSource } from 'vantage-mc/core';
 import {
   cancelRender,
+  connectHost,
   deleteRender,
   discoverWorlds,
   getSystemProfile,
@@ -8,10 +10,12 @@ import {
   onRenderProgress,
   openCachedWorld,
   openRender,
+  remoteWorldSource,
   renderWorld,
   resetWorldRender,
   resetWorldThumbnail,
   revealPath,
+  type HostEntry,
   type RenderEntry,
   type RenderProgress,
   type SystemProfile,
@@ -22,7 +26,7 @@ import { arrangeWorlds, loadLibraryView, saveLibraryView, type LibraryView } fro
 import { renderThreadCount } from '../lib/renderProfile.js';
 import type { DesktopSettings } from '../settings.js';
 
-export type Screen = 'library' | 'renders';
+export type Screen = 'library' | 'renders' | 'servers';
 
 /** Preloading the viewer chunk while the native side works hides the lazy-load cost. */
 export const loadViewer = () => import('../ViewerScreen.js');
@@ -30,11 +34,16 @@ export const loadViewer = () => import('../ViewerScreen.js');
 /** What the viewer screen is currently showing. */
 export interface ViewerTarget {
   world: WorldInfo;
-  manifestUrl: string;
+  /** Absent for a remote world, which streams through `source` instead. */
+  manifestUrl?: string;
   /** The dimension index, when the render has one (see RenderReady). */
   worldUrl?: string;
+  /** A world streamed from a `vantage server`, fetched by the native side. */
+  source?: WorldSource;
   /** False for renders opened without their save, which have no cache to write. */
   captureThumbnail: boolean;
+  /** Set when the world is remote, for the viewer's own chrome. */
+  remote?: { label: string; origin: string };
 }
 
 export interface LibraryController {
@@ -68,6 +77,7 @@ export interface LibraryController {
   regenerateThumbnail: (world: WorldInfo) => Promise<void>;
   resetRenderCache: (world: WorldInfo) => Promise<void>;
   openRenderEntry: (entry: RenderEntry) => Promise<void>;
+  openHost: (entry: HostEntry) => Promise<void>;
   removeRender: (entry: RenderEntry) => Promise<void>;
   reveal: (path: string) => Promise<void>;
   updateWorldThumbnail: (path: string, thumbnailUrl: string) => void;
@@ -318,6 +328,33 @@ export function useLibrary(settings: DesktopSettings): LibraryController {
     }
   }, [claimAction, openWorld, releaseAction, worlds]);
 
+  /**
+   * Opens a world streamed from a `vantage server`.
+   *
+   * Nothing is rendered or cached here: the host has already baked the tiles,
+   * and the viewer streams them the same way it streams a local render. The
+   * action lock is still claimed so a connection and a render can never fight
+   * over the viewer.
+   */
+  const openHost = useCallback(async (entry: HostEntry) => {
+    if (!claimAction(entry.id, 'opening')) return;
+    setError(null);
+    try {
+      const [connection] = await Promise.all([connectHost(entry.id), loadViewer()]);
+      const source = await remoteWorldSource(connection);
+      setViewer({
+        world: worldFromHost(entry, connection.origin),
+        source,
+        captureThumbnail: false,
+        remote: { label: connection.label, origin: connection.origin },
+      });
+    } catch (reason) {
+      setError(userFacingError(reason));
+    } finally {
+      releaseAction(entry.id);
+    }
+  }, [claimAction, releaseAction]);
+
   const removeRender = useCallback(async (entry: RenderEntry) => {
     if (!claimAction(entry.id, 'resetting')) return;
     setError(null);
@@ -386,11 +423,30 @@ export function useLibrary(settings: DesktopSettings): LibraryController {
     regenerateThumbnail,
     resetRenderCache,
     openRenderEntry,
+    openHost,
     removeRender,
     reveal,
     updateWorldThumbnail,
     closeViewer,
     actionRef,
+  };
+}
+
+/** A viewer-shaped world for a remote server. The path is a handle rather than
+ *  a location: nothing about a streamed world is on this disk. */
+function worldFromHost(entry: HostEntry, origin: string): WorldInfo {
+  return {
+    path: `vantage-server:${entry.id}`,
+    name: entry.label,
+    lastPlayedMs: 0,
+    dataVersion: 0,
+    source: origin,
+    iconPath: null,
+    iconUrl: null,
+    thumbnailUrl: null,
+    cached: false,
+    renderedAtMs: null,
+    renderSettings: null,
   };
 }
 

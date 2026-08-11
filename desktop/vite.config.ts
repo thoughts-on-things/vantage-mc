@@ -6,7 +6,11 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
+      // Both entry points resolve to the workspace sources rather than the
+      // published package: `web/dist` is a build artifact CI never produces,
+      // so anything reached through node_modules breaks there and nowhere else.
       'vantage-mc/react': fileURLToPath(new URL('../web/src/react/index.ts', import.meta.url)),
+      'vantage-mc/core': fileURLToPath(new URL('../web/src/core/index.ts', import.meta.url)),
     },
   },
   clearScreen: false,

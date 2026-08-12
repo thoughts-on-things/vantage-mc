@@ -184,10 +184,16 @@ const mockHosts: HostEntry[] = [
   },
 ];
 
+/** Addresses that are plainly not on the public internet, where the native
+ *  normalizer defaults to plaintext. Kept in step with `is_private_authority`
+ *  so the preview shows the scheme the real app would save. */
+const PRIVATE_AUTHORITY =
+  /^(localhost|.+\.localhost|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[?(::1|f[cd][0-9a-f]{2}:|fe[89ab][0-9a-f]:))/i;
+
 /** The browser preview's stand-in for the native address normalizer. */
 function mockEndpoint(raw: string): string {
   const trimmed = raw.trim();
-  const scheme = trimmed.includes('://') ? '' : /^(localhost|127\.|\[?::1)/.test(trimmed) ? 'http://' : 'https://';
+  const scheme = trimmed.includes('://') ? '' : PRIVATE_AUTHORITY.test(trimmed) ? 'http://' : 'https://';
   const url = new URL(`${scheme}${trimmed}`);
   url.search = '';
   url.hash = '';
@@ -395,7 +401,9 @@ async function hostFetch(id: string, input: string, init?: RequestInit): Promise
   );
 
   const header = parseFrameHeader(framed);
-  const body = framed.slice(4 + header.length);
+  // A view, not a copy: a tile is megabytes, and `Response` reads it straight
+  // out of the frame the native side already allocated.
+  const body = new Uint8Array(framed, 4 + header.length);
   const headers = new Headers();
   if (header.etag) headers.set('etag', header.etag);
   if (header.contentType) headers.set('content-type', header.contentType);

@@ -34,6 +34,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 /// Discovery and world-list documents are a few hundred bytes.
 const MAX_PROBE_BYTES: u64 = 256 * 1024;
+/// How much a body read will reserve up front on a server's say-so. Ordinary
+/// tiles land inside this, so the common fetch still costs one allocation.
+const READ_RESERVE: u64 = 8 * 1024 * 1024;
 
 /// One saved connection, as it lives on disk. The token is the only field the
 /// frontend never sees.
@@ -193,12 +196,19 @@ impl HostStore {
                         .iter_mut()
                         .find(|record| record.id == id)
                         .ok_or("That connection is no longer saved.")?;
+                    // An operator grants a bearer to *their* server. Carrying a
+                    // remembered one across an address edit would hand it to
+                    // whoever now answers — a typo, or a hostile address the
+                    // player was talked into pasting — without anything on
+                    // screen saying so. Same origin keeps it; anywhere else
+                    // has to be given its own.
+                    let moved = credential_scope(&record.endpoint) != credential_scope(&endpoint);
                     record.label = label;
                     record.endpoint = endpoint;
                     record.world_id = world_id;
                     // A blank token box means "leave it as it is"; forgetting
                     // is a separate, deliberate act.
-                    if input.forget_token {
+                    if input.forget_token || (moved && token.is_none()) {
                         record.token = None;
                     } else if token.is_some() {
                         record.token = token;
@@ -303,22 +313,12 @@ impl HostStore {
         let status = response.status().as_u16();
         let etag = header(&response, "etag");
         let content_type = header(&response, "content-type");
-        if let Some(length) = response.content_length() {
-            if length > MAX_BODY_BYTES {
-                return Err("The server offered an implausibly large artifact.".into());
-            }
-        }
+        // A 304 carries no body by definition; reading one would only wait on a
+        // server that sent something it should not have.
         let body = if status == 304 {
             Vec::new()
         } else {
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|error| transport_error(&error))?;
-            if bytes.len() as u64 > MAX_BODY_BYTES {
-                return Err("The server sent an implausibly large artifact.".into());
-            }
-            bytes.to_vec()
+            read_capped(response, MAX_BODY_BYTES).await?
         };
         Ok(frame(
             status,
@@ -570,6 +570,21 @@ pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
+/// Scheme, host and port of a normalized endpoint — what a bearer credential is
+/// actually scoped to. The path below it is the same operator's business; a
+/// different authority is a different server, and `http` for `https` is the
+/// same server over a wire that would carry the token in the clear.
+fn credential_scope(endpoint: &str) -> Option<(String, String, Option<u16>)> {
+    let url = reqwest::Url::parse(endpoint).ok()?;
+    Some((
+        url.scheme().to_string(),
+        url.host_str()?.to_ascii_lowercase(),
+        // The default port written out is the same server, so a token survives
+        // `https://h/` being retyped as `https://h:443/`.
+        url.port_or_known_default(),
+    ))
+}
+
 /// An unbracketed IPv6 literal, with no scheme, path or port to disambiguate it
 /// — `::1`, `fd00::4`. More than one colon rules out `host:port`.
 fn is_bare_ipv6(raw: &str) -> bool {
@@ -678,18 +693,31 @@ fn frame(status: u16, etag: Option<&str>, content_type: Option<&str>, body: &[u8
     framed
 }
 
-async fn read_capped(response: reqwest::Response, cap: u64) -> Result<Vec<u8>, String> {
-    if response.content_length().is_some_and(|length| length > cap) {
-        return Err("The server's answer was implausibly large.".into());
+/// Reads a response body, refusing to hold more than `cap` of it.
+///
+/// The cap is enforced *while* reading rather than after. A declared
+/// `Content-Length` is only a claim, and a chunked reply makes no claim at all,
+/// so buffering the whole body first would let a hostile or broken endpoint
+/// trade one request for as much of this process's memory as it cared to send.
+/// The reservation is deliberately smaller than the cap for the same reason: a
+/// server that announces 64 MiB and sends nothing should not cost 64 MiB.
+async fn read_capped(mut response: reqwest::Response, cap: u64) -> Result<Vec<u8>, String> {
+    let declared = response.content_length();
+    if declared.is_some_and(|length| length > cap) {
+        return Err("The server offered an implausibly large artifact.".into());
     }
-    let bytes = response
-        .bytes()
+    let mut body = Vec::with_capacity(declared.unwrap_or(0).min(READ_RESERVE) as usize);
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|error| transport_error(&error))?;
-    if bytes.len() as u64 > cap {
-        return Err("The server's answer was implausibly large.".into());
+        .map_err(|error| transport_error(&error))?
+    {
+        if body.len() as u64 + chunk.len() as u64 > cap {
+            return Err("The server sent an implausibly large artifact.".into());
+        }
+        body.extend_from_slice(&chunk);
     }
-    Ok(bytes.to_vec())
+    Ok(body)
 }
 
 fn header(response: &reqwest::Response, name: &str) -> Option<String> {
@@ -1029,6 +1057,72 @@ mod tests {
 
         reloaded.delete(&entry.id).unwrap();
         assert!(reloaded.list().unwrap().is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A bearer is granted by one operator for one server. "Keep the saved
+    /// token" must not mean "send it to whoever answers the address I just
+    /// retyped" — a typo, or an address someone talked the player into pasting.
+    #[test]
+    fn editing_the_address_leaves_a_remembered_token_behind() {
+        let root = scratch("rehome");
+        let store = HostStore::load(&root);
+        let add = |endpoint: &str, token: Option<&str>| HostInput {
+            id: None,
+            label: "Survival".into(),
+            endpoint: endpoint.into(),
+            world_id: None,
+            token: token.map(str::to_string),
+            forget_token: false,
+        };
+        let edit = |id: &str, endpoint: &str, token: Option<&str>| HostInput {
+            id: Some(id.to_string()),
+            ..add(endpoint, token)
+        };
+
+        let entry = store
+            .save(add("https://map.example.net/", Some("s3cret")))
+            .unwrap();
+
+        // Same origin, different path below it: the same operator's server.
+        store
+            .save(edit(&entry.id, "https://map.example.net/map/", None))
+            .unwrap();
+        assert_eq!(
+            store.find(&entry.id).unwrap().token.as_deref(),
+            Some("s3cret"),
+            "a path edit stays on the server the token was granted for"
+        );
+
+        // Another host entirely — the credential does not travel.
+        let moved = store
+            .save(edit(&entry.id, "https://map.evil.example/", None))
+            .unwrap();
+        assert!(!moved.has_token);
+        assert!(store.find(&entry.id).unwrap().token.is_none());
+
+        // Nor does it survive a downgrade to a wire that would carry it in
+        // the clear, even on the very same host.
+        let entry = store
+            .save(add("https://map.example.net/", Some("s3cret")))
+            .unwrap();
+        store
+            .save(edit(&entry.id, "http://map.example.net/", None))
+            .unwrap();
+        assert!(store.find(&entry.id).unwrap().token.is_none());
+
+        // Moving *and* supplying a new token is an ordinary re-point.
+        let entry = store
+            .save(add("https://a.example.net/", Some("first")))
+            .unwrap();
+        store
+            .save(edit(&entry.id, "https://b.example.net/", Some("second")))
+            .unwrap();
+        assert_eq!(
+            store.find(&entry.id).unwrap().token.as_deref(),
+            Some("second")
+        );
+
         std::fs::remove_dir_all(&root).unwrap();
     }
 

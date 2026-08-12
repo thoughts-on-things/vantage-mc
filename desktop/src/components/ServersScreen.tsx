@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   Compass,
   KeyRound,
@@ -188,7 +188,7 @@ function ServerForm({ hosts, entry, onDone }: {
     }
   }, [endpoint, hosts, token]);
 
-  const submit = useCallback(async (event: React.FormEvent) => {
+  const submit = useCallback(async (event: FormEvent) => {
     event.preventDefault();
     setSaving(true);
     try {

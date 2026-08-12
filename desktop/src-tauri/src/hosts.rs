@@ -363,6 +363,14 @@ impl HostStore {
 
         // Discovery is public and optional: a host that proxies the protocol
         // under its own routes may not carry it, and that is not a failure.
+        //
+        // Resolved against the endpoint, not the origin. The sidecar serves
+        // `/.well-known/vantage` and `/v1/...` as siblings at its own root, and
+        // an endpoint is by definition the base `v1/` sits under — so behind a
+        // proxy at `/map/` that strips the prefix, `…/map/.well-known/vantage`
+        // is what reaches it. Asking the origin root instead would ask the
+        // *host* about Vantage, which is a different question and, under that
+        // proxy, nothing at all.
         let discovery = self
             .read_json(&format!("{endpoint}.well-known/vantage"), None)
             .await?;

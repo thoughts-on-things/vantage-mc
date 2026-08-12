@@ -466,7 +466,8 @@ struct StoreOwned {
 /// an origin the user never named is the whole point of the settings below.
 /// A failure is carried to the fetch that needs it instead.
 fn build_client() -> Result<reqwest::Client, String> {
-    try_build_client().map_err(|error| format!("Vantage could not open a secure connection: {error}"))
+    try_build_client()
+        .map_err(|error| format!("Vantage could not open a secure connection: {error}"))
 }
 
 /// The one HTTP client this app talks to servers with.
@@ -604,7 +605,9 @@ fn is_private_authority(authority: &str) -> bool {
     // link-local (fe80::/10), alongside loopback.
     if let Ok(v6) = lower.parse::<std::net::Ipv6Addr>() {
         let leading = v6.octets()[0];
-        return v6.is_loopback() || leading & 0xfe == 0xfc || (leading == 0xfe && v6.octets()[1] & 0xc0 == 0x80);
+        return v6.is_loopback()
+            || leading & 0xfe == 0xfc
+            || (leading == 0xfe && v6.octets()[1] & 0xc0 == 0x80);
     }
     lower == "localhost"
         || lower.ends_with(".localhost")

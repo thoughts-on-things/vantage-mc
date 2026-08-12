@@ -170,9 +170,10 @@ function ServerForm({ hosts, entry, onDone }: {
   const addressRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => addressRef.current?.focus(), []);
-  // The address is what every probe result describes, so editing it retires
-  // the last one rather than leaving a stale verdict under a new address.
-  useEffect(() => setProbe(null), [endpoint]);
+  // A probe result describes one address answering for one credential, so
+  // editing either retires it: an "unauthorized" verdict left standing under a
+  // freshly typed token would be describing the previous one.
+  useEffect(() => setProbe(null), [endpoint, token]);
 
   const test = useCallback(async () => {
     setTesting(true);

@@ -394,11 +394,8 @@ async function hostFetch(id: string, input: string, init?: RequestInit): Promise
     signal,
   );
 
-  const headerLength = new DataView(framed).getUint32(0, true);
-  const header = JSON.parse(
-    new TextDecoder().decode(new Uint8Array(framed, 4, headerLength)),
-  ) as FramedHeader;
-  const body = framed.slice(4 + headerLength);
+  const header = parseFrameHeader(framed);
+  const body = framed.slice(4 + header.length);
   const headers = new Headers();
   if (header.etag) headers.set('etag', header.etag);
   if (header.contentType) headers.set('content-type', header.contentType);
@@ -406,6 +403,28 @@ async function hostFetch(id: string, input: string, init?: RequestInit): Promise
   // them throws, and the server sends none anyway.
   const nullBody = header.status === 204 || header.status === 304;
   return new Response(nullBody ? null : body, { status: header.status, headers });
+}
+
+/**
+ * Reads the frame's header, or fails saying so.
+ *
+ * A truncated buffer or a length that overruns it would otherwise surface deep
+ * in the viewer as a `RangeError` on a tile, which reads like a corrupt world
+ * rather than a broken reply. Every artifact goes through here, so the check is
+ * bounds-only — the header's own fields stay the native side's business.
+ */
+function parseFrameHeader(framed: ArrayBuffer): FramedHeader & { length: number } {
+  const corrupt = () => new Error('Vantage received a malformed reply from the connection.');
+  if (framed.byteLength < 4) throw corrupt();
+  const length = new DataView(framed).getUint32(0, true);
+  if (length > framed.byteLength - 4) throw corrupt();
+  try {
+    const header = JSON.parse(new TextDecoder().decode(new Uint8Array(framed, 4, length))) as FramedHeader;
+    if (!Number.isInteger(header?.status)) throw corrupt();
+    return { ...header, length };
+  } catch {
+    throw corrupt();
+  }
 }
 
 function headerValue(headers: HeadersInit | undefined, name: string): string | null {

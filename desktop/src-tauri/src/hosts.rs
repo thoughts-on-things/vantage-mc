@@ -146,7 +146,10 @@ pub struct HostConnection {
 pub struct HostStore {
     path: PathBuf,
     records: Mutex<Vec<HostRecord>>,
-    client: reqwest::Client,
+    /// The hardened client, or why there isn't one. A store that cannot build
+    /// one still loads — the saved list is readable without a network — and
+    /// every fetch reports the failure instead.
+    client: Result<reqwest::Client, String>,
 }
 
 impl HostStore {
@@ -420,7 +423,8 @@ impl HostStore {
         if_none_match: Option<&str>,
         timeout: Duration,
     ) -> Result<reqwest::Response, String> {
-        let mut request = self.client.get(url).timeout(timeout);
+        let client = self.client.as_ref().map_err(String::clone)?;
+        let mut request = client.get(url).timeout(timeout);
         if let Some(token) = token {
             request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
         }
@@ -457,8 +461,12 @@ struct StoreOwned {
     hosts: Vec<HostRecord>,
 }
 
-fn build_client() -> reqwest::Client {
-    try_build_client().unwrap_or_default()
+/// Never falls back to `reqwest`'s default client: that one follows redirects,
+/// and refusing a redirect before an `Authorization` header can be replayed at
+/// an origin the user never named is the whole point of the settings below.
+/// A failure is carried to the fetch that needs it instead.
+fn build_client() -> Result<reqwest::Client, String> {
+    try_build_client().map_err(|error| format!("Vantage could not open a secure connection: {error}"))
 }
 
 /// The one HTTP client this app talks to servers with.
@@ -525,12 +533,20 @@ pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Err("Enter the server's map address.".into());
     }
-    let with_scheme = if trimmed.contains("://") {
-        trimmed.to_string()
-    } else if is_private_authority(trimmed) {
-        format!("http://{trimmed}")
+    // A URL needs an IPv6 literal bracketed, but nobody types `[::1]` when the
+    // thing they are reading off the sidecar's own log is `::1`. Bracket it here
+    // rather than rejecting a correct address on a technicality.
+    let authority = if is_bare_ipv6(trimmed) {
+        format!("[{trimmed}]")
     } else {
-        format!("https://{trimmed}")
+        trimmed.to_string()
+    };
+    let with_scheme = if authority.contains("://") {
+        authority
+    } else if is_private_authority(&authority) {
+        format!("http://{authority}")
+    } else {
+        format!("https://{authority}")
     };
 
     let mut url = reqwest::Url::parse(&with_scheme)
@@ -553,6 +569,16 @@ pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
+/// An unbracketed IPv6 literal, with no scheme, path or port to disambiguate it
+/// — `::1`, `fd00::4`. More than one colon rules out `host:port`.
+fn is_bare_ipv6(raw: &str) -> bool {
+    !raw.contains('[')
+        && !raw.contains("://")
+        && !raw.contains('/')
+        && raw.matches(':').count() > 1
+        && raw.parse::<std::net::Ipv6Addr>().is_ok()
+}
+
 /// True for addresses that are plainly not on the public internet, where a
 /// plaintext default is the useful one.
 fn is_private_authority(authority: &str) -> bool {
@@ -573,9 +599,15 @@ fn is_private_authority(authority: &str) -> bool {
         }
     };
     let lower = host.to_ascii_lowercase();
+    // IPv6 has its own private ranges, and they are the ones a home server or a
+    // container network actually hands out: unique-local (fc00::/7) and
+    // link-local (fe80::/10), alongside loopback.
+    if let Ok(v6) = lower.parse::<std::net::Ipv6Addr>() {
+        let leading = v6.octets()[0];
+        return v6.is_loopback() || leading & 0xfe == 0xfc || (leading == 0xfe && v6.octets()[1] & 0xc0 == 0x80);
+    }
     lower == "localhost"
         || lower.ends_with(".localhost")
-        || lower == "::1"
         || lower.starts_with("127.")
         || lower.starts_with("10.")
         || lower.starts_with("192.168.")
@@ -608,8 +640,17 @@ fn confine(url: &str, prefix: &str) -> Result<String, String> {
     if !same_origin || !parsed.path().starts_with(base.path()) {
         return Err("Refusing to fetch outside the connected world.".into());
     }
-    if parsed.path().split('/').any(|segment| segment == "..") {
-        return Err("Refusing to fetch outside the connected world.".into());
+    // `Url` resolves literal dot segments but leaves `%2e%2e` encoded, and a
+    // host that decodes before it routes would walk right out of the prefix the
+    // check above just proved. Every protocol artifact name is unreserved, so a
+    // segment that means anything else once decoded is refused outright.
+    for segment in parsed.path().split('/') {
+        let decoded = percent_encoding::percent_decode_str(segment)
+            .decode_utf8()
+            .map_err(|_| "Refusing to fetch outside the connected world.".to_string())?;
+        if decoded == ".." || decoded == "." || decoded.contains('/') || decoded.contains('\\') {
+            return Err("Refusing to fetch outside the connected world.".into());
+        }
     }
     Ok(parsed.to_string())
 }
@@ -831,6 +872,76 @@ mod tests {
             prefix
         )
         .is_ok());
+    }
+
+    /// `Url` normalizes the dot segments it can *see*. A host that decodes
+    /// before it routes sees more of them than the parser did, so the encoded
+    /// spellings have to be refused on their own account.
+    #[test]
+    fn percent_encoded_traversal_cannot_climb_out_either() {
+        let prefix = "https://map.example.net/v1/worlds/default/";
+        for refused in [
+            "https://map.example.net/v1/worlds/default/%2e%2e/other/manifest.json",
+            "https://map.example.net/v1/worlds/default/%2E%2E/%2E%2E/admin",
+            "https://map.example.net/v1/worlds/default/tiles/%2e%2e/%2e%2e/other/x.vtile",
+            // A segment that decodes to a separator would re-partition the path
+            // downstream of every check above.
+            "https://map.example.net/v1/worlds/default/%2ftiles/x.vtile",
+            "https://map.example.net/v1/worlds/default/%5c..%5cadmin",
+        ] {
+            assert!(
+                confine(refused, prefix).is_err(),
+                "{refused} should be refused"
+            );
+        }
+        // An ordinary encoded character is not traversal and still resolves.
+        assert!(confine(
+            "https://map.example.net/v1/worlds/default/tiles/t.0.0%2Evtile",
+            prefix
+        )
+        .is_ok());
+    }
+
+    /// Nobody brackets a loopback IPv6 address they just read off a log line.
+    #[test]
+    fn a_bare_ipv6_address_is_bracketed_rather_than_rejected() {
+        assert_eq!(normalize_endpoint("::1").unwrap(), "http://[::1]/");
+        // Unique-local, like 10.0.0.0/8: private, so plaintext is the default.
+        assert_eq!(normalize_endpoint("fd00::4").unwrap(), "http://[fd00::4]/");
+        // A global IPv6 address is on the public internet and gets https.
+        assert_eq!(
+            normalize_endpoint("2606:4700::1111").unwrap(),
+            "https://[2606:4700::1111]/"
+        );
+        // Already bracketed, with a port, keeps working.
+        assert_eq!(
+            normalize_endpoint("[::1]:8268").unwrap(),
+            "http://[::1]:8268/"
+        );
+        // A host:port is still a host and a port, not an IPv6 literal.
+        assert_eq!(
+            normalize_endpoint("map.example.net:8268").unwrap(),
+            "https://map.example.net:8268/"
+        );
+    }
+
+    /// The connections file is rewritten on every edit, so atomic replacement
+    /// has to work over a file that is already there — the case `rename` is
+    /// documented to handle on Windows (`MOVEFILE_REPLACE_EXISTING`) and the
+    /// one that would silently strand every edit if it ever stopped.
+    #[test]
+    fn saving_replaces_an_existing_connections_file() {
+        let root = scratch("replace");
+        let path = root.join(STORE_FILE);
+        write_private(&path, b"{\"version\":1,\"hosts\":[]}").unwrap();
+        write_private(&path, b"{\"version\":1,\"hosts\":[\"second\"]}").unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"{\"version\":1,\"hosts\":[\"second\"]}"
+        );
+        // The scratch file must not survive as litter beside the real one.
+        assert!(!path.with_extension("json.tmp").exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

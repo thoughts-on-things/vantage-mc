@@ -171,14 +171,20 @@ function ServerForm({ hosts, entry, onDone }: {
 
   useEffect(() => addressRef.current?.focus(), []);
   // A probe result describes one address answering for one credential, so
-  // editing either retires it: an "unauthorized" verdict left standing under a
-  // freshly typed token would be describing the previous one.
-  useEffect(() => setProbe(null), [endpoint, token]);
+  // changing either retires it: an "unauthorized" verdict left standing under a
+  // freshly typed token would be describing the previous one. Forgetting the
+  // saved token changes which credential is offered too, so it counts.
+  useEffect(() => setProbe(null), [endpoint, token, forgetToken]);
 
   const test = useCallback(async () => {
     setTesting(true);
     try {
-      const result = await hosts.probe(endpoint, token || undefined);
+      // With the token box blank on an edit, the saved credential is what a
+      // connect would actually use — so it is what a test has to try, or the
+      // verdict describes a connection nobody was going to make. Naming the
+      // connection lends it for this exchange without the page ever seeing it.
+      const lendSaved = entry?.hasToken && !forgetToken && !token;
+      const result = await hosts.probe(endpoint, token || undefined, lendSaved ? entry.id : undefined);
       setProbe(result);
       // A server that named exactly one world has answered the question the
       // world field was going to ask.
@@ -186,7 +192,7 @@ function ServerForm({ hosts, entry, onDone }: {
     } finally {
       setTesting(false);
     }
-  }, [endpoint, hosts, token]);
+  }, [endpoint, entry, forgetToken, hosts, token]);
 
   const submit = useCallback(async (event: FormEvent) => {
     event.preventDefault();

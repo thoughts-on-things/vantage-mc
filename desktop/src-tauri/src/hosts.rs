@@ -330,8 +330,28 @@ impl HostStore {
 
     /// Asks an endpoint what it is, before it is saved. Used by the connect
     /// form, so it takes a raw address and an optional token rather than an id.
-    pub async fn probe(&self, endpoint: &str, token: Option<&str>) -> Result<HostProbe, String> {
+    /// `id` names a saved connection whose remembered token should stand in
+    /// when the form offers none — otherwise testing an existing connection
+    /// would report "needs a token" about a credential it already has, since
+    /// the box is deliberately blank. The stored one is only lent to an address
+    /// in its own scope: a probe is a request like any other, and re-pointing
+    /// the form at another host must not be a way to make it carry the token
+    /// there.
+    pub async fn probe(
+        &self,
+        endpoint: &str,
+        id: Option<&str>,
+        token: Option<&str>,
+    ) -> Result<HostProbe, String> {
         let endpoint = normalize_endpoint(endpoint)?;
+        let remembered = match token {
+            Some(_) => None,
+            None => id
+                .and_then(|id| self.find(id).ok())
+                .filter(|record| credential_scope(&record.endpoint) == credential_scope(&endpoint))
+                .and_then(|record| record.token),
+        };
+        let token = token.or(remembered.as_deref());
         let mut probe = HostProbe {
             endpoint: endpoint.clone(),
             protocol: None,
@@ -1310,13 +1330,13 @@ mod tests {
         tauri::async_runtime::block_on(async {
             // A probe without the token still discovers the server, and says
             // plainly that the credential was refused.
-            let anonymous = store.probe(&endpoint, None).await.unwrap();
+            let anonymous = store.probe(&endpoint, None, None).await.unwrap();
             assert_eq!(anonymous.protocol, Some(1));
             assert_eq!(anonymous.auth.as_deref(), Some("bearer"));
             assert!(anonymous.unauthorized);
             assert!(anonymous.worlds.is_empty());
 
-            let probe = store.probe(&endpoint, Some("s3cret")).await.unwrap();
+            let probe = store.probe(&endpoint, None, Some("s3cret")).await.unwrap();
             assert!(!probe.unauthorized);
             assert_eq!(probe.worlds, vec!["default".to_string()]);
             // A bare loopback address resolved to plaintext, as typed.
@@ -1332,6 +1352,30 @@ mod tests {
                     forget_token: false,
                 })
                 .unwrap();
+
+            // Testing a saved connection with a blank token box: the remembered
+            // credential stands in, so the verdict describes the connection the
+            // player would actually make.
+            let remembered = store.probe(&endpoint, Some(&entry.id), None).await.unwrap();
+            assert!(
+                !remembered.unauthorized,
+                "a saved token should answer for its own address"
+            );
+            assert_eq!(remembered.worlds, vec!["default".to_string()]);
+
+            // ...but only for its own address. Re-pointing the form elsewhere
+            // must not be a way to make the probe carry it there. The stub is
+            // reachable both ways, so an unauthorized verdict here is proof the
+            // token was withheld rather than proof the host was unreachable.
+            let elsewhere = store
+                .probe(&format!("localhost:{port}"), Some(&entry.id), None)
+                .await
+                .unwrap();
+            assert_eq!(elsewhere.protocol, Some(1), "the stub answered");
+            assert!(
+                elsewhere.unauthorized,
+                "a remembered token must not follow the form to another host"
+            );
 
             let connection = store.connect(&entry.id).await.unwrap();
             assert_eq!(

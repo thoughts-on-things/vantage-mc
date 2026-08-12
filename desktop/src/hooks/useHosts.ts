@@ -20,7 +20,7 @@ export interface HostsController {
   save: (input: HostInput) => Promise<HostEntry | null>;
   remove: (id: string) => Promise<void>;
   /** Resolves to null when the address could not be reached at all. */
-  probe: (endpoint: string, token?: string) => Promise<HostProbe | null>;
+  probe: (endpoint: string, token?: string, id?: string) => Promise<HostProbe | null>;
 }
 
 /**
@@ -80,10 +80,10 @@ export function useHosts(): HostsController {
     }
   }, []);
 
-  const probe = useCallback(async (endpoint: string, token?: string): Promise<HostProbe | null> => {
+  const probe = useCallback(async (endpoint: string, token?: string, id?: string): Promise<HostProbe | null> => {
     setError(null);
     try {
-      return await probeHost(endpoint, token);
+      return await probeHost(endpoint, token, id);
     } catch (reason) {
       setError(userFacingError(reason));
       return null;

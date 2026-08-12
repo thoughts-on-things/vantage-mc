@@ -308,7 +308,9 @@ export async function getSystemProfile(): Promise<SystemProfile> {
 }
 
 export async function listHosts(): Promise<HostEntry[]> {
-  if (!inTauri()) return mockHosts;
+  // A copy, so the preview's mock edits cannot reach into React state that has
+  // already been handed this array.
+  if (!inTauri()) return mockHosts.map((entry) => ({ ...entry }));
   return invoke<HostEntry[]>('list_hosts');
 }
 
@@ -339,19 +341,22 @@ export async function deleteHost(id: string): Promise<void> {
   return invoke<void>('delete_host', { id });
 }
 
-export async function probeHost(endpoint: string, token?: string): Promise<HostProbe> {
+/** `id` lends a saved connection's remembered token to this one exchange, for
+ *  the edit form's blank token box. The native side only honours it while the
+ *  address stays in that token's own scope. */
+export async function probeHost(endpoint: string, token?: string, id?: string): Promise<HostProbe> {
   if (!inTauri()) {
     await new Promise((resolve) => window.setTimeout(resolve, 400));
     return {
       endpoint: mockEndpoint(endpoint),
       protocol: 1,
-      auth: token ? 'bearer' : 'proxy',
+      auth: token || id ? 'bearer' : 'proxy',
       worlds: ['default'],
       unauthorized: false,
       note: null,
     };
   }
-  return invoke<HostProbe>('probe_host', { endpoint, token: token || null });
+  return invoke<HostProbe>('probe_host', { endpoint, token: token || null, id: id || null });
 }
 
 export async function connectHost(id: string): Promise<HostConnection> {
@@ -407,9 +412,10 @@ async function hostFetch(id: string, input: string, init?: RequestInit): Promise
   const headers = new Headers();
   if (header.etag) headers.set('etag', header.etag);
   if (header.contentType) headers.set('content-type', header.contentType);
-  // 204/304 are null-body statuses: handing `Response` any body for one of
-  // them throws, and the server sends none anyway.
-  const nullBody = header.status === 204 || header.status === 304;
+  // 204/205/304 are the null-body statuses: handing `Response` any body for
+  // one of them throws. A vantage server sends none, but this transport points
+  // wherever the player typed, so a wrong answer must not take the stream down.
+  const nullBody = header.status === 204 || header.status === 205 || header.status === 304;
   return new Response(nullBody ? null : body, { status: header.status, headers });
 }
 

@@ -544,9 +544,13 @@ fn delete_host(state: tauri::State<'_, AppState>, id: String) -> Result<(), Stri
 async fn probe_host(
     state: tauri::State<'_, AppState>,
     endpoint: String,
+    id: Option<String>,
     token: Option<String>,
 ) -> Result<HostProbe, String> {
-    state.hosts.probe(&endpoint, token.as_deref()).await
+    state
+        .hosts
+        .probe(&endpoint, id.as_deref(), token.as_deref())
+        .await
 }
 
 /// Confirms a saved connection can still read its world, and returns the

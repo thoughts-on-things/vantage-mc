@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.13.0...v0.14.0) (2026-08-13)
+
+
+### Features
+
+* **desktop:** connect to a vantage server and stream its map ([#79](https://github.com/thoughts-on-things/vantage-mc/issues/79)) ([cd05371](https://github.com/thoughts-on-things/vantage-mc/commit/cd05371e9095db451728e1394947a21e027b39d2))
+
 ## [0.13.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.12.0...v0.13.0) (2026-08-07)
 
 

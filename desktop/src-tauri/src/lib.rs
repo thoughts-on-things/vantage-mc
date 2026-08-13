@@ -1,10 +1,12 @@
 mod assets;
+mod hosts;
 mod native;
 mod renders;
 mod sidecar;
 mod window_state;
 
 use assets::{AssetServer, RenderReady};
+use hosts::{HostConnection, HostEntry, HostInput, HostProbe, HostStore};
 use renders::{CacheSignature, RenderEntry, RenderRecord};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -142,6 +144,7 @@ struct SavedImage {
 
 struct AppState {
     assets: AssetServer,
+    hosts: HostStore,
     rendering: AtomicBool,
     cancel_requested: AtomicBool,
     render_child: Mutex<Option<CommandChild>>,
@@ -518,6 +521,65 @@ fn open_render(
     state.assets.open(target)
 }
 
+/// The saved `vantage server` connections. Access tokens stay in this process:
+/// an entry only reports *whether* one is remembered.
+#[tauri::command]
+fn list_hosts(state: tauri::State<'_, AppState>) -> Result<Vec<HostEntry>, String> {
+    state.hosts.list()
+}
+
+#[tauri::command]
+fn save_host(state: tauri::State<'_, AppState>, input: HostInput) -> Result<HostEntry, String> {
+    state.hosts.save(input)
+}
+
+#[tauri::command]
+fn delete_host(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    state.hosts.delete(&id)
+}
+
+/// Asks an address what it is, before it is saved — the connect form's "test"
+/// button. The token is offered for this one exchange and not retained.
+#[tauri::command]
+async fn probe_host(
+    state: tauri::State<'_, AppState>,
+    endpoint: String,
+    id: Option<String>,
+    token: Option<String>,
+) -> Result<HostProbe, String> {
+    state
+        .hosts
+        .probe(&endpoint, id.as_deref(), token.as_deref())
+        .await
+}
+
+/// Confirms a saved connection can still read its world, and returns the
+/// manifest URL the viewer streams from.
+#[tauri::command]
+async fn connect_host(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<HostConnection, String> {
+    state.hosts.connect(&id).await
+}
+
+/// One protocol artifact for an open connection. The viewer calls this for the
+/// manifest, the texture array, and every tile; the reply is the framed
+/// `[length][header][body]` document `hosts::frame` writes.
+#[tauri::command]
+async fn host_fetch(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    url: String,
+    if_none_match: Option<String>,
+) -> Result<tauri::ipc::Response, String> {
+    let framed = state
+        .hosts
+        .fetch(&id, &url, if_none_match.as_deref())
+        .await?;
+    Ok(tauri::ipc::Response::new(framed))
+}
+
 /// Shows a world save, a generated render, or an exported image in the OS file
 /// manager. Anything else is refused: this is the one command that hands a
 /// frontend-supplied path to the shell.
@@ -593,14 +655,18 @@ fn exports_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .join("Vantage"))
 }
 
-/// `<local data>/Vantage/renders`, the only directory this app generates into.
-fn renders_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+/// `<local data>/Vantage`, everything this app keeps on disk.
+fn vantage_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app
         .path()
         .local_data_dir()
         .map_err(|error| error.to_string())?
-        .join("Vantage")
-        .join("renders"))
+        .join("Vantage"))
+}
+
+/// `<local data>/Vantage/renders`, the only directory this app generates into.
+fn renders_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(vantage_root(app)?.join("renders"))
 }
 
 /// Stable per-world cache directory: `<local data>/Vantage/renders/<fnv1a>`.
@@ -623,6 +689,7 @@ pub fn run() {
             });
             app.manage(AppState {
                 assets: AssetServer::start(library).map_err(std::io::Error::other)?,
+                hosts: HostStore::load(&vantage_root(app.handle()).map_err(std::io::Error::other)?),
                 rendering: AtomicBool::new(false),
                 cancel_requested: AtomicBool::new(false),
                 render_child: Mutex::new(None),
@@ -672,6 +739,12 @@ pub fn run() {
             list_renders,
             delete_render,
             open_render,
+            list_hosts,
+            save_host,
+            delete_host,
+            probe_host,
+            connect_host,
+            host_fetch,
             reveal_path,
             save_map_image
         ])

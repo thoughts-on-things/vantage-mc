@@ -322,6 +322,43 @@ here, and only here: "where every player who ever logged in was last standing"
 is a different disclosure from "who is online right now", and a public server
 map should choose it deliberately. See [Live players](./players.md).
 
+## Connecting from Vantage Desktop
+
+The desktop app is a first-class client of this protocol. Its **Servers** screen
+takes the address a server admin hands out, tests it, and streams the map — no
+save file, no local render, and nothing written to the player's disk but the
+connection itself.
+
+An address is whatever the admin would say out loud. `map.example.net` and
+`play.example.net:8268/map` resolve to `https`; a loopback or private-range
+address (`127.0.0.1:8268`, `192.168.1.9:8268`, `10.x`, `172.16–31.x`) resolves
+to `http`, because this sidecar terminates no TLS of its own and a LAN address
+is plaintext by design. **Test connection** reads the public
+`/.well-known/vantage` document and then `/v1/worlds` with whatever credential
+was supplied, so the form can report the protocol version, the authentication
+mode, and the worlds that credential can actually read before anything is
+saved.
+
+Two things about the transport are worth knowing when you operate a server for
+desktop players:
+
+- **No `--allow-origin` is required.** Every remote byte is fetched by the
+  app's native process, not by its web view, so CORS never enters into it.
+  That flag remains for browsers only.
+- **The bearer never reaches page script.** It is stored in
+  `<local data>/Vantage/hosts.json` (owner-only where the platform supports
+  it), attached in the native process, and the connection list the UI renders
+  reports only *whether* a token is remembered. Redirects are refused rather
+  than followed, so a `3xx` cannot replay the credential at an origin the
+  player never named, and every artifact URL is confined to the connected
+  world's own `/v1/worlds/<id>/` prefix before the header is attached.
+
+The player-facing boundaries follow protocol v1's. One connection streams the
+one dimension that sidecar was started with, so a server offering the nether
+runs a second sidecar and appears as a second entry; and the map covers what
+has been baked, which is why `--prebake on` matters more for desktop players
+than for a host that renders on a schedule.
+
 ## Host integration
 
 A server host that already authenticates its players has the right trust

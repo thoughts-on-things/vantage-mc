@@ -1,10 +1,12 @@
 import { useCallback, useRef, useState } from 'react';
+import type { HostsController } from '../hooks/useHosts.js';
 import type { LibraryController } from '../hooks/useLibrary.js';
 import { useLibraryHotkeys } from '../hooks/useLibraryHotkeys.js';
 import type { UpdatesController } from '../hooks/useUpdates.js';
 import type { DesktopSettings } from '../settings.js';
 import { LibraryScreen } from './LibraryScreen.js';
 import { RendersScreen } from './RendersScreen.js';
+import { ServersScreen } from './ServersScreen.js';
 import { SettingsSheet } from './SettingsSheet.js';
 import { ShortcutsSheet } from './ShortcutsSheet.js';
 import { Sidebar } from './Sidebar.js';
@@ -12,8 +14,9 @@ import { Sidebar } from './Sidebar.js';
 type Sheet = 'settings' | 'shortcuts' | null;
 
 /** Chrome shared by every non-viewer screen: navigation, sheets, hotkeys. */
-export function AppShell({ library, settings, updates, onSettingsChange }: {
+export function AppShell({ library, hosts, settings, updates, onSettingsChange }: {
   library: LibraryController;
+  hosts: HostsController;
   settings: DesktopSettings;
   updates: UpdatesController;
   onSettingsChange: (next: DesktopSettings) => void;
@@ -62,6 +65,7 @@ export function AppShell({ library, settings, updates, onSettingsChange }: {
       <Sidebar
         worldCount={library.worlds.length}
         renderCount={library.renders.length}
+        serverCount={hosts.hosts.length}
         screen={library.screen}
         updates={updates}
         onNavigate={library.goTo}
@@ -73,6 +77,8 @@ export function AppShell({ library, settings, updates, onSettingsChange }: {
 
       {library.screen === 'renders' ? (
         <RendersScreen library={library} settings={settings} />
+      ) : library.screen === 'servers' ? (
+        <ServersScreen hosts={hosts} library={library} />
       ) : (
         <LibraryScreen library={library} settings={settings} searchRef={searchRef} />
       )}

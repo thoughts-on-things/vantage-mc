@@ -34,15 +34,17 @@ export default function ViewerScreen({ target, settings, system, onThumbnail, on
   onThumbnail: (dataUrl: string) => void;
   onBack: () => void;
 }) {
-  const { world, manifestUrl, worldUrl, captureThumbnail } = target;
+  const { world, manifestUrl, worldUrl, source, captureThumbnail, remote } = target;
   const profile = useMemo(() => selectRenderProfile(settings.performanceMode, system.logicalCores), [settings.performanceMode, system.logicalCores]);
 
   return (
     <div className="viewer-screen">
       <VantageViewer
-        // The dimension index when the render has one (the nether and the end
-        // travel with it); older renders open straight from their manifest.
-        world={worldUrl ?? manifestUrl}
+        // A remote world arrives as a source object, because its bytes are
+        // fetched by the native side rather than by this page. A local render
+        // opens from its dimension index when it has one (the nether and the
+        // end travel with it), and older renders straight from their manifest.
+        world={source ?? worldUrl ?? manifestUrl}
         view="orbit"
         urlState={false}
         antialias
@@ -59,7 +61,7 @@ export default function ViewerScreen({ target, settings, system, onThumbnail, on
             them; the desktop only occupies the top-left corner, and the
             dimension switch rides in the toolbar rather than floating over the
             map, where it would collide with it. */}
-        <ViewerChrome world={world} profile={profile} onBack={onBack} />
+        <ViewerChrome world={world} profile={profile} remote={remote} onBack={onBack} />
         {captureThumbnail && (
           <ThumbnailCapture worldPath={world.path} hasThumbnail={Boolean(world.thumbnailUrl)} onThumbnail={onThumbnail} />
         )}
@@ -74,9 +76,10 @@ export default function ViewerScreen({ target, settings, system, onThumbnail, on
   );
 }
 
-function ViewerChrome({ world, profile, onBack }: {
+function ViewerChrome({ world, profile, remote, onBack }: {
   world: WorldInfo;
   profile: RenderProfile;
+  remote: ViewerTarget['remote'];
   onBack: () => void;
 }) {
   const { viewer, status, info, dimensions } = useVantage();
@@ -146,7 +149,13 @@ function ViewerChrome({ world, profile, onBack }: {
         <span className="toolbar-rule" />
         <div className="toolbar-world">
           <strong>{world.name}</strong>
-          <small>{world.source === 'render' ? 'saved local render' : `${sourceLabel(world.source)} · local render`}</small>
+          <small>
+            {remote
+              ? `${remote.origin} · streaming`
+              : world.source === 'render'
+                ? 'saved local render'
+                : `${sourceLabel(world.source)} · local render`}
+          </small>
         </div>
         {/* Renders that carry the nether and the end switch from here; a
             single-dimension render renders nothing, rule included. */}

@@ -18,7 +18,8 @@ React + Vite UI
     │ Tauri commands / progress events
 Rust host
     ├─ bundled `vantage-core` Zig sidecar
-    └─ loopback-only static render endpoint
+    ├─ loopback-only static render endpoint
+    └─ credentialed transport for remote `vantage server` worlds
 Zig core
     ├─ launcher-aware world discovery
     ├─ NBT metadata
@@ -39,8 +40,12 @@ Frontend layout:
 - `src/hooks/useLibrary.ts` — all library state and world actions. One world
   action runs at a time; the lock lives in a ref so same-tick double clicks
   cannot claim it twice.
+- `src/hooks/useHosts.ts` — the saved `vantage server` connections. Separate
+  from the library: a server is not a save on this PC and has no render to
+  manage. The one thing they share is the viewer, which the library owns.
 - `src/components/` — presentational pieces (app shell, library screen, world
-  cards, detail panel, renders manager, settings and shortcut sheets).
+  cards, detail panel, renders manager, servers screen, settings and shortcut
+  sheets).
 - `src/lib/` — pure helpers: formatting, the render-state/sort/filter rules for
   the library, and the performance-mode profiles shared by the Zig bake and the
   GPU viewer.
@@ -49,7 +54,9 @@ Frontend layout:
 
 Rust host layout: `lib.rs` holds the Tauri commands and state, `assets.rs` the
 loopback tile endpoint (responses stream from disk over keep-alive connections
-and carry ETags), `renders.rs` the bookkeeping for generated renders,
+and carry ETags), `hosts.rs` the saved server connections and the credentialed
+transport a remote world streams through, `renders.rs` the bookkeeping for
+generated renders,
 `native.rs` the small OS integrations (PNG payloads, image exports, revealing a
 folder), `window_state.rs` the remembered window box, and `sidecar.rs` the
 line-delimited protocol parsing.
@@ -113,6 +120,39 @@ and can still be opened — the map is self-contained — or deleted to reclaim 
 space. Deletion resolves the hashed render id inside Vantage's own renders
 directory; ids are the only handle the frontend can pass back, and any other
 shape is refused before it reaches the filesystem.
+
+## Servers
+
+The **Servers** screen streams a map from a machine running `vantage server`
+instead of rendering one here: the host has already baked the tiles, so there
+is nothing to render, nothing to cache, and nothing to delete but the
+connection. Add the address an admin gave you, optionally an access token, and
+**Test connection** reports the protocol version, authentication mode, and
+readable worlds before anything is saved. A plain host resolves to `https`; a
+loopback or private-range address resolves to `http`, because the sidecar
+terminates no TLS of its own.
+
+Remote bytes are fetched by the Rust host, never by the web view, for two
+reasons. The window's CSP admits only IPC and loopback, so page script could
+not reach a remote origin anyway — and it means the bearer credential stays in
+this process. It is stored in `<local data>/Vantage/hosts.json` (owner-only
+where the platform supports it), attached natively, and the connection list the
+UI renders reports only *whether* a token is remembered. `hosts.rs` refuses to
+follow redirects, so a `3xx` cannot replay the credential at an origin the
+player never named, and confines every artifact URL to the connected world's
+`/v1/worlds/<id>/` prefix before attaching the header — the client library
+confines manifest-owned paths too, but this is the check on the side of the
+boundary that actually holds the secret.
+
+A command answers with one value and a tile is megabytes of binary, so
+`host_fetch` returns `[u32 header length][header JSON][body]`: the status and
+validator ride in front of the raw bytes, and `bridge.ts` turns the pair back
+into a real `Response` for the viewer. Serializing tile bytes as JSON numbers
+would cost more than the fetch itself.
+
+Because the fetch is native, a server needs no `--allow-origin` for desktop
+players; that flag is for browsers. Protocol v1 serves one dimension per
+sidecar, so a server offering the nether appears as a second connection.
 
 ## Native integration
 

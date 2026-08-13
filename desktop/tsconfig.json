@@ -14,7 +14,8 @@
     "types": ["vite/client"],
     "baseUrl": ".",
     "paths": {
-      "vantage-mc/react": ["../web/src/react/index.ts"]
+      "vantage-mc/react": ["../web/src/react/index.ts"],
+      "vantage-mc/core": ["../web/src/core/index.ts"]
     },
     "resolveJsonModule": true,
     "isolatedModules": true,

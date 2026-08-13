@@ -17,6 +17,7 @@ const GROUPS: { title: string; rows: [string[], string][] }[] = [
     rows: [
       [['Ctrl/Cmd 1'], 'Worlds'],
       [['Ctrl/Cmd 2'], 'Renders'],
+      [['Ctrl/Cmd 3'], 'Servers'],
       [['?'], 'This shortcut list'],
       [['Esc'], 'Close a panel or leave the viewer'],
     ],

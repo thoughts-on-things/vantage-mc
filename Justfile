@@ -163,6 +163,15 @@ site: site-install site-serve
 extract jar='': build
     {{bin}} extract {{jar}}
 
+# Fail if a Minecraft client adds a zero-element block-model family that is
+# neither rendered procedurally nor explicitly classified as geometry-free.
+audit-special jar:
+    python scripts/audit-special-models.py "{{jar}}"
+
+# Synthetic malformed-JAR and classifier parity tests for the audit gate.
+audit-special-test:
+    python scripts/test_audit_special_models.py
+
 # Headless viewer screenshot to OUT (PATH e.g. '#biome'): `just shot docs/b.png '#biome'`.
 shot out='shot.png' path='/':
     #!/usr/bin/env bash

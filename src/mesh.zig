@@ -1859,6 +1859,31 @@ fn getCached(
     return c;
 }
 
+fn bakeSpecialModel(arena: std.mem.Allocator, tex: *texture.Builder, block_name: []const u8, special: SpecialBlockModel) !Cached {
+    var list: std.ArrayList(BakedFace) = .empty;
+    var layer_index = tex.layerForRegion(special.texture, special.region);
+    if (layer_index == 0) {
+        if (special.alternate_texture) |alternate|
+            layer_index = tex.layerForRegion(alternate, special.region);
+    }
+    // Minecraft 26.2 moved beds and signs from packed entity sheets to
+    // ordinary per-face block textures. Retain the old sheet first for older
+    // clients, then use the new full-tile surface when present.
+    if (layer_index == 0) {
+        if (try generatedSpecialTexture(arena, block_name, special)) |alternate|
+            layer_index = tex.layerForRegion(alternate.path, alternate.region);
+    }
+    // Resource packs and caches from older Vantage builds may omit entity
+    // sheets. Keep the corrected multipart geometry and use the curated
+    // family color rather than exposing the checkerboard missing layer.
+    if (layer_index == 0) {
+        if (blockEntityBox(block_name)) |fallback|
+            layer_index = try tex.solidLayer(fallback.color);
+    }
+    try bakeSpecialBox(arena, &list, @floatFromInt(layer_index), special);
+    return .{ .faces = try list.toOwnedSlice(arena), .occluder = false };
+}
+
 fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver: model.Resolver, tex: *texture.Builder) !Cached {
     var list: std.ArrayList(BakedFace) = .empty;
 
@@ -1869,6 +1894,17 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
     if (isWater(name) or isLava(name)) return .{ .faces = &.{}, .occluder = false };
 
     const parts = resolver.resolveBlock(name, state) catch {
+        if (specialBlockModel(name, state)) |special|
+            return bakeSpecialModel(arena, tex, name, special);
+        // Preserve the non-occluding inset compatibility shape for recognized
+        // renderer-only suffixes even when their blockstate/model JSON is absent
+        // or malformed. This prevents unknown special blocks from reverting to
+        // adjacent full-cell beams on the resolver-error path.
+        if (blockEntityBox(name)) |box| {
+            const layer: f32 = @floatFromInt(try tex.solidLayer(box.color));
+            try bakeBox(arena, &list, layer, box.height, box.inset);
+            return .{ .faces = try list.toOwnedSlice(arena), .occluder = false };
+        }
         // Fallback: a flat-color full cube via a solid texture-array layer
         // (unresolved blocks). Opaque fallbacks occlude.
         const occluder = !isTransparent(name);
@@ -1878,15 +1914,19 @@ fn bake(arena: std.mem.Allocator, name: []const u8, state: []const u8, resolver:
         return .{ .faces = try list.toOwnedSlice(arena), .occluder = occluder };
     };
 
-    // Block entities (chests, beds, signs, …) resolve to a model with *no*
-    // elements — the game draws them with block-entity renderers, which a baked
-    // map can't run. Emit an approximate colored box so builds don't show holes
-    // where their furniture is. Never an occluder: the box is smaller than the
-    // cell, so it must not cull its neighbours' faces.
+    // Block entities resolve to empty block models because Minecraft draws them
+    // through special renderers. Recreate their static geometry with the same
+    // packed entity textures. Inset geometry deliberately has no cull face, so
+    // adjacent chests/beds remain visibly separate instead of merging into beams.
     if (!partsHaveGeometry(parts)) {
+        if (specialBlockModel(name, state)) |special| {
+            return bakeSpecialModel(arena, tex, name, special);
+        }
+        // Portals have generated shaders rather than reusable textures; retain a
+        // dark static surface. True invisible markers remain geometry-free.
         if (blockEntityBox(name)) |box| {
             const layer: f32 = @floatFromInt(try tex.solidLayer(box.color));
-            try bakeBox(arena, &list, layer, box.height);
+            try bakeBox(arena, &list, layer, box.height, box.inset);
             return .{ .faces = try list.toOwnedSlice(arena), .occluder = false };
         }
     }
@@ -2061,11 +2101,352 @@ fn partsHaveGeometry(parts: []const model.ResolvedModel) bool {
     return false;
 }
 
+const SpecialKind = enum {
+    box,
+    chest,
+    bed,
+    sign,
+    hanging_sign,
+    banner,
+    head,
+    shulker,
+    pot,
+    conduit,
+    golem,
+};
+
+const ChestPart = enum { single, left, right };
+const GolemPose = enum { standing, sitting, running, star };
+
+/// Static map-renderer approximation for blocks delegated to vanilla special
+/// renderers. Geometry and one representative atlas crop are state-aware where
+/// the block state determines silhouette, but this deliberately does not model
+/// animation, sign text, banner/pot patterns, custom head skins, seasonal/NBT
+/// appearance, or exact per-face vanilla UV islands.
+const SpecialBlockModel = struct {
+    texture: []const u8,
+    alternate_texture: ?[]const u8 = null,
+    region: texture.Region,
+    facing: model.Dir = .south,
+    inset: f32,
+    height: f32,
+    kind: SpecialKind = .box,
+    wall_mounted: bool = false,
+    head_part: bool = false,
+    attached: bool = false,
+    chest_part: ChestPart = .single,
+    golem_pose: GolemPose = .standing,
+};
+
+const SpecialTexture = struct {
+    path: []const u8,
+    region: texture.Region,
+};
+
+const full_tile_region: texture.Region = .{
+    .x = 0,
+    .y = 0,
+    .w = 16,
+    .h = 16,
+    .reference_w = 16,
+    .reference_h = 16,
+};
+
+const bed_textures = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "white", "entity/bed/white" },           .{ "orange", "entity/bed/orange" }, .{ "magenta", "entity/bed/magenta" },
+    .{ "light_blue", "entity/bed/light_blue" }, .{ "yellow", "entity/bed/yellow" }, .{ "lime", "entity/bed/lime" },
+    .{ "pink", "entity/bed/pink" },             .{ "gray", "entity/bed/gray" },     .{ "light_gray", "entity/bed/light_gray" },
+    .{ "cyan", "entity/bed/cyan" },             .{ "purple", "entity/bed/purple" }, .{ "blue", "entity/bed/blue" },
+    .{ "brown", "entity/bed/brown" },           .{ "green", "entity/bed/green" },   .{ "red", "entity/bed/red" },
+    .{ "black", "entity/bed/black" },
+});
+
+const shulker_textures = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "white", "entity/shulker/shulker_white" },           .{ "orange", "entity/shulker/shulker_orange" },
+    .{ "magenta", "entity/shulker/shulker_magenta" },       .{ "light_blue", "entity/shulker/shulker_light_blue" },
+    .{ "yellow", "entity/shulker/shulker_yellow" },         .{ "lime", "entity/shulker/shulker_lime" },
+    .{ "pink", "entity/shulker/shulker_pink" },             .{ "gray", "entity/shulker/shulker_gray" },
+    .{ "light_gray", "entity/shulker/shulker_light_gray" }, .{ "cyan", "entity/shulker/shulker_cyan" },
+    .{ "purple", "entity/shulker/shulker_purple" },         .{ "blue", "entity/shulker/shulker_blue" },
+    .{ "brown", "entity/shulker/shulker_brown" },           .{ "green", "entity/shulker/shulker_green" },
+    .{ "red", "entity/shulker/shulker_red" },               .{ "black", "entity/shulker/shulker_black" },
+});
+
+const sign_textures = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "oak", "entity/signs/oak" },           .{ "spruce", "entity/signs/spruce" },   .{ "birch", "entity/signs/birch" },
+    .{ "jungle", "entity/signs/jungle" },     .{ "acacia", "entity/signs/acacia" },   .{ "dark_oak", "entity/signs/dark_oak" },
+    .{ "mangrove", "entity/signs/mangrove" }, .{ "cherry", "entity/signs/cherry" },   .{ "pale_oak", "entity/signs/pale_oak" },
+    .{ "bamboo", "entity/signs/bamboo" },     .{ "crimson", "entity/signs/crimson" }, .{ "warped", "entity/signs/warped" },
+});
+
+const hanging_sign_textures = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "oak", "entity/signs/hanging/oak" },           .{ "spruce", "entity/signs/hanging/spruce" },   .{ "birch", "entity/signs/hanging/birch" },
+    .{ "jungle", "entity/signs/hanging/jungle" },     .{ "acacia", "entity/signs/hanging/acacia" },   .{ "dark_oak", "entity/signs/hanging/dark_oak" },
+    .{ "mangrove", "entity/signs/hanging/mangrove" }, .{ "cherry", "entity/signs/hanging/cherry" },   .{ "pale_oak", "entity/signs/hanging/pale_oak" },
+    .{ "bamboo", "entity/signs/hanging/bamboo" },     .{ "crimson", "entity/signs/hanging/crimson" }, .{ "warped", "entity/signs/hanging/warped" },
+});
+
+const banner_textures = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "white", "block/white_wool" },           .{ "orange", "block/orange_wool" }, .{ "magenta", "block/magenta_wool" },
+    .{ "light_blue", "block/light_blue_wool" }, .{ "yellow", "block/yellow_wool" }, .{ "lime", "block/lime_wool" },
+    .{ "pink", "block/pink_wool" },             .{ "gray", "block/gray_wool" },     .{ "light_gray", "block/light_gray_wool" },
+    .{ "cyan", "block/cyan_wool" },             .{ "purple", "block/purple_wool" }, .{ "blue", "block/blue_wool" },
+    .{ "brown", "block/brown_wool" },           .{ "green", "block/green_wool" },   .{ "red", "block/red_wool" },
+    .{ "black", "block/black_wool" },
+});
+
+const head_textures = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "skeleton", "entity/skeleton/skeleton" }, .{ "wither_skeleton", "entity/skeleton/wither_skeleton" },
+    .{ "zombie", "entity/zombie/zombie" },       .{ "creeper", "entity/creeper/creeper" },
+    .{ "piglin", "entity/piglin/piglin" },       .{ "dragon", "entity/enderdragon/dragon" },
+    .{ "player", "entity/player/wide/steve" },
+});
+
+fn stateProperty(state: []const u8, key: []const u8) ?[]const u8 {
+    var parts = std.mem.splitScalar(u8, state, ',');
+    while (parts.next()) |part| {
+        const eq = std.mem.indexOfScalar(u8, part, '=') orelse continue;
+        if (std.mem.eql(u8, part[0..eq], key)) return part[eq + 1 ..];
+    }
+    return null;
+}
+
+fn stateFacing(state: []const u8) model.Dir {
+    if (stateProperty(state, "facing")) |value| {
+        if (std.mem.eql(u8, value, "north")) return .north;
+        if (std.mem.eql(u8, value, "east")) return .east;
+        if (std.mem.eql(u8, value, "west")) return .west;
+        if (std.mem.eql(u8, value, "up")) return .up;
+        if (std.mem.eql(u8, value, "down")) return .down;
+        return .south;
+    }
+    // Standing signs, banners and heads use a 16-step clockwise rotation.
+    if (stateProperty(state, "rotation")) |value| {
+        const step = std.fmt.parseInt(u8, value, 10) catch return .south;
+        return switch (((step + 2) / 4) % 4) {
+            0 => .south,
+            1 => .west,
+            2 => .north,
+            else => .east,
+        };
+    }
+    return .south;
+}
+
+fn familyPrefix(name: []const u8, suffix: []const u8) ?[]const u8 {
+    if (!std.mem.endsWith(u8, name, suffix)) return null;
+    return name[0 .. name.len - suffix.len];
+}
+
+fn generatedSpecialTexture(arena: std.mem.Allocator, full_name: []const u8, special: SpecialBlockModel) !?SpecialTexture {
+    const name = model.stripNs(full_name);
+    const path = switch (special.kind) {
+        .bed => try std.fmt.allocPrint(arena, "block/{s}_{s}_up", .{
+            name,
+            if (special.head_part) "head" else "foot",
+        }),
+        .sign => blk: {
+            const wood = familyPrefix(name, "_wall_sign") orelse familyPrefix(name, "_sign") orelse return null;
+            break :blk try std.fmt.allocPrint(arena, "block/{s}_sign", .{wood});
+        },
+        .hanging_sign => blk: {
+            const wood = familyPrefix(name, "_wall_hanging_sign") orelse familyPrefix(name, "_hanging_sign") orelse return null;
+            break :blk try std.fmt.allocPrint(arena, "block/{s}_hanging_sign", .{wood});
+        },
+        else => return null,
+    };
+    return .{ .path = path, .region = full_tile_region };
+}
+
+fn chestTexture(name: []const u8, state: []const u8) ?[]const u8 {
+    const base: []const u8 = if (std.mem.eql(u8, name, "chest"))
+        "entity/chest/normal"
+    else if (std.mem.eql(u8, name, "trapped_chest"))
+        "entity/chest/trapped"
+    else if (std.mem.eql(u8, name, "ender_chest"))
+        return "entity/chest/ender"
+    else if (copperColor(name, "copper_chest")) |_| blk: {
+        var stage = name[0 .. name.len - "copper_chest".len];
+        if (std.mem.startsWith(u8, stage, "waxed_")) stage = stage["waxed_".len..];
+        if (std.mem.eql(u8, stage, "exposed_")) break :blk "entity/chest/copper_exposed";
+        if (std.mem.eql(u8, stage, "weathered_")) break :blk "entity/chest/copper_weathered";
+        if (std.mem.eql(u8, stage, "oxidized_")) break :blk "entity/chest/copper_oxidized";
+        break :blk "entity/chest/copper";
+    } else return null;
+    const chest_type = stateProperty(state, "type") orelse "single";
+    if (std.mem.eql(u8, chest_type, "left")) {
+        if (std.mem.eql(u8, base, "entity/chest/normal")) return "entity/chest/normal_left";
+        if (std.mem.eql(u8, base, "entity/chest/trapped")) return "entity/chest/trapped_left";
+        if (std.mem.eql(u8, base, "entity/chest/copper")) return "entity/chest/copper_left";
+        if (std.mem.eql(u8, base, "entity/chest/copper_exposed")) return "entity/chest/copper_exposed_left";
+        if (std.mem.eql(u8, base, "entity/chest/copper_weathered")) return "entity/chest/copper_weathered_left";
+        if (std.mem.eql(u8, base, "entity/chest/copper_oxidized")) return "entity/chest/copper_oxidized_left";
+    }
+    if (std.mem.eql(u8, chest_type, "right")) {
+        if (std.mem.eql(u8, base, "entity/chest/normal")) return "entity/chest/normal_right";
+        if (std.mem.eql(u8, base, "entity/chest/trapped")) return "entity/chest/trapped_right";
+        if (std.mem.eql(u8, base, "entity/chest/copper")) return "entity/chest/copper_right";
+        if (std.mem.eql(u8, base, "entity/chest/copper_exposed")) return "entity/chest/copper_exposed_right";
+        if (std.mem.eql(u8, base, "entity/chest/copper_weathered")) return "entity/chest/copper_weathered_right";
+        if (std.mem.eql(u8, base, "entity/chest/copper_oxidized")) return "entity/chest/copper_oxidized_right";
+    }
+    return base;
+}
+
+fn specialBlockModel(full_name: []const u8, state: []const u8) ?SpecialBlockModel {
+    const name = model.stripNs(full_name);
+    const facing = stateFacing(state);
+    if (chestTexture(name, state)) |path| return .{
+        .texture = path,
+        .region = .{ .x = 14, .y = 33, .w = 14, .h = 10, .reference_w = 64, .reference_h = 64 },
+        .facing = facing,
+        .inset = 1.0 / 16.0,
+        .height = 14.0 / 16.0,
+        .kind = .chest,
+        .chest_part = if (stateProperty(state, "type")) |part|
+            if (std.mem.eql(u8, part, "left")) .left else if (std.mem.eql(u8, part, "right")) .right else .single
+        else
+            .single,
+    };
+    if (familyPrefix(name, "_bed")) |dye| if (bed_textures.get(dye)) |path| return .{
+        .texture = path,
+        .region = .{ .x = 6, .y = 28, .w = 16, .h = 16, .reference_w = 64, .reference_h = 64 },
+        .facing = facing,
+        .inset = 0.5 / 16.0,
+        .height = 9.0 / 16.0,
+        .kind = .bed,
+        .head_part = if (stateProperty(state, "part")) |part| std.mem.eql(u8, part, "head") else false,
+    };
+    const hanging_suffixes = [_][]const u8{ "_wall_hanging_sign", "_hanging_sign" };
+    for (hanging_suffixes) |suffix| if (familyPrefix(name, suffix)) |wood| if (hanging_sign_textures.get(wood)) |path| return .{
+        .texture = path,
+        .region = .{ .x = 2, .y = 12, .w = 14, .h = 10, .reference_w = 64, .reference_h = 32 },
+        .facing = facing,
+        .inset = 2.0 / 16.0,
+        .height = 1.0,
+        .kind = .hanging_sign,
+        .wall_mounted = std.mem.eql(u8, suffix, "_wall_hanging_sign"),
+        .attached = if (stateProperty(state, "attached")) |value| std.mem.eql(u8, value, "true") else false,
+    };
+    const sign_suffixes = [_][]const u8{ "_wall_sign", "_sign" };
+    for (sign_suffixes) |suffix| if (familyPrefix(name, suffix)) |wood| if (sign_textures.get(wood)) |path| return .{
+        .texture = path,
+        .region = .{ .x = 2, .y = 2, .w = 24, .h = 12, .reference_w = 64, .reference_h = 32 },
+        .facing = facing,
+        .inset = 2.0 / 16.0,
+        .height = 1.0,
+        .kind = .sign,
+        .wall_mounted = std.mem.eql(u8, suffix, "_wall_sign"),
+    };
+    if (familyPrefix(name, "_wall_banner") orelse familyPrefix(name, "_banner")) |dye| if (banner_textures.get(dye)) |path| return .{
+        .texture = path,
+        // Wool is an ordinary block tile, not a packed entity sheet. Sample
+        // the entire image so vanilla and HD resource-pack textures both scale.
+        .region = full_tile_region,
+        .facing = facing,
+        .inset = 6.5 / 16.0,
+        .height = 1.0,
+        .kind = .banner,
+        .wall_mounted = std.mem.endsWith(u8, name, "_wall_banner"),
+    };
+    if (std.mem.endsWith(u8, name, "_skull") or std.mem.endsWith(u8, name, "_head")) {
+        const suffix: []const u8 = if (std.mem.endsWith(u8, name, "_skull")) "_skull" else "_head";
+        var mob = name[0 .. name.len - suffix.len];
+        const wall_mounted = std.mem.endsWith(u8, mob, "_wall");
+        if (wall_mounted) mob = mob[0 .. mob.len - "_wall".len];
+        if (head_textures.get(mob)) |path| return .{
+            .texture = path,
+            .region = if (std.mem.eql(u8, mob, "dragon"))
+                .{ .x = 16, .y = 0, .w = 16, .h = 16, .reference_w = 256, .reference_h = 256 }
+            else
+                .{ .x = 8, .y = 8, .w = 8, .h = 8, .reference_w = 64, .reference_h = if (std.mem.eql(u8, mob, "skeleton") or std.mem.eql(u8, mob, "wither_skeleton") or std.mem.eql(u8, mob, "creeper")) 32 else 64 },
+            .facing = facing,
+            .inset = 4.0 / 16.0,
+            .height = 0.5,
+            .kind = .head,
+            .wall_mounted = wall_mounted,
+        };
+    }
+    if (familyPrefix(name, "_shulker_box")) |dye| if (shulker_textures.get(dye)) |path| return .{
+        .texture = path,
+        .region = .{ .x = 16, .y = 0, .w = 16, .h = 12, .reference_w = 64, .reference_h = 64 },
+        .facing = facing,
+        .inset = 1.0 / 16.0,
+        .height = 1.0,
+        .kind = .shulker,
+    };
+    if (std.mem.eql(u8, name, "shulker_box")) return .{
+        .texture = "entity/shulker/shulker",
+        .region = .{ .x = 16, .y = 0, .w = 16, .h = 12, .reference_w = 64, .reference_h = 64 },
+        .facing = facing,
+        .inset = 1.0 / 16.0,
+        .height = 1.0,
+        .kind = .shulker,
+    };
+    if (std.mem.eql(u8, name, "decorated_pot")) return .{
+        .texture = "entity/decorated_pot/decorated_pot_side",
+        .region = .{ .x = 0, .y = 0, .w = 16, .h = 16, .reference_w = 16, .reference_h = 16 },
+        .facing = facing,
+        .inset = 3.0 / 16.0,
+        .height = 1.0,
+        .kind = .pot,
+    };
+    if (std.mem.eql(u8, name, "conduit")) return .{
+        .texture = "entity/conduit/base",
+        .region = .{ .x = 0, .y = 0, .w = 16, .h = 16, .reference_w = 32, .reference_h = 16 },
+        .facing = facing,
+        .inset = 5.0 / 16.0,
+        .height = 11.0 / 16.0,
+        .kind = .conduit,
+    };
+    if (copperColor(name, "copper_golem_statue")) |_| {
+        var stage = name[0 .. name.len - "copper_golem_statue".len];
+        if (std.mem.startsWith(u8, stage, "waxed_")) stage = stage["waxed_".len..];
+        const path: []const u8 = if (std.mem.eql(u8, stage, "exposed_"))
+            "entity/copper_golem/exposed_copper_golem"
+        else if (std.mem.eql(u8, stage, "weathered_"))
+            "entity/copper_golem/weathered_copper_golem"
+        else if (std.mem.eql(u8, stage, "oxidized_"))
+            "entity/copper_golem/oxidized_copper_golem"
+        else
+            "entity/copper_golem/copper_golem";
+        const alternate: ?[]const u8 = if (std.mem.eql(u8, stage, "exposed_"))
+            "entity/copper_golem/copper_golem_exposed"
+        else if (std.mem.eql(u8, stage, "weathered_"))
+            "entity/copper_golem/copper_golem_weathered"
+        else if (std.mem.eql(u8, stage, "oxidized_"))
+            "entity/copper_golem/copper_golem_oxidized"
+        else
+            null;
+        return .{
+            .texture = path,
+            .alternate_texture = alternate,
+            .region = .{ .x = 16, .y = 20, .w = 16, .h = 20, .reference_w = 64, .reference_h = 64 },
+            .facing = facing,
+            .inset = 3.0 / 16.0,
+            .height = 1.0,
+            .kind = .golem,
+            .golem_pose = if (stateProperty(state, "copper_golem_pose")) |pose|
+                if (std.mem.eql(u8, pose, "sitting"))
+                    .sitting
+                else if (std.mem.eql(u8, pose, "running"))
+                    .running
+                else if (std.mem.eql(u8, pose, "star"))
+                    .star
+                else
+                    .standing
+            else
+                .standing,
+        };
+    }
+    return null;
+}
+
 /// Approximate stand-in for a block whose visuals live in a block-entity
 /// renderer (no model elements). Curated colors/heights for the common,
 /// visually significant ones; null leaves the block invisible (correct for
 /// markers like light or structure_void, which also resolve to no geometry).
-const EntityBox = struct { color: [3]u8, height: f32 };
+const EntityBox = struct { color: [3]u8, height: f32, inset: f32 = 0 };
 
 /// Vanilla `DyeColor` texture colours. Sixteen beds, banners and shulker boxes
 /// differ *only* by their dye, so a single colour per family turns a built-up
@@ -2115,33 +2496,33 @@ fn copperColor(name: []const u8, suffix: []const u8) ?[3]u8 {
 fn blockEntityBox(name: []const u8) ?EntityBox {
     const b = model.stripNs(name);
     if (std.mem.eql(u8, b, "chest") or std.mem.eql(u8, b, "trapped_chest"))
-        return .{ .color = .{ 140, 100, 45 }, .height = 0.875 };
+        return .{ .color = .{ 140, 100, 45 }, .height = 0.875, .inset = 1.0 / 16.0 };
     if (std.mem.eql(u8, b, "ender_chest"))
-        return .{ .color = .{ 25, 55, 60 }, .height = 0.875 };
-    if (copperColor(b, "copper_chest")) |c| return .{ .color = c, .height = 0.875 };
-    if (copperColor(b, "copper_golem_statue")) |c| return .{ .color = c, .height = 1.0 };
-    if (dyedColor(b, "_bed")) |c| return .{ .color = c, .height = 0.5625 };
+        return .{ .color = .{ 25, 55, 60 }, .height = 0.875, .inset = 1.0 / 16.0 };
+    if (copperColor(b, "copper_chest")) |c| return .{ .color = c, .height = 0.875, .inset = 1.0 / 16.0 };
+    if (copperColor(b, "copper_golem_statue")) |c| return .{ .color = c, .height = 1.0, .inset = 3.0 / 16.0 };
+    if (dyedColor(b, "_bed")) |c| return .{ .color = c, .height = 0.5625, .inset = 0.5 / 16.0 };
     if (std.mem.endsWith(u8, b, "_bed"))
-        return .{ .color = .{ 180, 60, 60 }, .height = 0.5625 };
+        return .{ .color = .{ 180, 60, 60 }, .height = 0.5625, .inset = 0.5 / 16.0 };
     if (std.mem.endsWith(u8, b, "sign"))
-        return .{ .color = .{ 120, 95, 60 }, .height = 1.0 };
+        return .{ .color = .{ 120, 95, 60 }, .height = 1.0, .inset = 2.0 / 16.0 };
     if (dyedColor(b, "_wall_banner") orelse dyedColor(b, "_banner")) |c|
-        return .{ .color = c, .height = 1.0 };
+        return .{ .color = c, .height = 1.0, .inset = 6.5 / 16.0 };
     if (std.mem.endsWith(u8, b, "banner"))
-        return .{ .color = .{ 205, 205, 205 }, .height = 1.0 };
+        return .{ .color = .{ 205, 205, 205 }, .height = 1.0, .inset = 6.5 / 16.0 };
     if (std.mem.endsWith(u8, b, "_skull") or std.mem.endsWith(u8, b, "_head")) {
         const kind = b[0 .. b.len - (if (std.mem.endsWith(u8, b, "_skull")) "_skull".len else "_head".len)];
         // `_wall_skull`/`_wall_head` name the same mob mounted sideways.
         const mob = if (std.mem.endsWith(u8, kind, "_wall")) kind[0 .. kind.len - "_wall".len] else kind;
-        return .{ .color = skull_colors.get(mob) orelse .{ 225, 220, 200 }, .height = 0.5 };
+        return .{ .color = skull_colors.get(mob) orelse .{ 225, 220, 200 }, .height = 0.5, .inset = 4.0 / 16.0 };
     }
-    if (dyedColor(b, "_shulker_box")) |c| return .{ .color = c, .height = 1.0 };
+    if (dyedColor(b, "_shulker_box")) |c| return .{ .color = c, .height = 1.0, .inset = 1.0 / 16.0 };
     if (std.mem.endsWith(u8, b, "shulker_box"))
-        return .{ .color = .{ 150, 105, 160 }, .height = 1.0 };
+        return .{ .color = .{ 150, 105, 160 }, .height = 1.0, .inset = 1.0 / 16.0 };
     if (std.mem.eql(u8, b, "decorated_pot"))
-        return .{ .color = .{ 160, 90, 60 }, .height = 1.0 };
+        return .{ .color = .{ 160, 90, 60 }, .height = 1.0, .inset = 3.0 / 16.0 };
     if (std.mem.eql(u8, b, "conduit"))
-        return .{ .color = .{ 130, 180, 170 }, .height = 0.5 };
+        return .{ .color = .{ 130, 180, 170 }, .height = 0.5, .inset = 5.0 / 16.0 };
     // The portal surfaces are drawn by an entity renderer as a near-black
     // starfield; leaving them invisible opens a hole through a stronghold's
     // floor into the terrain below.
@@ -2174,32 +2555,524 @@ test "block-entity stand-ins keep each block recognizable" {
     try std.testing.expectEqual([3]u8{ 0x4C, 0x7F, 0x33 }, blockEntityBox("minecraft:zombie_wall_head").?.color);
     try std.testing.expectEqual([3]u8{ 0x34, 0x34, 0x34 }, blockEntityBox("minecraft:wither_skeleton_skull").?.color);
 
+    // Future or modded special families must never regress to a full-cell cube
+    // that visually merges with adjacent blocks.
+    try std.testing.expect(blockEntityBox("example:new_wood_sign").?.inset > 0);
+
     // Markers stay invisible: they have no geometry in game either.
     try std.testing.expect(blockEntityBox("minecraft:barrier") == null);
     try std.testing.expect(blockEntityBox("minecraft:structure_void") == null);
     try std.testing.expect(blockEntityBox("minecraft:moving_piston") == null);
 }
 
-/// Like `bakeFullCube` but `height` (0..1] scales Y — a squashed cube for
-/// chest/bed/skull stand-ins. Faces keep their cull dirs: sides/bottom are
-/// flush with the cell so neighbour culling stays correct, and a culled top
-/// under a solid block matches the in-game view (you can't see it there either).
-fn bakeBox(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32, height: f32) !void {
+test "special block models are textured, state-aware, and never full-cell cubes" {
+    const single = specialBlockModel("minecraft:chest", "facing=east,type=single,waterlogged=false").?;
+    try std.testing.expectEqualStrings("entity/chest/normal", single.texture);
+    try std.testing.expectEqual(model.Dir.east, single.facing);
+    try std.testing.expect(single.inset > 0 and single.height < 1);
+
+    const left = specialBlockModel("minecraft:trapped_chest", "facing=north,type=left,waterlogged=false").?;
+    try std.testing.expectEqualStrings("entity/chest/trapped_left", left.texture);
+    try std.testing.expectEqual(model.Dir.north, left.facing);
+    try std.testing.expectEqual(ChestPart.left, left.chest_part);
+    const right = specialBlockModel("minecraft:chest", "facing=south,type=right").?;
+    try std.testing.expectEqual(ChestPart.right, right.chest_part);
+
+    const bed = specialBlockModel("minecraft:blue_bed", "facing=south,occupied=false,part=head").?;
+    try std.testing.expectEqualStrings("entity/bed/blue", bed.texture);
+    try std.testing.expectEqual(model.Dir.south, bed.facing);
+    try std.testing.expect(bed.head_part);
+    const bed_foot = specialBlockModel("minecraft:blue_bed", "facing=south,occupied=false,part=foot").?;
+    try std.testing.expect(!bed_foot.head_part);
+    try std.testing.expect(bed.height < single.height);
+
+    const sign = specialBlockModel("minecraft:spruce_wall_sign", "facing=west,waterlogged=false").?;
+    try std.testing.expectEqualStrings("entity/signs/spruce", sign.texture);
+    try std.testing.expectEqual(model.Dir.west, sign.facing);
+    try std.testing.expectEqual(texture.Region{ .x = 2, .y = 2, .w = 24, .h = 12, .reference_w = 64, .reference_h = 32 }, sign.region);
+
+    const hanging = specialBlockModel("minecraft:oak_hanging_sign", "rotation=3,attached=false").?;
+    try std.testing.expectEqual(texture.Region{ .x = 2, .y = 12, .w = 14, .h = 10, .reference_w = 64, .reference_h = 32 }, hanging.region);
+    try std.testing.expect(!hanging.attached);
+    const attached_hanging = specialBlockModel("minecraft:oak_hanging_sign", "rotation=3,attached=true").?;
+    try std.testing.expect(attached_hanging.attached);
+
+    const banner = specialBlockModel("minecraft:blue_wall_banner", "facing=north").?;
+    try std.testing.expectEqual(full_tile_region, banner.region);
+
+    const shulker = specialBlockModel("minecraft:yellow_shulker_box", "facing=up").?;
+    try std.testing.expectEqualStrings("entity/shulker/shulker_yellow", shulker.texture);
+    try std.testing.expectEqual(texture.Region{ .x = 16, .y = 0, .w = 16, .h = 12, .reference_w = 64, .reference_h = 64 }, shulker.region);
+    try std.testing.expectEqual(model.Dir.up, shulker.facing);
+    const downward_shulker = specialBlockModel("minecraft:yellow_shulker_box", "facing=down").?;
+    try std.testing.expectEqual(model.Dir.down, downward_shulker.facing);
+
+    const dragon = specialBlockModel("minecraft:dragon_head", "rotation=0").?;
+    try std.testing.expectEqual(texture.Region{ .x = 16, .y = 0, .w = 16, .h = 16, .reference_w = 256, .reference_h = 256 }, dragon.region);
+
+    const golem = specialBlockModel("minecraft:weathered_copper_golem_statue", "facing=south,copper_golem_pose=standing").?;
+    try std.testing.expectEqualStrings("entity/copper_golem/weathered_copper_golem", golem.texture);
+    try std.testing.expectEqualStrings("entity/copper_golem/copper_golem_weathered", golem.alternate_texture.?);
+    try std.testing.expectEqual(GolemPose.standing, golem.golem_pose);
+    const star_golem = specialBlockModel("minecraft:weathered_copper_golem_statue", "facing=south,copper_golem_pose=star").?;
+    try std.testing.expectEqual(GolemPose.star, star_golem.golem_pose);
+
+    // Every visible zero-element vanilla family must take the textured path.
+    const covered = [_]struct { name: []const u8, state: []const u8 }{
+        .{ .name = "minecraft:chest", .state = "facing=south,type=single" },
+        .{ .name = "minecraft:ender_chest", .state = "facing=north" },
+        .{ .name = "minecraft:oxidized_copper_chest", .state = "facing=east,type=right" },
+        .{ .name = "minecraft:red_bed", .state = "facing=west,part=foot" },
+        .{ .name = "minecraft:oak_sign", .state = "rotation=3" },
+        .{ .name = "minecraft:oak_hanging_sign", .state = "attached=false,rotation=3" },
+        .{ .name = "minecraft:white_banner", .state = "rotation=3" },
+        .{ .name = "minecraft:blue_wall_banner", .state = "facing=north" },
+        .{ .name = "minecraft:zombie_head", .state = "rotation=3" },
+        .{ .name = "minecraft:wither_skeleton_wall_skull", .state = "facing=east" },
+        .{ .name = "minecraft:shulker_box", .state = "facing=up" },
+        .{ .name = "minecraft:decorated_pot", .state = "facing=south" },
+        .{ .name = "minecraft:conduit", .state = "waterlogged=true" },
+        .{ .name = "minecraft:weathered_copper_golem_statue", .state = "facing=south,copper_golem_pose=standing" },
+    };
+    for (covered) |case| try std.testing.expect(specialBlockModel(case.name, case.state) != null);
+
+    // Renderer-only markers remain intentionally absent rather than becoming a
+    // colored fallback cube.
+    try std.testing.expect(specialBlockModel("minecraft:barrier", "") == null);
+    try std.testing.expect(specialBlockModel("minecraft:structure_void", "") == null);
+    try std.testing.expect(specialBlockModel("minecraft:moving_piston", "") == null);
+}
+
+test "beds and signs support the per-block textures used by newer clients" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+
+    const bed = specialBlockModel("minecraft:blue_bed", "facing=south,part=head").?;
+    try std.testing.expectEqualStrings(
+        "block/blue_bed_head_up",
+        (try generatedSpecialTexture(a, "minecraft:blue_bed", bed)).?.path,
+    );
+
+    const wall_sign = specialBlockModel("minecraft:spruce_wall_sign", "facing=west").?;
+    try std.testing.expectEqualStrings(
+        "block/spruce_sign",
+        (try generatedSpecialTexture(a, "minecraft:spruce_wall_sign", wall_sign)).?.path,
+    );
+
+    const hanging = specialBlockModel("minecraft:oak_wall_hanging_sign", "facing=north").?;
+    try std.testing.expectEqualStrings(
+        "block/oak_hanging_sign",
+        (try generatedSpecialTexture(a, "minecraft:oak_wall_hanging_sign", hanging)).?.path,
+    );
+}
+
+test "special blocks survive resolver failures without full-cell fallback" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    const io = std.testing.io;
+    const missing_root = "this/path/intentionally/does/not/exist";
+    const resolver: model.Resolver = .{ .arena = a, .io = io, .root = missing_root };
+    var tex = try texture.Builder.init(a, io, missing_root);
+
+    const chest = try bake(a, "minecraft:chest", "facing=south,type=single", resolver, &tex);
+    try std.testing.expect(!chest.occluder);
+    try std.testing.expectEqual(@as(usize, 18), chest.faces.len);
+    for (chest.faces) |face| for (face.verts) |vertex| {
+        const p = vertex.pos;
+        try std.testing.expect(p[0] != 0 or p[1] != 0 or p[2] != 0);
+    };
+
+    const future_sign = try bake(a, "example:new_wood_sign", "facing=south", resolver, &tex);
+    try std.testing.expect(!future_sign.occluder);
+    try std.testing.expectEqual(@as(usize, 6), future_sign.faces.len);
+    var min_x: f32 = 1;
+    var max_x: f32 = 0;
+    var min_z: f32 = 1;
+    var max_z: f32 = 0;
+    for (future_sign.faces) |face| for (face.verts) |vertex| {
+        min_x = @min(min_x, vertex.pos[0]);
+        max_x = @max(max_x, vertex.pos[0]);
+        min_z = @min(min_z, vertex.pos[2]);
+        max_z = @max(max_z, vertex.pos[2]);
+    };
+    try std.testing.expect(min_x > 0 and max_x < 1 and min_z > 0 and max_z < 1);
+}
+
+test "special block geometry uses distinct parts instead of generic cubes" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { kind: SpecialKind, faces: usize }{
+        .{ .kind = .chest, .faces = 18 },
+        .{ .kind = .bed, .faces = 18 },
+        .{ .kind = .sign, .faces = 12 },
+        .{ .kind = .hanging_sign, .faces = 18 },
+        .{ .kind = .banner, .faces = 12 },
+        .{ .kind = .shulker, .faces = 12 },
+        .{ .kind = .pot, .faces = 12 },
+        .{ .kind = .golem, .faces = 30 },
+    };
+    for (cases) |case| {
+        var baked: std.ArrayList(BakedFace) = .empty;
+        defer baked.deinit(a);
+        try bakeSpecialBox(a, &baked, 1, .{
+            .texture = "unused",
+            .region = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+            .inset = 0.1,
+            .height = 0.9,
+            .kind = case.kind,
+        });
+        try std.testing.expectEqual(case.faces, baked.items.len);
+    }
+
+    var chest: std.ArrayList(BakedFace) = .empty;
+    defer chest.deinit(a);
+    try bakeSpecialBox(a, &chest, 1, .{
+        .texture = "unused",
+        .region = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .inset = 0.1,
+        .height = 0.9,
+        .kind = .chest,
+        .facing = .south,
+    });
+    for (chest.items[12..18]) |face| for (face.verts) |vertex|
+        try std.testing.expect(vertex.pos[2] > 0.9);
+
+    var left_half: std.ArrayList(BakedFace) = .empty;
+    defer left_half.deinit(a);
+    try bakeSpecialBox(a, &left_half, 1, .{
+        .texture = "unused",
+        .region = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .inset = 0.1,
+        .height = 0.9,
+        .kind = .chest,
+        .chest_part = .left,
+    });
+    var right_half: std.ArrayList(BakedFace) = .empty;
+    defer right_half.deinit(a);
+    try bakeSpecialBox(a, &right_half, 1, .{
+        .texture = "unused",
+        .region = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .inset = 0.1,
+        .height = 0.9,
+        .kind = .chest,
+        .chest_part = .right,
+    });
+    var left_min_x: f32 = 1;
+    var right_max_x: f32 = 0;
+    for (left_half.items[0..6]) |face| {
+        for (face.verts) |vertex| left_min_x = @min(left_min_x, vertex.pos[0]);
+    }
+    for (right_half.items[0..6]) |face| {
+        for (face.verts) |vertex| right_max_x = @max(right_max_x, vertex.pos[0]);
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 0), left_min_x, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), right_max_x, 0.0001);
+    for (left_half.items[12..18]) |face| for (face.verts) |vertex|
+        try std.testing.expect(vertex.pos[0] <= 1.0 / 16.0);
+    for (right_half.items[12..18]) |face| for (face.verts) |vertex|
+        try std.testing.expect(vertex.pos[0] >= 15.0 / 16.0);
+
+    var down_shulker: std.ArrayList(BakedFace) = .empty;
+    defer down_shulker.deinit(a);
+    try bakeSpecialBox(a, &down_shulker, 1, .{
+        .texture = "unused",
+        .region = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .inset = 0.1,
+        .height = 1,
+        .kind = .shulker,
+        .facing = .down,
+    });
+    for (down_shulker.items[0..6]) |face| for (face.verts) |vertex|
+        try std.testing.expect(vertex.pos[1] >= 0.5);
+
+    var north_shulker: std.ArrayList(BakedFace) = .empty;
+    defer north_shulker.deinit(a);
+    try bakeSpecialBox(a, &north_shulker, 1, .{
+        .texture = "unused",
+        .region = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .inset = 0.1,
+        .height = 1,
+        .kind = .shulker,
+        .facing = .north,
+    });
+    for (north_shulker.items[0..6]) |face| for (face.verts) |vertex|
+        try std.testing.expect(vertex.pos[2] >= 0.5);
+
+    var wall_hanging: std.ArrayList(BakedFace) = .empty;
+    defer wall_hanging.deinit(a);
+    try bakeSpecialBox(a, &wall_hanging, 1, .{
+        .texture = "unused",
+        .region = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .inset = 0.1,
+        .height = 1,
+        .kind = .hanging_sign,
+        .wall_mounted = true,
+        .facing = .south,
+    });
+    try std.testing.expectEqual(@as(usize, 24), wall_hanging.items.len);
+    for (wall_hanging.items[6..12]) |face| for (face.verts) |vertex| {
+        try std.testing.expect(vertex.pos[1] >= 14.0 / 16.0);
+        try std.testing.expect(vertex.pos[2] >= 6.0 / 16.0 and vertex.pos[2] <= 10.0 / 16.0);
+    };
+
+    var conduit: std.ArrayList(BakedFace) = .empty;
+    defer conduit.deinit(a);
+    try bakeSpecialBox(a, &conduit, 1, .{
+        .texture = "unused",
+        .region = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .inset = 5.0 / 16.0,
+        .height = 11.0 / 16.0,
+        .kind = .conduit,
+    });
+    for (conduit.items) |face| for (face.verts) |vertex|
+        try std.testing.expect(vertex.pos[1] >= 5.0 / 16.0 and vertex.pos[1] <= 11.0 / 16.0);
+
+    var star_golem: std.ArrayList(BakedFace) = .empty;
+    defer star_golem.deinit(a);
+    try bakeSpecialBox(a, &star_golem, 1, .{
+        .texture = "unused",
+        .region = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .inset = 3.0 / 16.0,
+        .height = 1,
+        .kind = .golem,
+        .golem_pose = .star,
+    });
+    try std.testing.expectEqual(@as(usize, 36), star_golem.items.len);
+    var raised_arm = false;
+    for (star_golem.items[24..]) |face| {
+        for (face.verts) |vertex|
+            raised_arm = raised_arm or vertex.pos[1] >= 15.0 / 16.0;
+    }
+    try std.testing.expect(raised_arm);
+}
+
+const SpecialCuboid = struct { lo: [3]f32, hi: [3]f32 };
+
+fn specialCullFace(cuboid: SpecialCuboid, dir: model.Dir, xrot: u16, yrot: u16) ?model.Dir {
+    const touches_boundary = switch (dir) {
+        .down => cuboid.lo[1] == 0,
+        .up => cuboid.hi[1] == 1,
+        .north => cuboid.lo[2] == 0,
+        .south => cuboid.hi[2] == 1,
+        .west => cuboid.lo[0] == 0,
+        .east => cuboid.hi[0] == 1,
+    };
+    return if (touches_boundary) rotateDir(dir, xrot, yrot) else null;
+}
+
+test "special cuboids cull only rotated cell-boundary faces" {
+    const inset: SpecialCuboid = .{ .lo = .{ 0.25, 0.25, 0.25 }, .hi = .{ 0.75, 0.75, 0.75 } };
+    for (std.enums.values(model.Dir)) |dir|
+        try std.testing.expectEqual(@as(?model.Dir, null), specialCullFace(inset, dir, 0, 0));
+
+    const boundary: SpecialCuboid = .{ .lo = .{ 0, 0, 0.25 }, .hi = .{ 0.5, 0.75, 1 } };
+    try std.testing.expectEqual(model.Dir.down, specialCullFace(boundary, .down, 0, 90).?);
+    try std.testing.expectEqual(model.Dir.west, specialCullFace(boundary, .south, 0, 90).?);
+    try std.testing.expectEqual(model.Dir.north, specialCullFace(boundary, .west, 0, 90).?);
+    try std.testing.expectEqual(@as(?model.Dir, null), specialCullFace(boundary, .up, 0, 90));
+    try std.testing.expectEqual(@as(?model.Dir, null), specialCullFace(boundary, .north, 0, 90));
+    try std.testing.expectEqual(@as(?model.Dir, null), specialCullFace(boundary, .east, 0, 90));
+}
+
+fn appendOrientedCuboid(
+    arena: std.mem.Allocator,
+    list: *std.ArrayList(BakedFace),
+    layer: f32,
+    cuboid: SpecialCuboid,
+    xrot: u16,
+    yrot: u16,
+) !void {
     for (tex_faces) |tf| {
-        var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = .none, .cull = tf.dir, .ao = true };
-        const n = [3]f32{ @floatFromInt(tf.n[0]), @floatFromInt(tf.n[1]), @floatFromInt(tf.n[2]) };
+        var bf: BakedFace = .{
+            .verts = undefined,
+            .layer = layer,
+            .tint = .none,
+            .cull = specialCullFace(cuboid, tf.dir, xrot, yrot),
+            .ao = false,
+        };
         for (0..4) |i| {
             const cs = tf.corners[i];
-            const p = [3]f32{ @floatFromInt(cs[0]), @as(f32, @floatFromInt(cs[1])) * height, @floatFromInt(cs[2]) };
-            bf.ao_off[i] = cornerAoOffsets(n, .{ @floatFromInt(cs[0]), @floatFromInt(cs[1]), @floatFromInt(cs[2]) });
+            var p = [3]f32{
+                if (cs[0] == 1) cuboid.hi[0] else cuboid.lo[0],
+                if (cs[1] == 1) cuboid.hi[1] else cuboid.lo[1],
+                if (cs[2] == 1) cuboid.hi[2] else cuboid.lo[2],
+            };
+            var n = [3]f32{ @floatFromInt(tf.n[0]), @floatFromInt(tf.n[1]), @floatFromInt(tf.n[2]) };
+            rotate(&p, &n, xrot, yrot);
             bf.verts[i] = .{
                 .pos = p,
                 .uv = .{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(tf.uvsel[i][1]) },
-                .n = tf.n,
+                .n = .{ quantNormal(n[0]), quantNormal(n[1]), quantNormal(n[2]) },
             };
         }
         try list.append(arena, bf);
     }
+}
+
+fn appendSpecialCuboid(
+    arena: std.mem.Allocator,
+    list: *std.ArrayList(BakedFace),
+    layer: f32,
+    cuboid: SpecialCuboid,
+    yrot: u16,
+) !void {
+    return appendOrientedCuboid(arena, list, layer, cuboid, 0, yrot);
+}
+
+fn bakeSpecialBox(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32, special: SpecialBlockModel) !void {
+    const u: f32 = 1.0 / 16.0;
+    const yrot: u16 = switch (special.facing) {
+        .south => 0,
+        .west => 90,
+        .north => 180,
+        .east => 270,
+        else => 0,
+    };
+    const whole: SpecialCuboid = .{
+        .lo = .{ special.inset, 0, special.inset },
+        .hi = .{ 1.0 - special.inset, special.height, 1.0 - special.inset },
+    };
+    switch (special.kind) {
+        .box => try appendSpecialCuboid(arena, list, layer, whole, yrot),
+        .conduit => try appendSpecialCuboid(arena, list, layer, .{
+            .lo = .{ 5 * u, 5 * u, 5 * u },
+            .hi = .{ 11 * u, 11 * u, 11 * u },
+        }, yrot),
+        .chest => {
+            // Double-chest halves meet at their connected edge while retaining
+            // the one-pixel outer inset. Their one-pixel latch halves join into
+            // one centered two-pixel latch instead of duplicating the hardware.
+            const x0: f32 = if (special.chest_part == .left) 0 else u;
+            const x1: f32 = if (special.chest_part == .right) 1 else 15 * u;
+            const latch_x0: f32 = switch (special.chest_part) {
+                .single => 7 * u,
+                .left => 0,
+                .right => 15 * u,
+            };
+            const latch_x1: f32 = switch (special.chest_part) {
+                .single => 9 * u,
+                .left => u,
+                .right => 1,
+            };
+            try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ x0, 0, u }, .hi = .{ x1, 10 * u, 15 * u } }, yrot);
+            try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ x0, 10 * u, u }, .hi = .{ x1, 14 * u, 15 * u } }, yrot);
+            try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ latch_x0, 7 * u, 14.75 * u }, .hi = .{ latch_x1, 12 * u, 15.75 * u } }, yrot);
+        },
+        .bed => {
+            try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 0, 3 * u, 0 }, .hi = .{ 1, 9 * u, 1 } }, yrot);
+            const leg_z0: f32 = if (special.head_part) 13 * u else u;
+            const leg_z1: f32 = if (special.head_part) 15 * u else 3 * u;
+            try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ u, 0, leg_z0 }, .hi = .{ 3 * u, 3 * u, leg_z1 } }, yrot);
+            try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 13 * u, 0, leg_z0 }, .hi = .{ 15 * u, 3 * u, leg_z1 } }, yrot);
+        },
+        .sign => {
+            const board = if (special.wall_mounted)
+                SpecialCuboid{ .lo = .{ 2 * u, 4 * u, 14.5 * u }, .hi = .{ 14 * u, 13 * u, 15.5 * u } }
+            else
+                SpecialCuboid{ .lo = .{ 2 * u, 7 * u, 7.5 * u }, .hi = .{ 14 * u, 16 * u, 8.5 * u } };
+            try appendSpecialCuboid(arena, list, layer, board, yrot);
+            if (!special.wall_mounted)
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 7 * u, 0, 7 * u }, .hi = .{ 9 * u, 7 * u, 9 * u } }, yrot);
+        },
+        .hanging_sign => {
+            try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ u, 3 * u, 7 * u }, .hi = .{ 15 * u, 12 * u, 9 * u } }, yrot);
+            if (special.wall_mounted) {
+                // Wall variants use the vanilla-style horizontal mounting bar
+                // with two short hangers; they do not use the ceiling sign's
+                // attached/unattached chain state.
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 0, 14 * u, 6 * u }, .hi = .{ 1, 1, 10 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 2 * u, 10 * u, 7.5 * u }, .hi = .{ 5 * u, 14 * u, 8.5 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 12 * u, 10 * u, 7.5 * u }, .hi = .{ 15 * u, 14 * u, 8.5 * u } }, yrot);
+            } else if (special.attached) {
+                // Attached signs use a rigid cap and central hanger; unattached
+                // signs hang from two separated vertical chains.
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 2 * u, 12 * u, 7.5 * u }, .hi = .{ 14 * u, 14 * u, 8.5 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 7 * u, 14 * u, 7.5 * u }, .hi = .{ 9 * u, 16 * u, 8.5 * u } }, yrot);
+            } else {
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 2 * u, 12 * u, 7.5 * u }, .hi = .{ 4 * u, 16 * u, 8.5 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 12 * u, 12 * u, 7.5 * u }, .hi = .{ 14 * u, 16 * u, 8.5 * u } }, yrot);
+            }
+        },
+        .banner => {
+            const cloth = if (special.wall_mounted)
+                SpecialCuboid{ .lo = .{ 2 * u, 3 * u, 14.5 * u }, .hi = .{ 14 * u, 15 * u, 15.5 * u } }
+            else
+                SpecialCuboid{ .lo = .{ 2 * u, 3 * u, 7.5 * u }, .hi = .{ 14 * u, 15 * u, 8.5 * u } };
+            try appendSpecialCuboid(arena, list, layer, cloth, yrot);
+            if (!special.wall_mounted)
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 7.5 * u, 0, 7.5 * u }, .hi = .{ 8.5 * u, 1, 8.5 * u } }, yrot);
+        },
+        .head => {
+            const head = if (special.wall_mounted)
+                SpecialCuboid{ .lo = .{ 4 * u, 4 * u, 8 * u }, .hi = .{ 12 * u, 12 * u, 16 * u } }
+            else
+                SpecialCuboid{ .lo = .{ 4 * u, 0, 4 * u }, .hi = .{ 12 * u, 8 * u, 12 * u } };
+            try appendSpecialCuboid(arena, list, layer, head, yrot);
+        },
+        .shulker => {
+            const xrot: u16 = switch (special.facing) {
+                .up => 0,
+                .down => 180,
+                else => 90,
+            };
+            const axis_yrot: u16 = switch (special.facing) {
+                .north => 0,
+                .east => 90,
+                .south => 180,
+                .west => 270,
+                else => 0,
+            };
+            try appendOrientedCuboid(arena, list, layer, .{ .lo = .{ u, 0, u }, .hi = .{ 15 * u, 8 * u, 15 * u } }, xrot, axis_yrot);
+            try appendOrientedCuboid(arena, list, layer, .{ .lo = .{ u, 8 * u, u }, .hi = .{ 15 * u, 1, 15 * u } }, xrot, axis_yrot);
+        },
+        .pot => {
+            try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 3 * u, 0, 3 * u }, .hi = .{ 13 * u, 13 * u, 13 * u } }, yrot);
+            try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 5 * u, 13 * u, 5 * u }, .hi = .{ 11 * u, 1, 11 * u } }, yrot);
+        },
+        .golem => switch (special.golem_pose) {
+            .standing => {
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 4 * u, 5 * u, 4 * u }, .hi = .{ 12 * u, 12 * u, 12 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 5 * u, 12 * u, 5 * u }, .hi = .{ 11 * u, 1, 11 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 4 * u, 0, 4 * u }, .hi = .{ 7 * u, 5 * u, 7 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 9 * u, 0, 4 * u }, .hi = .{ 12 * u, 5 * u, 7 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 2 * u, 7 * u, 7 * u }, .hi = .{ 14 * u, 9 * u, 9 * u } }, yrot);
+            },
+            .sitting => {
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 4 * u, 3 * u, 4 * u }, .hi = .{ 12 * u, 10 * u, 12 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 5 * u, 10 * u, 5 * u }, .hi = .{ 11 * u, 15 * u, 11 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 4 * u, 0, 6 * u }, .hi = .{ 7 * u, 3 * u, 12 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 9 * u, 0, 6 * u }, .hi = .{ 12 * u, 3 * u, 12 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 2 * u, 5 * u, 7 * u }, .hi = .{ 14 * u, 7 * u, 9 * u } }, yrot);
+            },
+            .running => {
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 4 * u, 5 * u, 4 * u }, .hi = .{ 12 * u, 12 * u, 12 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 5 * u, 12 * u, 5 * u }, .hi = .{ 11 * u, 1, 11 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 4 * u, 0, u }, .hi = .{ 7 * u, 5 * u, 7 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 9 * u, 0, 9 * u }, .hi = .{ 12 * u, 5 * u, 15 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 2 * u, 7 * u, 3 * u }, .hi = .{ 5 * u, 9 * u, 10 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 11 * u, 7 * u, 6 * u }, .hi = .{ 14 * u, 9 * u, 13 * u } }, yrot);
+            },
+            .star => {
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 4 * u, 5 * u, 4 * u }, .hi = .{ 12 * u, 12 * u, 12 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 5 * u, 12 * u, 5 * u }, .hi = .{ 11 * u, 1, 11 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 4 * u, 0, 4 * u }, .hi = .{ 7 * u, 5 * u, 7 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 9 * u, 0, 4 * u }, .hi = .{ 12 * u, 5 * u, 7 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ u, 9 * u, 7 * u }, .hi = .{ 4 * u, 15 * u, 9 * u } }, yrot);
+                try appendSpecialCuboid(arena, list, layer, .{ .lo = .{ 12 * u, 9 * u, 7 * u }, .hi = .{ 15 * u, 15 * u, 9 * u } }, yrot);
+            },
+        },
+    }
+}
+
+/// Bake an inset compatibility stand-in for a renderer-only block whose source
+/// entity texture is unavailable. Insetting prevents adjacent unknowns from
+/// merging into the solid beams produced by the old full-cell fallback.
+fn bakeBox(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32, height: f32, inset: f32) !void {
+    try appendSpecialCuboid(arena, list, layer, .{
+        .lo = .{ inset, 0, inset },
+        .hi = .{ 1.0 - inset, height, 1.0 - inset },
+    }, 0);
 }
 
 fn bakeFullCube(arena: std.mem.Allocator, list: *std.ArrayList(BakedFace), layer: f32, tint: biome.Tint) !void {

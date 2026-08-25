@@ -245,14 +245,54 @@ describe('authenticated HTTP worlds', () => {
     await expect(src.fetch('%2e%2e/secrets')).rejects.toThrow(/unsafe remote artifact path/);
   });
 
-  it('builds the protocol-v1 manifest URL for a Vantage server', async () => {
+  it('opens every world exposed by a protocol-v1 Vantage server', async () => {
+    const calls: string[] = [];
+    const http = (input: string) => {
+      calls.push(input);
+      if (input.endsWith('/v1/worlds')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          worlds: [
+            {
+              id: 'default',
+              manifest: '/ignored/by/the/client',
+              dimension: { id: 'minecraft:overworld', slug: 'overworld', label: 'Overworld', kind: 'overworld' },
+            },
+            {
+              id: 'the_nether',
+              manifest: 'https://evil.test/ignored',
+              dimension: { id: 'minecraft:the_nether', slug: 'the_nether', label: 'The Nether', kind: 'nether' },
+            },
+          ],
+        })));
+      }
+      return Promise.resolve(new Response(JSON.stringify(MANIFEST)));
+    };
+    const src = await worldFromVantageServer('https://play.example.test/maps', { fetch: http });
+    expect(src.manifest).toMatchObject({
+      format: 1,
+      dimensions: [
+        { slug: 'overworld', manifest: 'default/manifest.json' },
+        { slug: 'the_nether', manifest: 'the_nether/manifest.json' },
+      ],
+    });
+    await src.fetch('the_nether/manifest.json');
+    expect(calls).toEqual([
+      'https://play.example.test/maps/v1/worlds',
+      'https://play.example.test/maps/v1/worlds/the_nether/manifest.json',
+    ]);
+  });
+
+  it('can still open one explicitly named server world', async () => {
     const calls: string[] = [];
     const http = (input: string) => {
       calls.push(input);
       return Promise.resolve(new Response(JSON.stringify(MANIFEST)));
     };
-    await worldFromVantageServer('https://play.example.test/maps', { fetch: http });
-    expect(calls).toEqual(['https://play.example.test/maps/v1/worlds/default/manifest.json']);
+    await worldFromVantageServer('https://play.example.test/maps', {
+      worldId: 'the_nether',
+      fetch: http,
+    });
+    expect(calls).toEqual(['https://play.example.test/maps/v1/worlds/the_nether/manifest.json']);
   });
 
   it('rejects URL credentials in favor of explicit headers', async () => {

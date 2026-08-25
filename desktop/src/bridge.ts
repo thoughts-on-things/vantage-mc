@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { worldFromHttp, type WorldSource } from 'vantage-mc/core';
+import { worldFromVantageServer, type WorldSource } from 'vantage-mc/core';
 import type { DesktopSettings } from './settings.js';
 
 /** The geometry-affecting settings a render was baked with. */
@@ -74,7 +74,6 @@ export interface HostEntry {
   id: string;
   label: string;
   endpoint: string;
-  worldId: string;
   hasToken: boolean;
   addedAtMs: number;
   lastConnectedMs: number | null;
@@ -86,6 +85,7 @@ export interface HostProbe {
   endpoint: string;
   protocol: number | null;
   auth: string | null;
+  /** The worlds this credential can read, by display name. */
   worlds: string[];
   unauthorized: boolean;
   note: string | null;
@@ -94,7 +94,7 @@ export interface HostProbe {
 export interface HostConnection {
   id: string;
   label: string;
-  manifestUrl: string;
+  endpoint: string;
   origin: string;
 }
 
@@ -104,7 +104,6 @@ export interface HostInput {
   id?: string;
   label: string;
   endpoint: string;
-  worldId?: string;
   token?: string;
   forgetToken?: boolean;
 }
@@ -177,7 +176,6 @@ const mockHosts: HostEntry[] = [
     id: 'mock-survival',
     label: 'Survival SMP',
     endpoint: 'https://map.example.net/',
-    worldId: 'default',
     hasToken: true,
     addedAtMs: Date.now() - 9 * 24 * HOUR,
     lastConnectedMs: Date.now() - 3 * HOUR,
@@ -320,7 +318,6 @@ export async function saveHost(input: HostInput): Promise<HostEntry> {
       id: input.id ?? `mock-${mockHosts.length + 1}`,
       label: input.label || new URL(mockEndpoint(input.endpoint)).hostname,
       endpoint: mockEndpoint(input.endpoint),
-      worldId: input.worldId || 'default',
       hasToken: Boolean(input.token) && !input.forgetToken,
       addedAtMs: Date.now(),
       lastConnectedMs: null,
@@ -330,6 +327,25 @@ export async function saveHost(input: HostInput): Promise<HostEntry> {
     return entry;
   }
   return invoke<HostEntry>('save_host', { input });
+}
+
+/** Redeem a confirmed browser pairing code. The code is single-use; the map
+ * token it returns never leaves the native process. */
+export async function pairHost(endpoint: string, code: string, deviceLabel: string): Promise<HostEntry> {
+  if (!inTauri()) {
+    return saveHost({ label: 'Paired server', endpoint, token: 'mock-paired-token' });
+  }
+  return invoke<HostEntry>('pair_host', { endpoint, code, deviceLabel });
+}
+
+export interface PairingInfo {
+  endpoint: string;
+  name: string;
+}
+
+export async function getPairingInfo(endpoint: string): Promise<PairingInfo> {
+  if (!inTauri()) return { endpoint: mockEndpoint(endpoint), name: 'Paired server' };
+  return invoke<PairingInfo>('pairing_info', { endpoint });
 }
 
 export async function deleteHost(id: string): Promise<void> {
@@ -351,7 +367,7 @@ export async function probeHost(endpoint: string, token?: string, id?: string): 
       endpoint: mockEndpoint(endpoint),
       protocol: 1,
       auth: token || id ? 'bearer' : 'proxy',
-      worlds: ['default'],
+      worlds: ['Overworld', 'The Nether'],
       unauthorized: false,
       note: null,
     };
@@ -365,15 +381,19 @@ export async function connectHost(id: string): Promise<HostConnection> {
 }
 
 /**
- * A remote world, streamed through the native side.
+ * Everything a connection carries, streamed through the native side.
  *
- * The viewer only ever asks for manifest-relative paths, and `worldFromHttp`
- * resolves and confines them before handing each one to this transport. The
- * native side confines them again — that is the check that actually gates the
- * credential, since it lives on the side of the boundary that holds it.
+ * No world is named, so the client library reads the connection's world list
+ * and hands back an index: a host that fronts one sidecar per dimension arrives
+ * as one map with a dimension switcher rather than as three saved servers.
+ *
+ * The library resolves and confines every path it derives from that list before
+ * handing it to this transport. The native side confines them again — that is
+ * the check that actually gates the credential, since it lives on the side of
+ * the boundary that holds it.
  */
 export async function remoteWorldSource(connection: HostConnection): Promise<WorldSource> {
-  return worldFromHttp(connection.manifestUrl, {
+  return worldFromVantageServer(connection.endpoint, {
     label: connection.label,
     fetch: (input, init) => hostFetch(connection.id, input, init),
   });

@@ -35,6 +35,7 @@ export {
 } from './players.js';
 export {
   parseWorldIndex,
+  parseServerWorlds,
   isWorldIndex,
   pickDimension,
   resolveManifestPath,

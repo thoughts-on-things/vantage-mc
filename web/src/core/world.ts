@@ -99,3 +99,64 @@ export function pickDimension(index: WorldIndex, slug?: string | null): WorldDim
   }
   return dims.find((d) => d.kind === 'overworld') ?? dims.find((d) => d.tiles > 0) ?? dims[0]!;
 }
+
+/** Protocol world ids address a directory under `/v1/worlds/`, so they stay to
+ *  the character set a path segment accepts. Matches the server's own grammar. */
+export function isServerWorldId(id: string): boolean {
+  return /^[A-Za-z0-9_-]{1,64}$/.test(id);
+}
+
+/**
+ * The `/v1/worlds` document as a world index.
+ *
+ * A protocol connection can carry more than one world — a host that fronts a
+ * sidecar per dimension lists all three — and a client that already switches
+ * between a render's dimensions should switch between those the same way. Each
+ * descriptor may carry the same `dimension` block its manifest does; without
+ * one, the world id is all there is to show.
+ *
+ * Manifest paths are derived from the id rather than read from the descriptor's
+ * own `manifest` field, so every path this index yields is provably inside the
+ * connection's `/v1/worlds/` prefix — a hostile world list cannot walk a
+ * credentialed fetch somewhere else.
+ *
+ * @throws if the shape is not a world list this decoder understands.
+ */
+export function parseServerWorlds(data: unknown): WorldIndex {
+  if (typeof data !== 'object' || data === null) throw new Error('vantage: server world list is not an object');
+  const list = (data as Record<string, unknown>)['worlds'];
+  if (!Array.isArray(list) || list.length === 0) throw new Error('vantage: server listed no worlds');
+
+  const worldIds = new Set<string>();
+  const slugs = new Set<string>();
+  const dimensions = list.map((entry: unknown, i: number) => {
+    const o = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<string, unknown>;
+    const worldId = o['id'];
+    if (typeof worldId !== 'string' || !isServerWorldId(worldId)) {
+      throw new Error(`vantage: server world ${i} has an invalid id`);
+    }
+    const dim = (typeof o['dimension'] === 'object' && o['dimension'] !== null ? o['dimension'] : {}) as Record<string, unknown>;
+    const advertisedSlug = dim['slug'];
+    // World ids admit upper case and slugs do not, so the fallback is the id
+    // folded rather than the id itself.
+    const slug = typeof advertisedSlug === 'string' && SLUG_RE.test(advertisedSlug)
+      ? advertisedSlug
+      : worldId.toLowerCase();
+    if (worldIds.has(worldId) || slugs.has(slug)) {
+      throw new Error(`vantage: server world ${i} has a duplicate id or slug`);
+    }
+    worldIds.add(worldId);
+    slugs.add(slug);
+    return {
+      id: typeof dim['id'] === 'string' ? dim['id'] : worldId,
+      slug,
+      label: typeof dim['label'] === 'string' ? dim['label'] : worldId,
+      kind: dim['kind'],
+      manifest: `${worldId}/manifest.json`,
+      tiles: 0,
+      bytes: 0,
+    };
+  });
+
+  return parseWorldIndex({ format: 1, dimensions });
+}

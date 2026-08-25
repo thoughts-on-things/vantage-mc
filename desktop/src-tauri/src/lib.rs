@@ -22,6 +22,8 @@ use tauri::{
     window::{ProgressBarState, ProgressBarStatus},
     Emitter, Manager, WebviewWindow,
 };
+#[cfg(desktop)]
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
@@ -538,6 +540,26 @@ fn delete_host(state: tauri::State<'_, AppState>, id: String) -> Result<(), Stri
     state.hosts.delete(&id)
 }
 
+/// Exchanges a confirmed one-time browser code for a map-only credential.
+#[tauri::command]
+async fn pair_host(
+    state: tauri::State<'_, AppState>,
+    endpoint: String,
+    code: String,
+    device_label: String,
+) -> Result<HostEntry, String> {
+    state.hosts.pair(&endpoint, &code, &device_label).await
+}
+
+/// Reads and validates the public discovery name shown before pairing.
+#[tauri::command]
+async fn pairing_info(
+    state: tauri::State<'_, AppState>,
+    endpoint: String,
+) -> Result<hosts::PairingInfo, String> {
+    state.hosts.pairing_info(&endpoint).await
+}
+
 /// Asks an address what it is, before it is saved — the connect form's "test"
 /// button. The token is offered for this one exchange and not retained.
 #[tauri::command]
@@ -676,7 +698,22 @@ fn cache_path(app: &tauri::AppHandle, world_path: &str) -> Result<PathBuf, Strin
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        // Must be first: on Windows/Linux the OS launches a second process for
+        // a deep link, and this plugin forwards it to the running app before
+        // closing that process.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            app.deep_link().handle_cli_arguments(args.iter());
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+        builder = builder.plugin(tauri_plugin_deep_link::init());
+    }
+    builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -742,6 +779,8 @@ pub fn run() {
             list_hosts,
             save_host,
             delete_host,
+            pair_host,
+            pairing_info,
             probe_host,
             connect_host,
             host_fetch,

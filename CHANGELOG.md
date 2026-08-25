@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.14.0...v0.15.0) (2026-08-25)
+
+
+### Features
+
+* **desktop:** add secure server pairing ([#82](https://github.com/thoughts-on-things/vantage-mc/issues/82)) ([8c75a64](https://github.com/thoughts-on-things/vantage-mc/commit/8c75a6485c4f2d7cf958db69c6a19bb49a04711d))
+
 ## [0.14.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.13.0...v0.14.0) (2026-08-13)
 
 

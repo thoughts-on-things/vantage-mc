@@ -47,6 +47,32 @@ pub const AnimEntry = struct {
     interpolate: bool,
 };
 
+/// Pixel rectangle in a source texture. Special block renderers use packed
+/// entity texture sheets; a representative surface is cropped before scaling
+/// into a fixed-size texture-array layer.
+pub const Region = struct {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    /// Dimensions in which the coordinates above were authored. When set,
+    /// scale the rectangle to the decoded image so HD resource packs work.
+    reference_w: u32 = 0,
+    reference_h: u32 = 0,
+};
+
+fn regionCacheKey(buf: []u8, path: []const u8, region: Region) ![]const u8 {
+    return std.fmt.bufPrint(buf, "#region:{s}:{d},{d},{d},{d}@{d}x{d}", .{
+        path,
+        region.x,
+        region.y,
+        region.w,
+        region.h,
+        region.reference_w,
+        region.reference_h,
+    });
+}
+
 pub const Builder = struct {
     arena: std.mem.Allocator,
     io: std.Io,
@@ -85,6 +111,25 @@ pub const Builder = struct {
         return idx;
     }
 
+    /// Layer for one rectangle of a packed texture sheet. The crop is part of
+    /// the cache key, so repeated block states share the same decoded layer.
+    pub fn layerForRegion(self: *Builder, path: []const u8, region: Region) u32 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var key_buf: [1024]u8 = undefined;
+        const lookup_key = regionCacheKey(&key_buf, path, region) catch return 0;
+        if (self.map.get(lookup_key)) |i| return i;
+        // Persist the key only on a cache miss. Formatting directly into the
+        // arena on every lookup leaked one allocation per rendered block.
+        const key = self.arena.dupe(u8, lookup_key) catch return 0;
+        return self.loadRegion(path, key, region) catch {
+            // Missing/malformed resources are stable for the lifetime of a render.
+            // Cache layer 0 so every block does not retry I/O or allocate a key.
+            self.map.put(key, 0) catch return 0;
+            return 0;
+        };
+    }
+
     /// A layer's RGBA pixels, fetched under the lock (a concurrent append can
     /// move the `layers` backing array; the pixel buffers themselves are stable).
     pub fn layerPixels(self: *Builder, idx: u32) []const u8 {
@@ -98,8 +143,10 @@ pub const Builder = struct {
     pub fn solidLayer(self: *Builder, rgb: [3]u8) !u32 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const key = try std.fmt.allocPrint(self.arena, "#solid:{x:0>2}{x:0>2}{x:0>2}", .{ rgb[0], rgb[1], rgb[2] });
-        if (self.map.get(key)) |i| return i;
+        var key_buf: [14]u8 = undefined;
+        const lookup_key = try std.fmt.bufPrint(&key_buf, "#solid:{x:0>2}{x:0>2}{x:0>2}", .{ rgb[0], rgb[1], rgb[2] });
+        if (self.map.get(lookup_key)) |i| return i;
+        const key = try self.arena.dupe(u8, lookup_key);
         const buf = try self.arena.alloc(u8, BYTES_PER_LAYER);
         var p: usize = 0;
         while (p < BYTES_PER_LAYER) : (p += 4) {
@@ -144,6 +191,22 @@ pub const Builder = struct {
         const idx: u32 = @intCast(self.layers.items.len);
         try self.layers.append(self.arena, layer);
         try self.map.put(path, idx);
+        return idx;
+    }
+
+    fn loadRegion(self: *Builder, path: []const u8, key: []const u8, region: Region) !u32 {
+        const full = try std.fmt.allocPrint(self.arena, "{s}/textures/{s}.png", .{ self.root, path });
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, full, self.arena, .unlimited);
+        var w: c_int = 0;
+        var h: c_int = 0;
+        var ch: c_int = 0;
+        const data = c.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &w, &h, &ch, 4) orelse return error.DecodeFailed;
+        defer c.stbi_image_free(data);
+        if (w <= 0 or h <= 0) return error.DecodeFailed;
+        const layer = try normalizeRegion(self.arena, data, @intCast(w), @intCast(h), region);
+        const idx: u32 = @intCast(self.layers.items.len);
+        try self.layers.append(self.arena, layer);
+        try self.map.put(key, idx);
         return idx;
     }
 
@@ -421,6 +484,38 @@ fn normalizeFrame(arena: std.mem.Allocator, data: [*]const u8, w: u32, h: u32, f
     return out;
 }
 
+fn normalizeRegion(arena: std.mem.Allocator, data: [*]const u8, source_w: u32, source_h: u32, requested: Region) ![]u8 {
+    var region = requested;
+    if (requested.reference_w != 0 or requested.reference_h != 0) {
+        if (requested.reference_w == 0 or requested.reference_h == 0) return error.InvalidRegion;
+        const x1 = @as(u64, requested.x) * source_w / requested.reference_w;
+        const y1 = @as(u64, requested.y) * source_h / requested.reference_h;
+        const x2 = (@as(u64, requested.x) + requested.w) * source_w / requested.reference_w;
+        const y2 = (@as(u64, requested.y) + requested.h) * source_h / requested.reference_h;
+        region = .{
+            .x = @intCast(x1),
+            .y = @intCast(y1),
+            .w = @intCast(x2 - x1),
+            .h = @intCast(y2 - y1),
+        };
+    }
+    if (region.w == 0 or region.h == 0 or region.x > source_w or region.y > source_h or
+        region.w > source_w - region.x or region.h > source_h - region.y) return error.InvalidRegion;
+    const out = try arena.alloc(u8, BYTES_PER_LAYER);
+    var ty: u32 = 0;
+    while (ty < TILE) : (ty += 1) {
+        const sy = region.y + (ty * region.h) / TILE;
+        var tx: u32 = 0;
+        while (tx < TILE) : (tx += 1) {
+            const sx = region.x + (tx * region.w) / TILE;
+            const si = (sy * source_w + sx) * 4;
+            const di = (ty * TILE + tx) * 4;
+            @memcpy(out[di..][0..4], data[si..][0..4]);
+        }
+    }
+    return out;
+}
+
 fn forceOpaque(layer: []u8) void {
     var i: usize = 3;
     while (i < layer.len) : (i += 4) layer[i] = 0xFF;
@@ -476,6 +571,76 @@ test "normalizeFrame copies a 16x16 image unchanged and extracts strip frames" {
         try std.testing.expectEqual(@as(u8, @intCast(k)), fr[0]);
         try std.testing.expectEqual(@as(u8, @intCast(k)), fr[BYTES_PER_LAYER - 4]);
     }
+}
+
+test "normalizeRegion crops before scaling to a texture-array layer" {
+    const a = std.testing.allocator;
+    // Four horizontal pixels with distinct red channels. Cropping the middle
+    // two must discard the outer colors and stretch only 20,30 across the layer.
+    const img = [_]u8{
+        10, 0, 0, 255,
+        20, 0, 0, 255,
+        30, 0, 0, 255,
+        40, 0, 0, 255,
+    };
+    const out = try normalizeRegion(a, &img, 4, 1, .{ .x = 1, .y = 0, .w = 2, .h = 1 });
+    defer a.free(out);
+    try std.testing.expectEqual(@as(u8, 20), out[0]);
+    try std.testing.expectEqual(@as(u8, 20), out[(TILE / 2 - 1) * 4]);
+    try std.testing.expectEqual(@as(u8, 30), out[(TILE / 2) * 4]);
+    try std.testing.expectEqual(@as(u8, 30), out[(TILE - 1) * 4]);
+}
+
+test "normalizeRegion scales reference coordinates for HD resource packs" {
+    const a = std.testing.allocator;
+    var img: [8 * 2 * 4]u8 = undefined;
+    for (0..2) |y| for (0..8) |x| {
+        const i = (y * 8 + x) * 4;
+        img[i..][0..4].* = .{ @intCast(x * 10), 0, 0, 255 };
+    };
+    const out = try normalizeRegion(a, &img, 8, 2, .{
+        .x = 1,
+        .y = 0,
+        .w = 2,
+        .h = 1,
+        .reference_w = 4,
+        .reference_h = 1,
+    });
+    defer a.free(out);
+    try std.testing.expectEqual(@as(u8, 20), out[0]);
+    try std.testing.expectEqual(@as(u8, 50), out[(TILE - 1) * 4]);
+}
+
+test "region cache keys include reference dimensions" {
+    var a_buf: [256]u8 = undefined;
+    var b_buf: [256]u8 = undefined;
+    const a = try regionCacheKey(&a_buf, "entity/chest/normal", .{
+        .x = 1,
+        .y = 2,
+        .w = 3,
+        .h = 4,
+        .reference_w = 64,
+        .reference_h = 64,
+    });
+    const b = try regionCacheKey(&b_buf, "entity/chest/normal", .{
+        .x = 1,
+        .y = 2,
+        .w = 3,
+        .h = 4,
+        .reference_w = 128,
+        .reference_h = 128,
+    });
+    try std.testing.expect(!std.mem.eql(u8, a, b));
+}
+
+test "missing cropped textures are negatively cached" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    var builder = try Builder.init(arena_inst.allocator(), std.testing.io, "definitely-missing-assets-root");
+    const region: Region = .{ .x = 0, .y = 0, .w = 16, .h = 16 };
+    try std.testing.expectEqual(@as(u32, 0), builder.layerForRegion("entity/missing", region));
+    try std.testing.expectEqual(@as(u32, 0), builder.layerForRegion("entity/missing", region));
+    try std.testing.expectEqual(@as(u32, 1), builder.map.count());
 }
 
 test "parseMcmeta: defaults, frames list with objects, out-of-range, garbage" {

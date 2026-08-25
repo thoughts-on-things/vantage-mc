@@ -57,6 +57,13 @@ To render something you need assets extracted from a Minecraft client jar
 (`just extract <client.jar>`, any 1.18+ version) and a world save. See the
 [README](./README.md#quick-start).
 
+When validating a newly released Minecraft version, run
+`just audit-special <client.jar>`. The compatibility audit recursively resolves
+block-model parents and fails if a new zero-element model family is not
+explicitly supported or classified as intentionally geometry-free. Passing the
+audit proves coverage classification, not exact vanilla UVs, animation, text,
+patterns, or NBT-driven appearance.
+
 ### A world with every dimension
 
 Most saves lying around are overworld-only: the nether and the end have no

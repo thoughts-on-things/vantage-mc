@@ -1,6 +1,7 @@
 .zig-cache/
 zig-out/
 zig-pkg/
+__pycache__/
 .DS_Store
 
 # Generated tiles (regenerate with `vantage mesh` / `meshtex` → web/public/)

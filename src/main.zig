@@ -4337,7 +4337,10 @@ fn runExtract(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
         };
     const dest = try assetCachePathForJar(a, home, jar);
     const summary = try extract.extractJar(init.io, jar, dest);
-    std.debug.print("extracted {d} files ({Bi:.1}) from {s}\n  -> {s}\n", .{ summary.files, summary.bytes, jar, dest });
+    if (summary.reused)
+        std.debug.print("assets already complete for {s}\n  -> {s}\n", .{ jar, dest })
+    else
+        std.debug.print("extracted {d} files ({Bi:.1}) from {s}\n  -> {s}\n", .{ summary.files, summary.bytes, jar, dest });
 }
 
 /// When a render finds no cached assets, extract them from the newest local
@@ -4352,7 +4355,10 @@ fn autoExtract(init: std.process.Init, a: std.mem.Allocator, home: []const u8) !
         std.debug.print("extraction failed ({t}); pass --assets or run `vantage extract <jar>`\n", .{e});
         return null;
     };
-    std.debug.print("extracted {d} files ({Bi:.1}) -> {s}\n", .{ summary.files, summary.bytes, dest });
+    if (summary.reused)
+        std.debug.print("another process completed the assets -> {s}\n", .{dest})
+    else
+        std.debug.print("extracted {d} files ({Bi:.1}) -> {s}\n", .{ summary.files, summary.bytes, dest });
     return try std.fmt.allocPrint(a, "{s}/assets/minecraft", .{dest});
 }
 
@@ -4421,6 +4427,23 @@ fn fileExists(io: std.Io, path: []const u8) bool {
     return true;
 }
 
+const AssetCacheCandidate = struct {
+    name: []const u8,
+    path: []const u8,
+    usable: bool,
+};
+
+fn chooseNewestAssetCache(candidates: []const AssetCacheCandidate) ?[]const u8 {
+    var newest: ?AssetCacheCandidate = null;
+    for (candidates) |candidate| {
+        if (newest == null or versionLessThan(newest.?.name, candidate.name)) newest = candidate;
+    }
+    const selected = newest orelse return null;
+    // Never silently fall back to an older cache when the newest is stale:
+    // returning null deliberately drives resolveAssets through autoExtract.
+    return if (selected.usable) selected.path else null;
+}
+
 /// Auto-detect an extracted `assets/minecraft` under `~/.cache/vantage/assets/<ver>/`,
 /// preferring the highest-named version. Returns null if none is found.
 fn findAssets(a: std.mem.Allocator, io: std.Io, home: []const u8) !?[]const u8 {
@@ -4428,20 +4451,23 @@ fn findAssets(a: std.mem.Allocator, io: std.Io, home: []const u8) !?[]const u8 {
     const base = try std.fmt.allocPrint(a, "{s}/.cache/vantage/assets", .{home});
     var dir = std.Io.Dir.cwd().openDir(io, base, .{ .iterate = true }) catch return null;
     defer dir.close(io);
-    var best_path: ?[]const u8 = null;
-    var best_name: []const u8 = "";
+    var candidates: std.ArrayList(AssetCacheCandidate) = .empty;
     var it = dir.iterate();
     while (try it.next(io)) |e| {
         if (e.kind != .directory) continue;
         const candidate = try std.fmt.allocPrint(a, "{s}/{s}/assets/minecraft", .{ base, e.name });
         const bs = try std.fmt.allocPrint(a, "{s}/blockstates", .{candidate});
-        if (!dirExists(io, bs)) continue;
-        if (best_path == null or versionLessThan(best_name, e.name)) {
-            best_path = candidate;
-            best_name = try a.dupe(u8, e.name);
-        }
+        // The extractor writes this versioned marker only after every selected
+        // entry succeeds. Old or interrupted caches have no marker and force the
+        // normal auto-extract path instead of silently using partial assets.
+        const marker = try std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ base, e.name, extract.completion_marker });
+        try candidates.append(a, .{
+            .name = try a.dupe(u8, e.name),
+            .path = candidate,
+            .usable = dirExists(io, bs) and fileExists(io, marker),
+        });
     }
-    return best_path;
+    return chooseNewestAssetCache(candidates.items);
 }
 
 /// Natural-order compare for version-ish directory names, so "1.21.10" beats
@@ -4494,6 +4520,49 @@ test versionLessThan {
     try std.testing.expect(!versionLessThan("26.2", "26.2-pre-4"));
     try std.testing.expect(versionLessThan("26.2-pre-4", "26.2-pre-5"));
     try std.testing.expect(versionLessThan("26.1.2", "26.2-pre-4"));
+}
+
+test "newest stale asset cache forces re-extraction" {
+    const caches = [_]AssetCacheCandidate{
+        .{ .name = "1.21.11", .path = "old", .usable = true },
+        .{ .name = "26.2", .path = "new", .usable = false },
+    };
+    try std.testing.expect(chooseNewestAssetCache(&caches) == null);
+
+    const valid = [_]AssetCacheCandidate{
+        .{ .name = "1.21.11", .path = "old", .usable = true },
+        .{ .name = "26.2", .path = "new", .usable = true },
+    };
+    try std.testing.expectEqualStrings("new", chooseNewestAssetCache(&valid).?);
+}
+
+test "cache with one special texture but no completion marker is stale" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, ".cache/vantage/assets/1.21.11/assets/minecraft/blockstates");
+    try tmp.dir.createDirPath(io, ".cache/vantage/assets/1.21.11/assets/minecraft/textures/entity/chest");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".cache/vantage/assets/1.21.11/assets/minecraft/textures/entity/chest/normal.png",
+        .data = "partial",
+    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(io, &path_buf);
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+    try std.testing.expect(try findAssets(a, io, path_buf[0..path_len]) == null);
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".cache/vantage/assets/1.21.11/" ++ extract.completion_marker,
+        .data = "complete\n",
+    });
+    try std.testing.expect((try findAssets(a, io, path_buf[0..path_len])) != null);
+
+    // A corrupt newer directory must not disappear from consideration and let
+    // the older complete cache win; its presence forces a fresh extraction.
+    try tmp.dir.createDirPath(io, ".cache/vantage/assets/26.2");
+    try std.testing.expect(try findAssets(a, io, path_buf[0..path_len]) == null);
 }
 
 fn dirExists(io: std.Io, path: []const u8) bool {

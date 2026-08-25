@@ -322,7 +322,7 @@ impl HostStore {
         let token = redeemed
             .get("token")
             .and_then(serde_json::Value::as_str)
-            .filter(|token| !token.is_empty() && token.len() <= 1024)
+            .filter(|token| valid_bearer_token(token))
             .ok_or("The server returned an invalid pairing response.")?
             .to_string();
         let server_label = discovery
@@ -705,6 +705,23 @@ pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
         url.set_path(&path);
     }
     Ok(url.to_string())
+}
+
+fn valid_bearer_token(token: &str) -> bool {
+    if token.is_empty() || token.len() > 1024 {
+        return false;
+    }
+    let mut padding = false;
+    token.bytes().all(|byte| {
+        if byte == b'=' {
+            padding = true;
+            true
+        } else {
+            !padding
+                && (byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/'))
+        }
+    })
 }
 
 fn normalize_pairing_endpoint(raw: &str) -> Result<String, String> {
@@ -1634,6 +1651,20 @@ mod tests {
         assert_eq!(requests.len(), 1, "inspection should read discovery only");
         assert!(requests[0].starts_with("GET /.well-known/vantage auth=-"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pairing_tokens_must_be_valid_bearer_credentials() {
+        for token in [
+            "abc-._~+/XYZ09",
+            "eyJhbGciOiJIUzI1NiJ9.payload.signature",
+            "abc==",
+        ] {
+            assert!(valid_bearer_token(token), "{token}");
+        }
+        for token in ["", "has space", "line\nbreak", "abc=tail", "é"] {
+            assert!(!valid_bearer_token(token), "{token}");
+        }
     }
 
     #[test]

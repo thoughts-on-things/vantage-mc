@@ -2849,6 +2849,32 @@ test "special block geometry uses distinct parts instead of generic cubes" {
 
 const SpecialCuboid = struct { lo: [3]f32, hi: [3]f32 };
 
+fn specialCullFace(cuboid: SpecialCuboid, dir: model.Dir, xrot: u16, yrot: u16) ?model.Dir {
+    const touches_boundary = switch (dir) {
+        .down => cuboid.lo[1] == 0,
+        .up => cuboid.hi[1] == 1,
+        .north => cuboid.lo[2] == 0,
+        .south => cuboid.hi[2] == 1,
+        .west => cuboid.lo[0] == 0,
+        .east => cuboid.hi[0] == 1,
+    };
+    return if (touches_boundary) rotateDir(dir, xrot, yrot) else null;
+}
+
+test "special cuboids cull only rotated cell-boundary faces" {
+    const inset: SpecialCuboid = .{ .lo = .{ 0.25, 0.25, 0.25 }, .hi = .{ 0.75, 0.75, 0.75 } };
+    for (std.enums.values(model.Dir)) |dir|
+        try std.testing.expectEqual(@as(?model.Dir, null), specialCullFace(inset, dir, 0, 0));
+
+    const boundary: SpecialCuboid = .{ .lo = .{ 0, 0, 0.25 }, .hi = .{ 0.5, 0.75, 1 } };
+    try std.testing.expectEqual(model.Dir.down, specialCullFace(boundary, .down, 0, 90).?);
+    try std.testing.expectEqual(model.Dir.west, specialCullFace(boundary, .south, 0, 90).?);
+    try std.testing.expectEqual(model.Dir.north, specialCullFace(boundary, .west, 0, 90).?);
+    try std.testing.expectEqual(@as(?model.Dir, null), specialCullFace(boundary, .up, 0, 90));
+    try std.testing.expectEqual(@as(?model.Dir, null), specialCullFace(boundary, .north, 0, 90));
+    try std.testing.expectEqual(@as(?model.Dir, null), specialCullFace(boundary, .east, 0, 90));
+}
+
 fn appendOrientedCuboid(
     arena: std.mem.Allocator,
     list: *std.ArrayList(BakedFace),
@@ -2858,7 +2884,13 @@ fn appendOrientedCuboid(
     yrot: u16,
 ) !void {
     for (tex_faces) |tf| {
-        var bf: BakedFace = .{ .verts = undefined, .layer = layer, .tint = .none, .cull = null, .ao = false };
+        var bf: BakedFace = .{
+            .verts = undefined,
+            .layer = layer,
+            .tint = .none,
+            .cull = specialCullFace(cuboid, tf.dir, xrot, yrot),
+            .ao = false,
+        };
         for (0..4) |i| {
             const cs = tf.corners[i];
             var p = [3]f32{
@@ -2868,7 +2900,6 @@ fn appendOrientedCuboid(
             };
             var n = [3]f32{ @floatFromInt(tf.n[0]), @floatFromInt(tf.n[1]), @floatFromInt(tf.n[2]) };
             rotate(&p, &n, xrot, yrot);
-            bf.ao_off[i] = cornerAoOffsets(n, p);
             bf.verts[i] = .{
                 .pos = p,
                 .uv = .{ @floatFromInt(tf.uvsel[i][0]), @floatFromInt(tf.uvsel[i][1]) },

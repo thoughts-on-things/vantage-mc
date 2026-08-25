@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Capabilities for the main Vantage window",
   "windows": ["main"],
-  "permissions": ["core:default", "updater:default", "process:allow-restart"]
+  "permissions": ["core:default", "deep-link:default", "updater:default", "process:allow-restart"]
 }

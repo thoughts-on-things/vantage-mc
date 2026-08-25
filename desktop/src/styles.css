@@ -280,6 +280,22 @@ button:focus-visible, input:focus-visible, [role='button']:focus-visible {
 /* --- Settings sheet --------------------------------------------------- */
 
 .settings-layer { position: fixed; z-index: 100; inset: 0; display: flex; justify-content: flex-end; padding: 10px; background: rgba(2, 4, 3, 0.58); backdrop-filter: blur(8px); animation: layer-in 0.2s ease both; }
+.pairing-layer { position: fixed; z-index: 140; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(2, 4, 3, 0.72); backdrop-filter: blur(10px); animation: layer-in 0.2s ease both; }
+.pairing-dialog { position: relative; width: min(480px, 100%); padding: 28px; border: 1px solid var(--line-strong); border-radius: var(--radius-lg); color: var(--text-1); background: var(--surface); box-shadow: var(--shadow-2); }
+.pairing-close { position: absolute; top: 14px; right: 14px; display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; color: var(--text-3); background: transparent; cursor: pointer; }
+.pairing-close:hover { color: var(--text-1); background: var(--surface-2); }
+.pairing-icon { display: grid; place-items: center; width: 42px; height: 42px; margin-bottom: 16px; border: 1px solid var(--accent-line); border-radius: 11px; color: var(--accent); background: var(--accent-soft); }
+.pairing-dialog h1 { margin: 4px 0 14px; font-size: 24px; }
+.pairing-endpoint { display: block; overflow: hidden; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--text-2); background: var(--surface-2); text-overflow: ellipsis; white-space: nowrap; }
+.pairing-copy { margin: 14px 0 0; color: var(--text-2); font-size: var(--text-sm); line-height: 1.55; }
+.pairing-safe, .pairing-error { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; font-size: var(--text-xs); line-height: 1.45; }
+.pairing-safe { color: var(--accent); }
+.pairing-error { padding: 10px 12px; border: 1px solid var(--danger-line); border-radius: 8px; color: var(--danger); background: var(--danger-soft); }
+.pairing-safe svg, .pairing-error svg { flex: 0 0 auto; }
+.pairing-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+.pairing-actions > button { min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 8px; color: var(--text-2); background: var(--surface-2); cursor: pointer; }
+.pairing-actions > button.primary-button { display: inline-flex; align-items: center; gap: 7px; color: var(--accent-ink); background: var(--accent); }
+.pairing-actions button:disabled { opacity: 0.58; cursor: default; }
 .settings-sheet { width: min(460px, 100%); height: 100%; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius-lg); color: var(--text-1); background: var(--surface); box-shadow: -28px 0 80px rgba(0, 0, 0, 0.38); animation: sheet-in 0.36s var(--ease-out) both; }
 .settings-head { min-height: 92px; display: flex; align-items: center; justify-content: space-between; padding: 21px 24px; border-bottom: 1px solid var(--line); }
 .settings-head .eyebrow { margin: 0 0 4px; }

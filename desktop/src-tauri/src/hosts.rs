@@ -7,8 +7,9 @@
 //! credential a server operator hands a player never has to cross into the
 //! page. The frontend names a connection by id, and gets bytes back.
 //!
-//! Everything here is read-only: protocol v1 is a GET-only data plane, and this
-//! client issues nothing else.
+//! Protocol v1 is a GET-only data plane. The sole write is an explicit pairing
+//! exchange: after the player confirms it, a one-time code is POSTed back to the
+//! same endpoint that advertised the exchange and replaced by a map-only token.
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -28,6 +29,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 /// Probes only ever read two tiny JSON documents.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PAIR_CODE_BYTES: usize = 256;
 /// A protocol artifact is a manifest, an atlas, or one tile. Nothing legitimate
 /// is close to this, and the cap is what keeps a hostile endpoint from trading
 /// one request for all of this process's memory.
@@ -48,7 +50,6 @@ pub struct HostRecord {
     /// Normalized: scheme, authority, optional path prefix, always one
     /// trailing slash, never any userinfo, query, or fragment.
     pub endpoint: String,
-    pub world_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     pub added_at_ms: i64,
@@ -57,13 +58,10 @@ pub struct HostRecord {
 }
 
 impl HostRecord {
-    /// `<endpoint>v1/worlds/<id>/` — the only prefix this connection may read.
-    fn world_prefix(&self) -> String {
-        format!("{}v1/worlds/{}/", self.endpoint, self.world_id)
-    }
-
-    fn manifest_url(&self) -> String {
-        format!("{}manifest.json", self.world_prefix())
+    /// `<endpoint>v1/worlds` — the world list, and the root of every artifact
+    /// of every world this connection carries. The only place it may read.
+    fn worlds_url(&self) -> String {
+        format!("{}v1/worlds", self.endpoint)
     }
 }
 
@@ -74,7 +72,6 @@ pub struct HostEntry {
     pub id: String,
     pub label: String,
     pub endpoint: String,
-    pub world_id: String,
     /// Whether a token is remembered for this connection. The value never
     /// leaves this process.
     pub has_token: bool,
@@ -88,7 +85,6 @@ impl From<&HostRecord> for HostEntry {
             id: record.id.clone(),
             label: record.label.clone(),
             endpoint: record.endpoint.clone(),
-            world_id: record.world_id.clone(),
             has_token: record.token.is_some(),
             added_at_ms: record.added_at_ms,
             last_connected_ms: record.last_connected_ms,
@@ -105,8 +101,6 @@ pub struct HostInput {
     #[serde(default)]
     pub label: String,
     pub endpoint: String,
-    #[serde(default)]
-    pub world_id: Option<String>,
     /// A new token. `None` on an edit leaves the stored one alone, which is how
     /// the form can offer "keep the saved token" without ever displaying it.
     #[serde(default)]
@@ -127,12 +121,19 @@ pub struct HostProbe {
     pub protocol: Option<u32>,
     /// `bearer` or `proxy`, when discovery answered.
     pub auth: Option<String>,
-    /// World ids the credential can read.
+    /// The worlds the credential can read, by display name.
     pub worlds: Vec<String>,
     /// True when the endpoint answered but refused the credential offered.
     pub unauthorized: bool,
     /// A human-readable note when something answered oddly but not fatally.
     pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingInfo {
+    pub endpoint: String,
+    pub name: String,
 }
 
 /// A connection opened for the viewer.
@@ -141,7 +142,9 @@ pub struct HostProbe {
 pub struct HostConnection {
     pub id: String,
     pub label: String,
-    pub manifest_url: String,
+    /// The connection's base address. The client library reads the world list
+    /// under it and opens everything the connection carries.
+    pub endpoint: String,
     /// Shown in the viewer chrome; never includes a credential.
     pub origin: String,
 }
@@ -180,11 +183,6 @@ impl HostStore {
     /// Adds or updates a connection and persists the list.
     pub fn save(&self, input: HostInput) -> Result<HostEntry, String> {
         let endpoint = normalize_endpoint(&input.endpoint)?;
-        let world_id = match input.world_id.as_deref() {
-            None | Some("") => "default".to_string(),
-            Some(id) if is_world_id(id) => id.to_string(),
-            Some(_) => return Err("That world id is not a valid protocol world id.".into()),
-        };
         let label = pick_label(&input.label, &endpoint);
         let token = input.token.filter(|token| !token.is_empty());
 
@@ -205,7 +203,6 @@ impl HostStore {
                     let moved = credential_scope(&record.endpoint) != credential_scope(&endpoint);
                     record.label = label;
                     record.endpoint = endpoint;
-                    record.world_id = world_id;
                     // A blank token box means "leave it as it is"; forgetting
                     // is a separate, deliberate act.
                     if input.forget_token || (moved && token.is_none()) {
@@ -220,7 +217,6 @@ impl HostStore {
                         id: new_id(),
                         label,
                         endpoint,
-                        world_id,
                         token: if input.forget_token { None } else { token },
                         added_at_ms: crate::renders::now_ms(),
                         last_connected_ms: None,
@@ -240,6 +236,127 @@ impl HostStore {
         self.persist()
     }
 
+    /// Fetch the public discovery document so the confirmation dialog can show
+    /// a server-controlled name before any code is redeemed.
+    pub async fn pairing_info(&self, endpoint: &str) -> Result<PairingInfo, String> {
+        let endpoint = normalize_pairing_endpoint(endpoint)?;
+        let discovery = self
+            .read_json(&format!("{endpoint}.well-known/vantage"), None)
+            .await?
+            .ok_or("This server does not advertise Vantage pairing.")?;
+        validate_pairing_discovery(&discovery)?;
+        Ok(PairingInfo {
+            name: pick_label(
+                discovery
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                &endpoint,
+            ),
+            endpoint,
+        })
+    }
+
+    /// Redeems a browser-minted, one-time pairing code and saves the resulting
+    /// map credential. No request happens until the frontend has shown the
+    /// endpoint and the player has confirmed it.
+    pub async fn pair(
+        &self,
+        endpoint: &str,
+        code: &str,
+        device_label: &str,
+    ) -> Result<HostEntry, String> {
+        let endpoint = normalize_pairing_endpoint(endpoint)?;
+        if code.is_empty()
+            || code.len() > MAX_PAIR_CODE_BYTES
+            || !code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        {
+            return Err("That pairing code is not valid.".into());
+        }
+
+        let discovery = self
+            .read_json(&format!("{endpoint}.well-known/vantage"), None)
+            .await?
+            .ok_or("This server does not advertise Vantage pairing.")?;
+        let redeem = validate_pairing_discovery(&discovery)?;
+        let redeem_url = resolve_under_endpoint(&endpoint, redeem)?;
+
+        // The saved id is also the host's stable device id. Re-pairing this
+        // endpoint rotates the same server-side device instead of consuming a
+        // new slot each time.
+        let existing = self
+            .read()?
+            .iter()
+            .find(|record| record.endpoint == endpoint)
+            .cloned();
+        let device_id = existing
+            .as_ref()
+            .map(|record| record.id.clone())
+            .unwrap_or_else(new_id);
+        let label = device_label.trim().chars().take(120).collect::<String>();
+        let client = self.client.as_ref().map_err(String::clone)?;
+        let response = client
+            .post(redeem_url)
+            .timeout(CONNECT_TIMEOUT)
+            .json(&serde_json::json!({
+                "code": code,
+                "deviceId": device_id,
+                "deviceLabel": if label.is_empty() { "Vantage Desktop" } else { &label },
+            }))
+            .send()
+            .await
+            .map_err(|error| transport_error(&error))?;
+        if !response.status().is_success() {
+            return Err(match response.status().as_u16() {
+                400 | 401 | 404 | 409 | 410 => {
+                    "That pairing link is invalid, expired, or already used.".into()
+                }
+                status => format!("The server could not finish pairing (HTTP {status})."),
+            });
+        }
+        let body = read_capped(response, MAX_PROBE_BYTES).await?;
+        let redeemed: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|_| "The server returned an invalid pairing response.".to_string())?;
+        let token = redeemed
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| !token.is_empty() && token.len() <= 1024)
+            .ok_or("The server returned an invalid pairing response.")?
+            .to_string();
+        let server_label = discovery
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let now = crate::renders::now_ms();
+        let entry = {
+            let mut records = self.read()?;
+            if let Some(record) = records
+                .iter_mut()
+                .find(|record| record.endpoint == endpoint)
+            {
+                record.label = pick_label(server_label, &endpoint);
+                record.token = Some(token);
+                HostEntry::from(&*record)
+            } else {
+                let record = HostRecord {
+                    id: device_id,
+                    label: pick_label(server_label, &endpoint),
+                    endpoint,
+                    token: Some(token),
+                    added_at_ms: now,
+                    last_connected_ms: None,
+                };
+                let entry = HostEntry::from(&record);
+                records.push(record);
+                entry
+            }
+        };
+        self.persist()?;
+        Ok(entry)
+    }
+
     fn find(&self, id: &str) -> Result<HostRecord, String> {
         self.read()?
             .iter()
@@ -248,13 +365,13 @@ impl HostStore {
             .ok_or_else(|| "That connection is no longer saved.".into())
     }
 
-    /// Opens a saved connection for the viewer, after confirming the world is
+    /// Opens a saved connection for the viewer, after confirming its worlds are
     /// actually readable with the stored credential.
     pub async fn connect(&self, id: &str) -> Result<HostConnection, String> {
         let record = self.find(id)?;
-        let manifest_url = record.manifest_url();
+        let worlds_url = record.worlds_url();
         let response = self
-            .request(&manifest_url, record.token.as_deref(), None, PROBE_TIMEOUT)
+            .request(&worlds_url, record.token.as_deref(), None, PROBE_TIMEOUT)
             .await?;
         let status = response.status().as_u16();
         if status == 401 || status == 403 {
@@ -264,9 +381,7 @@ impl HostStore {
             });
         }
         if !(200..300).contains(&status) {
-            return Err(format!(
-                "The server answered {status} for this world's manifest."
-            ));
+            return Err(format!("The server answered {status} for its world list."));
         }
 
         let now = crate::renders::now_ms();
@@ -282,13 +397,14 @@ impl HostStore {
             id: record.id,
             label: record.label,
             origin: origin_of(&record.endpoint).unwrap_or_else(|| record.endpoint.clone()),
-            manifest_url,
+            endpoint: record.endpoint,
         })
     }
 
     /// Reads one protocol artifact for a connection. `url` is the absolute URL
-    /// the viewer resolved from the manifest; it is confined to the
-    /// connection's own world prefix here, before any credential is attached.
+    /// the client library resolved from the world list or a manifest; it is
+    /// confined to the connection's own worlds here, before any credential is
+    /// attached.
     ///
     /// Returns the framed response for *any* HTTP status — including 304 and
     /// 404, which the viewer handles — and an error only when the request
@@ -300,7 +416,7 @@ impl HostStore {
         if_none_match: Option<&str>,
     ) -> Result<Vec<u8>, String> {
         let record = self.find(id)?;
-        let target = confine(url, &record.world_prefix())?;
+        let target = confine(url, &record.worlds_url())?;
         let response = self
             .request(
                 &target,
@@ -407,14 +523,7 @@ impl HostStore {
             probe.worlds = parsed
                 .get("worlds")
                 .and_then(serde_json::Value::as_array)
-                .map(|worlds| {
-                    worlds
-                        .iter()
-                        .filter_map(|world| world.get("id").and_then(serde_json::Value::as_str))
-                        .filter(|id| is_world_id(id))
-                        .map(str::to_string)
-                        .collect()
-                })
+                .map(|worlds| worlds.iter().filter_map(world_name).collect())
                 .unwrap_or_default();
             if probe.worlds.is_empty() {
                 probe.note = Some("This server listed no worlds for this credential.".into());
@@ -598,6 +707,27 @@ pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
+fn normalize_pairing_endpoint(raw: &str) -> Result<String, String> {
+    let endpoint = normalize_endpoint(raw)?;
+    let url = reqwest::Url::parse(&endpoint)
+        .map_err(|_| "That is not a valid server address.".to_string())?;
+    if url.scheme() == "https" {
+        return Ok(endpoint);
+    }
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let ip_host = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host == "localhost"
+        || host.ends_with(".localhost")
+        || ip_host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if loopback {
+        Ok(endpoint)
+    } else {
+        Err("Vantage pairing requires HTTPS except on loopback.".into())
+    }
+}
+
 /// Scheme, host and port of a normalized endpoint — what a bearer credential is
 /// actually scoped to. The path below it is the same operator's business; a
 /// different authority is a different server, and `http` for `https` is the
@@ -665,11 +795,86 @@ fn is_private_authority(authority: &str) -> bool {
             .is_some_and(|octet| (16..=31).contains(&octet))
 }
 
-/// Confirms a viewer-resolved URL stays inside the connection's own world, then
-/// returns it. The client library confines manifest-owned paths already; this
-/// is the check that actually gates the credential, because it is the one on
-/// the side of the boundary that holds it.
+/// Resolves a discovery-advertised pairing route, but never lets it move the
+/// one-time code to another origin or outside the endpoint's own path prefix.
+fn validate_pairing_discovery(discovery: &serde_json::Value) -> Result<&str, String> {
+    if discovery
+        .get("protocol")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || discovery.get("auth").and_then(serde_json::Value::as_str) != Some("bearer")
+    {
+        return Err("This server does not advertise compatible Vantage pairing.".into());
+    }
+    let connect = discovery
+        .get("connect")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("This server does not advertise Vantage pairing.")?;
+    if connect.get("method").and_then(serde_json::Value::as_str) != Some("code") {
+        return Err("This server uses an unsupported pairing method.".into());
+    }
+    connect
+        .get("redeem")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "This server did not provide a pairing address.".into())
+}
+
+fn resolve_under_endpoint(endpoint: &str, route: &str) -> Result<String, String> {
+    if route.contains('%')
+        || route.contains('\\')
+        || route
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return Err("This server provided an unsafe pairing address.".into());
+    }
+    let base = reqwest::Url::parse(endpoint)
+        .map_err(|_| "This connection's address is no longer valid.".to_string())?;
+    let target = base
+        .join(route)
+        .map_err(|_| "This server provided an invalid pairing address.".to_string())?;
+    let same_origin = target.scheme() == base.scheme()
+        && target.host_str() == base.host_str()
+        && target.port_or_known_default() == base.port_or_known_default();
+    if !same_origin
+        || !target.path().starts_with(base.path())
+        || !target.username().is_empty()
+        || target.password().is_some()
+        || target.fragment().is_some()
+        || target.query().is_some()
+    {
+        return Err("This server provided an unsafe pairing address.".into());
+    }
+    Ok(target.to_string())
+}
+
+/// Confirms a client-resolved URL is the connection's world list or something
+/// under it, then returns it. The client library confines manifest-owned paths
+/// already; this is the check that actually gates the credential, because it is
+/// the one on the side of the boundary that holds it.
 fn confine(url: &str, prefix: &str) -> Result<String, String> {
+    // URL parsers normalize encoded dot segments as they parse. Inspect the raw
+    // path first so `%2e%2e` cannot become another otherwise valid world path
+    // and lose the evidence that it traversed to get there.
+    let raw_path = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.find('/').map(|slash| &rest[slash..]))
+        .unwrap_or("")
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("");
+    for segment in raw_path.split('/') {
+        let decoded = percent_encoding::percent_decode_str(segment)
+            .decode_utf8()
+            .map_err(|_| "Refusing to fetch outside the connected world.".to_string())?;
+        let was_encoded = decoded.as_ref() != segment;
+        if (was_encoded && (decoded == ".." || decoded == "."))
+            || decoded.contains('/')
+            || decoded.contains('\\')
+        {
+            return Err("Refusing to fetch outside the connected world.".into());
+        }
+    }
     let parsed =
         reqwest::Url::parse(url).map_err(|_| "That artifact address is not valid.".to_string())?;
     if !parsed.username().is_empty() || parsed.password().is_some() {
@@ -683,7 +888,11 @@ fn confine(url: &str, prefix: &str) -> Result<String, String> {
     let same_origin = parsed.scheme() == base.scheme()
         && parsed.host_str() == base.host_str()
         && parsed.port_or_known_default() == base.port_or_known_default();
-    if !same_origin || !parsed.path().starts_with(base.path()) {
+    // The list document itself, or a path below it — never a sibling that
+    // merely shares its spelling (`/v1/worlds-somewhere-else`).
+    let under =
+        parsed.path() == base.path() || parsed.path().starts_with(&format!("{}/", base.path()));
+    if !same_origin || !under {
         return Err("Refusing to fetch outside the connected world.".into());
     }
     // `Url` resolves literal dot segments but leaves `%2e%2e` encoded, and a
@@ -694,7 +903,11 @@ fn confine(url: &str, prefix: &str) -> Result<String, String> {
         let decoded = percent_encoding::percent_decode_str(segment)
             .decode_utf8()
             .map_err(|_| "Refusing to fetch outside the connected world.".to_string())?;
-        if decoded == ".." || decoded == "." || decoded.contains('/') || decoded.contains('\\') {
+        let was_encoded = decoded.as_ref() != segment;
+        if (was_encoded && (decoded == ".." || decoded == "."))
+            || decoded.contains('/')
+            || decoded.contains('\\')
+        {
             return Err("Refusing to fetch outside the connected world.".into());
         }
     }
@@ -788,13 +1001,30 @@ fn pick_label(label: &str, endpoint: &str) -> String {
         .unwrap_or_else(|| "Vantage server".into())
 }
 
-/// The protocol's world-id grammar, matching the client library's.
-fn is_world_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
+/// What to call one world in the connect form: the dimension label its host
+/// attaches, else the world id. Only ids the protocol grammar admits count —
+/// anything else names a world this build would refuse to open anyway.
+fn world_name(world: &serde_json::Value) -> Option<String> {
+    let id = world.get("id").and_then(serde_json::Value::as_str)?;
+    if id.is_empty()
+        || id.len() > 64
+        || !id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return None;
+    }
+    Some(
+        world
+            .get("dimension")
+            .and_then(|dimension| dimension.get("label"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(id)
+            .chars()
+            .take(64)
+            .collect(),
+    )
 }
 
 /// Connection handles only have to be unique and unguessable-enough to be a
@@ -874,7 +1104,15 @@ mod tests {
 
     #[test]
     fn artifact_urls_are_confined_to_the_connected_world() {
-        let prefix = "https://map.example.net/v1/worlds/default/";
+        let prefix = "https://map.example.net/v1/worlds";
+        // The list itself, which is where a connection starts.
+        assert!(confine("https://map.example.net/v1/worlds", prefix).is_ok());
+        // Any world the connection carries, not just the first one opened.
+        assert!(confine(
+            "https://map.example.net/v1/worlds/the_nether/manifest.json",
+            prefix
+        )
+        .is_ok());
         assert!(confine(
             "https://map.example.net/v1/worlds/default/manifest.json",
             prefix
@@ -899,12 +1137,11 @@ mod tests {
             "http://map.example.net/v1/worlds/default/manifest.json",
             // Another port.
             "https://map.example.net:8443/v1/worlds/default/manifest.json",
-            // Another world on the same server.
-            "https://map.example.net/v1/worlds/other/manifest.json",
             // Outside the protocol prefix.
             "https://map.example.net/admin",
-            // Prefix-of-a-prefix: `defaultish` must not pass for `default`.
-            "https://map.example.net/v1/worlds/defaultish/manifest.json",
+            // Prefix-of-a-prefix: a sibling route that merely starts the same
+            // way is not part of this connection.
+            "https://map.example.net/v1/worlds-of-someone-else/manifest.json",
             // Credentials in the artifact address.
             "https://a:b@map.example.net/v1/worlds/default/manifest.json",
             "not a url",
@@ -917,12 +1154,12 @@ mod tests {
     }
 
     #[test]
-    fn traversal_cannot_climb_out_of_the_world_prefix() {
-        let prefix = "https://map.example.net/v1/worlds/default/";
+    fn traversal_cannot_climb_out_of_the_worlds_prefix() {
+        let prefix = "https://map.example.net/v1/worlds";
         // A URL parser normalizes `..` away, so the result is judged on where
         // it actually lands rather than on how it was spelled.
         assert!(confine(
-            "https://map.example.net/v1/worlds/default/../other/manifest.json",
+            "https://map.example.net/v1/worlds/default/../../secrets",
             prefix
         )
         .is_err());
@@ -938,10 +1175,10 @@ mod tests {
     /// spellings have to be refused on their own account.
     #[test]
     fn percent_encoded_traversal_cannot_climb_out_either() {
-        let prefix = "https://map.example.net/v1/worlds/default/";
+        let prefix = "https://map.example.net/v1/worlds";
         for refused in [
-            "https://map.example.net/v1/worlds/default/%2e%2e/other/manifest.json",
-            "https://map.example.net/v1/worlds/default/%2E%2E/%2E%2E/admin",
+            "https://map.example.net/v1/worlds/default/%2e%2e/%2e%2e/other/manifest.json",
+            "https://map.example.net/v1/worlds/default/%2E%2E/%2E%2E/%2E%2E/admin",
             "https://map.example.net/v1/worlds/default/tiles/%2e%2e/%2e%2e/other/x.vtile",
             // A segment that decodes to a separator would re-partition the path
             // downstream of every check above.
@@ -1033,14 +1270,12 @@ mod tests {
                 id: None,
                 label: "  Survival  ".into(),
                 endpoint: "map.example.net".into(),
-                world_id: None,
                 token: Some("s3cret".into()),
                 forget_token: false,
             })
             .unwrap();
         assert_eq!(entry.label, "Survival");
         assert_eq!(entry.endpoint, "https://map.example.net/");
-        assert_eq!(entry.world_id, "default");
         assert!(entry.has_token);
 
         // Reloading from disk sees the same connection, token included.
@@ -1059,7 +1294,6 @@ mod tests {
                 id: Some(entry.id.clone()),
                 label: "Survival".into(),
                 endpoint: "map.example.net".into(),
-                world_id: Some("default".into()),
                 token: None,
                 forget_token: false,
             })
@@ -1075,7 +1309,6 @@ mod tests {
                 id: Some(entry.id.clone()),
                 label: "Survival".into(),
                 endpoint: "map.example.net".into(),
-                world_id: None,
                 token: None,
                 forget_token: true,
             })
@@ -1099,7 +1332,6 @@ mod tests {
             id: None,
             label: "Survival".into(),
             endpoint: endpoint.into(),
-            world_id: None,
             token: token.map(str::to_string),
             forget_token: false,
         };
@@ -1163,7 +1395,6 @@ mod tests {
                 id: None,
                 label: String::new(),
                 endpoint: "https://play.example.net:8268/map".into(),
-                world_id: None,
                 token: None,
                 forget_token: false,
             })
@@ -1174,23 +1405,28 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// The form names the worlds a credential can read. A descriptor whose id
+    /// could not address a path is not one this build would open, so it is not
+    /// one the form offers either.
     #[test]
-    fn a_bad_world_id_is_refused_before_it_reaches_a_url() {
-        let root = scratch("worldid");
-        let store = HostStore::load(&root);
-        for refused in ["../other", "a/b", "with space", &"x".repeat(65)] {
-            assert!(store
-                .save(HostInput {
-                    id: None,
-                    label: String::new(),
-                    endpoint: "map.example.net".into(),
-                    world_id: Some(refused.to_string()),
-                    token: None,
-                    forget_token: false,
-                })
-                .is_err());
+    fn the_world_list_is_read_for_names_and_refuses_unusable_ids() {
+        let named = serde_json::json!({
+            "id": "the_nether",
+            "dimension": { "id": "minecraft:the_nether", "label": "The Nether" }
+        });
+        assert_eq!(world_name(&named).as_deref(), Some("The Nether"));
+        // No dimension block: the id is all there is to show.
+        assert_eq!(
+            world_name(&serde_json::json!({ "id": "default" })).as_deref(),
+            Some("default")
+        );
+        for refused in ["../other", "a/b", "with space", "", &"x".repeat(65)] {
+            assert!(
+                world_name(&serde_json::json!({ "id": refused })).is_none(),
+                "{refused} should not name a world"
+            );
         }
-        std::fs::remove_dir_all(&root).unwrap();
+        assert!(world_name(&serde_json::json!({ "manifest": "x" })).is_none());
     }
 
     /// Nothing about a plaintext LAN connection would notice a missing TLS
@@ -1236,9 +1472,11 @@ mod tests {
                 if reader.read_line(&mut start).is_err() || start.is_empty() {
                     continue;
                 }
+                let method = start.split_whitespace().next().unwrap_or("GET").to_string();
                 let target = start.split_whitespace().nth(1).unwrap_or("/").to_string();
                 let mut authorization = None;
                 let mut if_none_match = None;
+                let mut content_length = 0;
                 loop {
                     let mut line = String::new();
                     if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
@@ -1248,12 +1486,17 @@ mod tests {
                     match name.trim().to_ascii_lowercase().as_str() {
                         "authorization" => authorization = Some(value.trim().to_string()),
                         "if-none-match" => if_none_match = Some(value.trim().to_string()),
+                        "content-length" => content_length = value.trim().parse().unwrap_or(0),
                         _ => {}
                     }
                 }
+                let mut request_body = vec![0; content_length];
+                use std::io::Read;
+                let _ = reader.read_exact(&mut request_body);
                 log.lock().unwrap().push(format!(
-                    "{target} auth={}",
-                    authorization.as_deref().unwrap_or("-")
+                    "{method} {target} auth={} body={}",
+                    authorization.as_deref().unwrap_or("-"),
+                    String::from_utf8_lossy(&request_body)
                 ));
 
                 let authorized = authorization.as_deref() == Some(&format!("Bearer {token}"));
@@ -1269,8 +1512,19 @@ mod tests {
                     "/.well-known/vantage" => write(
                         &mut writer,
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n",
-                        br#"{"protocol":1,"api":"/v1","auth":"bearer"}"#,
+                        br#"{"protocol":1,"api":"/v1","auth":"bearer","name":"Paired Stub","connect":{"method":"code","redeem":"pair"}}"#,
                     ),
+                    "/pair"
+                        if method == "POST"
+                            && String::from_utf8_lossy(&request_body)
+                                .contains("\"code\":\"pair-code\"") =>
+                    {
+                        write(
+                            &mut writer,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n",
+                            format!(r#"{{"token":"{token}"}}"#).as_bytes(),
+                        )
+                    },
                     _ if !authorized => write(
                         &mut writer,
                         "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n",
@@ -1279,9 +1533,10 @@ mod tests {
                     "/v1/worlds" => write(
                         &mut writer,
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n",
-                        br#"{"worlds":[{"id":"default","manifest":"/v1/worlds/default/manifest.json"}]}"#,
+                        br#"{"worlds":[{"id":"default","manifest":"/v1/worlds/default/manifest.json","dimension":{"id":"minecraft:overworld","slug":"overworld","label":"Overworld","kind":"overworld"}},{"id":"the_nether","manifest":"/v1/worlds/the_nether/manifest.json","dimension":{"id":"minecraft:the_nether","slug":"the_nether","label":"The Nether","kind":"nether"}}]}"#,
                     ),
-                    "/v1/worlds/default/manifest.json" => write(
+                    "/v1/worlds/default/manifest.json"
+                    | "/v1/worlds/the_nether/manifest.json" => write(
                         &mut writer,
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n",
                         br#"{"version":6,"tiles":[]}"#,
@@ -1329,6 +1584,100 @@ mod tests {
     }
 
     #[test]
+    fn pairing_redeems_once_and_saves_the_token_only_natively() {
+        let root = scratch("pair");
+        let (port, seen) = stub_server("s3cret");
+        let store = HostStore::load(&root);
+        tauri::async_runtime::block_on(async {
+            let paired = store
+                .pair(
+                    &format!("127.0.0.1:{port}"),
+                    "pair-code",
+                    "Vantage Desktop on test",
+                )
+                .await;
+            assert!(paired.is_ok(), "{:?}; {:?}", paired, seen.lock().unwrap());
+            let entry = paired.unwrap();
+            assert_eq!(entry.label, "Paired Stub");
+            assert!(entry.has_token);
+            assert!(!serde_json::to_string(&entry).unwrap().contains("s3cret"));
+            assert_eq!(
+                store.find(&entry.id).unwrap().token.as_deref(),
+                Some("s3cret")
+            );
+            assert_eq!(
+                store.connect(&entry.id).await.unwrap().endpoint,
+                format!("http://127.0.0.1:{port}/")
+            );
+        });
+        let requests = seen.lock().unwrap().join("\n");
+        assert!(requests.contains("POST /pair auth=-"));
+        assert!(requests.contains("\"code\":\"pair-code\""));
+        assert!(requests.contains("\"deviceId\":"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pairing_info_verifies_the_discovery_name_before_confirmation() {
+        let root = scratch("pair-info");
+        let (port, seen) = stub_server("s3cret");
+        let store = HostStore::load(&root);
+        tauri::async_runtime::block_on(async {
+            let info = store
+                .pairing_info(&format!("127.0.0.1:{port}"))
+                .await
+                .unwrap();
+            assert_eq!(info.name, "Paired Stub");
+            assert_eq!(info.endpoint, format!("http://127.0.0.1:{port}/"));
+        });
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "inspection should read discovery only");
+        assert!(requests[0].starts_with("GET /.well-known/vantage auth=-"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pairing_refuses_plaintext_public_hosts() {
+        assert!(
+            normalize_pairing_endpoint("http://maps.example.com/map-stream/")
+                .unwrap_err()
+                .contains("HTTPS")
+        );
+        assert_eq!(
+            normalize_pairing_endpoint("http://localhost:3000/map-stream/").unwrap(),
+            "http://localhost:3000/map-stream/"
+        );
+        assert_eq!(
+            normalize_pairing_endpoint("http://[::1]:3000/map-stream/").unwrap(),
+            "http://[::1]:3000/map-stream/"
+        );
+    }
+
+    #[test]
+    fn a_pairing_route_cannot_leave_the_advertising_endpoint() {
+        let endpoint = "https://map.example.net/map-stream/";
+        assert_eq!(
+            resolve_under_endpoint(endpoint, "pair").unwrap(),
+            "https://map.example.net/map-stream/pair"
+        );
+        for unsafe_route in [
+            "https://evil.example/pair",
+            "/pair",
+            "../pair",
+            "pair%2f..%2f..%2fadmin",
+            "pair%5c..%5cadmin",
+            "%2e%2e/pair",
+            "pair?forward=https://evil.example",
+            "pair#fragment",
+        ] {
+            assert!(
+                resolve_under_endpoint(endpoint, unsafe_route).is_err(),
+                "{unsafe_route}"
+            );
+        }
+    }
+
+    #[test]
     fn a_connection_probes_streams_and_revalidates_over_real_http() {
         let root = scratch("wire");
         let (port, seen) = stub_server("s3cret");
@@ -1346,7 +1695,8 @@ mod tests {
 
             let probe = store.probe(&endpoint, None, Some("s3cret")).await.unwrap();
             assert!(!probe.unauthorized);
-            assert_eq!(probe.worlds, vec!["default".to_string()]);
+            // Both dimensions the host fronts, by the names it gave them.
+            assert_eq!(probe.worlds, vec!["Overworld", "The Nether"]);
             // A bare loopback address resolved to plaintext, as typed.
             assert_eq!(probe.endpoint, format!("http://127.0.0.1:{port}/"));
 
@@ -1355,7 +1705,6 @@ mod tests {
                     id: None,
                     label: "Stub".into(),
                     endpoint: endpoint.clone(),
-                    world_id: Some("default".into()),
                     token: Some("s3cret".into()),
                     forget_token: false,
                 })
@@ -1369,7 +1718,7 @@ mod tests {
                 !remembered.unauthorized,
                 "a saved token should answer for its own address"
             );
-            assert_eq!(remembered.worlds, vec!["default".to_string()]);
+            assert_eq!(remembered.worlds, vec!["Overworld", "The Nether"]);
 
             // ...but only for its own address. Re-pointing the form elsewhere
             // must not be a way to make the probe carry it there. The stub is
@@ -1386,10 +1735,7 @@ mod tests {
             );
 
             let connection = store.connect(&entry.id).await.unwrap();
-            assert_eq!(
-                connection.manifest_url,
-                format!("http://127.0.0.1:{port}/v1/worlds/default/manifest.json")
-            );
+            assert_eq!(connection.endpoint, format!("http://127.0.0.1:{port}/"));
             assert_eq!(connection.origin, format!("http://127.0.0.1:{port}"));
             // Connecting is what records the visit.
             assert!(store.find(&entry.id).unwrap().last_connected_ms.is_some());
@@ -1424,13 +1770,23 @@ mod tests {
             );
             assert_eq!(redirect["status"], 302);
 
-            // And an artifact outside this world never becomes a request at all.
+            // A second dimension on the same connection is the same grant: one
+            // saved server, every world it carries.
+            let (nether, _) = unframe(
+                &store
+                    .fetch(
+                        &entry.id,
+                        &format!("http://127.0.0.1:{port}/v1/worlds/the_nether/manifest.json"),
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(nether["status"], 200);
+
+            // Anything outside the protocol prefix never becomes a request at all.
             assert!(store
-                .fetch(
-                    &entry.id,
-                    &format!("http://127.0.0.1:{port}/v1/worlds/other/manifest.json"),
-                    None
-                )
+                .fetch(&entry.id, &format!("http://127.0.0.1:{port}/admin"), None)
                 .await
                 .is_err());
         });
@@ -1439,14 +1795,14 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .any(|line| line == "/.well-known/vantage auth=-"),
+                .any(|line| line.starts_with("GET /.well-known/vantage auth=-")),
             "discovery must stay anonymous: {requests:?}"
         );
         assert!(
             requests
                 .iter()
-                .filter(|line| line.starts_with("/v1/"))
-                .all(|line| line.ends_with("auth=Bearer s3cret") || line.ends_with("auth=-")),
+                .filter(|line| line.starts_with("GET /v1/"))
+                .all(|line| line.contains(" auth=Bearer s3cret ") || line.contains(" auth=- ")),
             "no /v1 request may carry the wrong credential: {requests:?}"
         );
         assert!(
@@ -1458,23 +1814,15 @@ mod tests {
     }
 
     #[test]
-    fn a_records_world_prefix_is_the_protocol_route() {
+    fn a_records_route_is_the_protocol_world_list() {
         let record = HostRecord {
             id: "abc".into(),
             label: "x".into(),
             endpoint: "https://map.example.net/map/".into(),
-            world_id: "default".into(),
             token: None,
             added_at_ms: 0,
             last_connected_ms: None,
         };
-        assert_eq!(
-            record.world_prefix(),
-            "https://map.example.net/map/v1/worlds/default/"
-        );
-        assert_eq!(
-            record.manifest_url(),
-            "https://map.example.net/map/v1/worlds/default/manifest.json"
-        );
+        assert_eq!(record.worlds_url(), "https://map.example.net/map/v1/worlds");
     }
 }

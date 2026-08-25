@@ -2,7 +2,7 @@
 // sub-directory world source each dimension is loaded through.
 
 import { describe, expect, it } from 'vitest';
-import { isWorldIndex, parseWorldIndex, pickDimension, resolveManifestPath, worldFromIndexEntry } from '../src/core/index.js';
+import { isWorldIndex, parseServerWorlds, parseWorldIndex, pickDimension, resolveManifestPath, worldFromIndexEntry } from '../src/core/index.js';
 import type { WorldSource } from '../src/core/index.js';
 
 const good = {
@@ -81,6 +81,49 @@ describe('isWorldIndex', () => {
     expect(isWorldIndex(good)).toBe(true);
     expect(isWorldIndex({ format: 6, tiles: [], biomes: [] })).toBe(false);
     expect(isWorldIndex(null)).toBe(false);
+  });
+});
+
+describe('parseServerWorlds', () => {
+  it('turns a multi-world protocol listing into a safe dimension index', () => {
+    expect(parseServerWorlds({
+      worlds: [
+        {
+          id: 'default',
+          manifest: 'https://evil.test/ignored',
+          dimension: { id: 'minecraft:overworld', slug: 'overworld', label: 'Overworld', kind: 'overworld' },
+        },
+        {
+          id: 'the_nether',
+          manifest: '../../ignored',
+          dimension: { id: 'minecraft:the_nether', slug: 'the_nether', label: 'The Nether', kind: 'nether' },
+        },
+      ],
+    })).toEqual({
+      format: 1,
+      dimensions: [
+        {
+          id: 'minecraft:overworld', slug: 'overworld', label: 'Overworld', kind: 'overworld',
+          manifest: 'default/manifest.json', tiles: 0, bytes: 0,
+        },
+        {
+          id: 'minecraft:the_nether', slug: 'the_nether', label: 'The Nether', kind: 'nether',
+          manifest: 'the_nether/manifest.json', tiles: 0, bytes: 0,
+        },
+      ],
+    });
+  });
+
+  it('rejects empty, malformed, and duplicate world listings', () => {
+    expect(() => parseServerWorlds({ worlds: [] })).toThrow(/no worlds/);
+    expect(() => parseServerWorlds({ worlds: [{ id: '../admin' }] })).toThrow(/invalid id/);
+    expect(() => parseServerWorlds({ worlds: [{ id: 'default' }, { id: 'default' }] })).toThrow(/duplicate/);
+    expect(() => parseServerWorlds({
+      worlds: [
+        { id: 'A', dimension: { slug: 'same' } },
+        { id: 'B', dimension: { slug: 'same' } },
+      ],
+    })).toThrow(/duplicate/);
   });
 });
 

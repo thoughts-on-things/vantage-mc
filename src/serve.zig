@@ -77,6 +77,10 @@ pub const ApiOptions = struct {
     /// URL prefix whose suffix is resolved relative to the render directory
     /// and handed to the on-demand producer. Must start and end with `/`.
     world_prefix: []const u8 = "/v1/worlds/default/",
+    /// The exact `/v1/worlds` document this connection answers with. Built
+    /// once by the caller, which owns every other JSON document this process
+    /// serves; the default is protocol v1's single, unnamed world.
+    worlds_json: []const u8 = "{\"worlds\":[{\"id\":\"default\",\"manifest\":\"/v1/worlds/default/manifest.json\"}]}\n",
     /// SHA-256 of the configured bearer token. The raw secret never enters the
     /// request policy or logs and comparisons are constant-time.
     bearer_sha256: ?[32]u8 = null,
@@ -348,7 +352,7 @@ fn serveApiRequest(
         return apiUnauthorized(req, origin);
 
     if (std.mem.eql(u8, target, "/v1/worlds"))
-        return apiRespond(req, .ok, "application/json", "{\"worlds\":[{\"id\":\"default\",\"manifest\":\"/v1/worlds/default/manifest.json\"}]}\n", "private, no-store", origin);
+        return apiRespond(req, .ok, "application/json", policy.worlds_json, "private, no-store", origin);
 
     if (!std.mem.startsWith(u8, target, policy.world_prefix))
         return apiRespond(req, .not_found, "text/plain; charset=utf-8", "not found\n", "no-store", origin);

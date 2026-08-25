@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { LoaderCircle } from 'lucide-react';
 import { AppShell } from './components/AppShell.js';
+import { PairingDialog } from './components/PairingDialog.js';
 import { useHosts } from './hooks/useHosts.js';
 import { loadViewer, useLibrary } from './hooks/useLibrary.js';
 import { useUpdates } from './hooks/useUpdates.js';
@@ -21,17 +22,25 @@ export function App() {
   const { viewer } = library;
   if (viewer) {
     return (
-      <Suspense fallback={<div className="viewer-loading"><LoaderCircle className="spin" /><span>Starting GPU viewer</span></div>}>
-        <ViewerScreen
-          target={viewer}
-          settings={settings}
-          system={library.system}
-          onThumbnail={(thumbnailUrl) => library.updateWorldThumbnail(viewer.world.path, thumbnailUrl)}
-          onBack={library.closeViewer}
-        />
-      </Suspense>
+      <>
+        <Suspense fallback={<div className="viewer-loading"><LoaderCircle className="spin" /><span>Starting GPU viewer</span></div>}>
+          <ViewerScreen
+            target={viewer}
+            settings={settings}
+            system={library.system}
+            onThumbnail={(thumbnailUrl) => library.updateWorldThumbnail(viewer.world.path, thumbnailUrl)}
+            onBack={library.closeViewer}
+          />
+        </Suspense>
+        <PairingDialog hosts={hosts} library={library} />
+      </>
     );
   }
 
-  return <AppShell library={library} hosts={hosts} settings={settings} updates={updates} onSettingsChange={setSettings} />;
+  return (
+    <>
+      <AppShell library={library} hosts={hosts} settings={settings} updates={updates} onSettingsChange={setSettings} />
+      <PairingDialog hosts={hosts} library={library} />
+    </>
+  );
 }

@@ -97,7 +97,8 @@ export function ServersScreen({ hosts, library }: { hosts: HostsController; libr
             <h3>No servers yet</h3>
             <p>
               Add the map address your server admin gave you. It looks like <code>https://map.example.net</code>,
-              or <code>127.0.0.1:8268</code> for a sidecar on this machine.
+              or <code>127.0.0.1:8268</code> for a sidecar on this machine. Every dimension it
+              serves arrives as one map you can switch between.
             </p>
           </div>
         )
@@ -123,7 +124,6 @@ function ServerRow({ entry, busy, locked, onConnect, onEdit, onRemove }: {
         <h3>{entry.label}</h3>
         <p className="server-endpoint" title={entry.endpoint}>{entry.endpoint}</p>
         <div className="render-tags">
-          {entry.worldId !== 'default' && <span className="tag">world {entry.worldId}</span>}
           <span className="tag">{entry.hasToken ? <><KeyRound size={12} /> access token saved</> : 'no token'}</span>
           {entry.lastConnectedMs !== null && <span className="tag">connected {renderAge(entry.lastConnectedMs)}</span>}
         </div>
@@ -162,7 +162,6 @@ function ServerForm({ hosts, entry, onDone }: {
   const [endpoint, setEndpoint] = useState(entry?.endpoint ?? '');
   const [token, setToken] = useState('');
   const [label, setLabel] = useState(entry?.label ?? '');
-  const [worldId, setWorldId] = useState(entry?.worldId ?? 'default');
   const [forgetToken, setForgetToken] = useState(false);
   const [probe, setProbe] = useState<HostProbe | null>(null);
   const [testing, setTesting] = useState(false);
@@ -184,11 +183,7 @@ function ServerForm({ hosts, entry, onDone }: {
       // verdict describes a connection nobody was going to make. Naming the
       // connection lends it for this exchange without the page ever seeing it.
       const lendSaved = entry?.hasToken && !forgetToken && !token;
-      const result = await hosts.probe(endpoint, token || undefined, lendSaved ? entry.id : undefined);
-      setProbe(result);
-      // A server that named exactly one world has answered the question the
-      // world field was going to ask.
-      if (result?.worlds.length === 1) setWorldId(result.worlds[0]!);
+      setProbe(await hosts.probe(endpoint, token || undefined, lendSaved ? entry.id : undefined));
     } finally {
       setTesting(false);
     }
@@ -202,7 +197,6 @@ function ServerForm({ hosts, entry, onDone }: {
         ...(entry ? { id: entry.id } : {}),
         label,
         endpoint,
-        worldId,
         ...(token ? { token } : {}),
         ...(forgetToken ? { forgetToken: true } : {}),
       });
@@ -210,7 +204,7 @@ function ServerForm({ hosts, entry, onDone }: {
     } finally {
       setSaving(false);
     }
-  }, [endpoint, entry, forgetToken, hosts, label, onDone, token, worldId]);
+  }, [endpoint, entry, forgetToken, hosts, label, onDone, token]);
 
   const busy = testing || saving;
 
@@ -254,21 +248,6 @@ function ServerForm({ hosts, entry, onDone }: {
             placeholder="Defaults to the host name"
           />
         </label>
-        {probe && probe.worlds.length > 1 ? (
-          <label>
-            <span>World</span>
-            <select value={worldId} onChange={(event) => setWorldId(event.target.value)}>
-              {probe.worlds.map((world) => <option key={world} value={world}>{world}</option>)}
-            </select>
-          </label>
-        ) : (
-          worldId !== 'default' && (
-            <label>
-              <span>World</span>
-              <input type="text" value={worldId} onChange={(event) => setWorldId(event.target.value)} spellCheck={false} />
-            </label>
-          )
-        )}
       </div>
 
       {entry?.hasToken && (

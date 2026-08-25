@@ -2322,13 +2322,9 @@ fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
     // Which dimension this is, and the look that makes it read as that
     // dimension: the viewer takes its sky, fog and light floor from here, so a
     // nether map arrives crimson and dim without the page configuring anything.
-    try out.appendSlice(a, "  \"dimension\": { \"id\": ");
-    try appendJsonString(a, &out, m.dim.id);
-    try out.appendSlice(a, ", \"slug\": ");
-    try appendJsonString(a, &out, if (m.dim.slug.len == 0) "overworld" else m.dim.slug);
-    try out.appendSlice(a, ", \"label\": ");
-    try appendJsonString(a, &out, m.dim.label);
-    try out.print(a, ", \"kind\": \"{s}\" }},\n", .{@tagName(m.dim.kind)});
+    try out.appendSlice(a, "  \"dimension\": ");
+    try appendDimensionJson(a, &out, m.dim);
+    try out.appendSlice(a, ",\n");
     try out.print(
         a,
         "  \"atmosphere\": {{ \"skyTop\": [{d}, {d}, {d}], \"skyHorizon\": [{d}, {d}, {d}], \"fog\": [{d}, {d}, {d}], \"ambient\": {d:.3}, \"daylight\": {d:.3} }},\n",
@@ -2417,6 +2413,34 @@ fn buildWorldIndex(a: std.mem.Allocator, dims: []const DimSummary) ![]u8 {
         try out.print(a, " }}{s}\n", .{if (i + 1 < dims.len) "," else ""});
     }
     try out.appendSlice(a, "  ]\n}\n");
+    return out.toOwnedSlice(a);
+}
+
+/// A dimension's identity, as both the manifest and the world list carry it.
+/// The overworld renders at the root, so its slug is empty on disk — but a
+/// document has to name it something a client can address.
+fn appendDimensionJson(a: std.mem.Allocator, out: *std.ArrayList(u8), dim: dimension.Profile) !void {
+    try out.appendSlice(a, "{ \"id\": ");
+    try appendJsonString(a, out, dim.id);
+    try out.appendSlice(a, ", \"slug\": ");
+    try appendJsonString(a, out, if (dim.slug.len == 0) "overworld" else dim.slug);
+    try out.appendSlice(a, ", \"label\": ");
+    try appendJsonString(a, out, dim.label);
+    try out.print(a, ", \"kind\": \"{s}\" }}", .{@tagName(dim.kind)});
+}
+
+/// The `/v1/worlds` document for a session streaming one dimension.
+///
+/// Protocol v1 serves one world per connection, but a client offering a
+/// switcher across several needs to know what each one *is* before it opens
+/// any of them — so the descriptor carries the same `dimension` block the
+/// manifest does. Built once at startup: it is fixed for the process's life
+/// and answered on every connect.
+fn buildWorldsJson(a: std.mem.Allocator, dim: dimension.Profile) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "{\"worlds\":[{\"id\":\"default\",\"manifest\":\"/v1/worlds/default/manifest.json\",\"dimension\":");
+    try appendDimensionJson(a, &out, dim);
+    try out.appendSlice(a, "}]}\n");
     return out.toOwnedSlice(a);
 }
 
@@ -4300,6 +4324,7 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
             .bearer_sha256 = bearer_sha256,
             .allowed_origins = allowed_origins.items,
             .max_connections = max_connections,
+            .worlds_json = try buildWorldsJson(a, dim),
         } else null,
     });
 }

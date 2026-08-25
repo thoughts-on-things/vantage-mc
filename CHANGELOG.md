@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/thoughts-on-things/vantage-mc/compare/v0.15.0...v0.15.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* render special blocks with textured geometry ([#84](https://github.com/thoughts-on-things/vantage-mc/issues/84)) ([604a5c9](https://github.com/thoughts-on-things/vantage-mc/commit/604a5c97e345ce26f5ab550b2494a3ac850d47ec))
+
 ## [0.15.0](https://github.com/thoughts-on-things/vantage-mc/compare/v0.14.0...v0.15.0) (2026-08-25)
 
 

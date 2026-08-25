@@ -60,6 +60,7 @@ fn prepareExtractionDestination(parent: std.Io.Dir, io: std.Io, dest_path: []con
         error.FileNotFound => {},
         else => return err,
     };
+    // Zig 0.16's deleteTree is idempotent: a missing tree is already success.
     try parent.deleteTree(io, dest_path);
 }
 
@@ -128,6 +129,14 @@ test "preparing extraction removes completion marker before reuse" {
 
     try prepareExtractionDestination(tmp.dir, io, "dest");
     try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(io, "dest", .{}));
+}
+
+test "preparing extraction accepts a missing destination" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try prepareExtractionDestination(tmp.dir, std.testing.io, "missing");
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(std.testing.io, "missing", .{}));
 }
 
 /// Extract the needed subset of `jar_path` into `dest_path` (created if

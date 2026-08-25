@@ -2340,7 +2340,9 @@ fn specialBlockModel(full_name: []const u8, state: []const u8) ?SpecialBlockMode
     };
     if (familyPrefix(name, "_wall_banner") orelse familyPrefix(name, "_banner")) |dye| if (banner_textures.get(dye)) |path| return .{
         .texture = path,
-        .region = .{ .x = 0, .y = 0, .w = 16, .h = 16, .reference_w = 64, .reference_h = 64 },
+        // Wool is an ordinary block tile, not a packed entity sheet. Sample
+        // the entire image so vanilla and HD resource-pack textures both scale.
+        .region = full_tile_region,
         .facing = facing,
         .inset = 6.5 / 16.0,
         .height = 1.0,
@@ -2594,6 +2596,9 @@ test "special block models are textured, state-aware, and never full-cell cubes"
     try std.testing.expect(!hanging.attached);
     const attached_hanging = specialBlockModel("minecraft:oak_hanging_sign", "rotation=3,attached=true").?;
     try std.testing.expect(attached_hanging.attached);
+
+    const banner = specialBlockModel("minecraft:blue_wall_banner", "facing=north").?;
+    try std.testing.expectEqual(full_tile_region, banner.region);
 
     const shulker = specialBlockModel("minecraft:yellow_shulker_box", "facing=up").?;
     try std.testing.expectEqualStrings("entity/shulker/shulker_yellow", shulker.texture);

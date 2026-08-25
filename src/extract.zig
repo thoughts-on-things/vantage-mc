@@ -102,7 +102,16 @@ test "staging publication replaces an incomplete destination" {
     try tmp.dir.createDirPath(io, "dest.staging/assets/minecraft/blockstates");
     try tmp.dir.writeFile(io, .{ .sub_path = "dest.staging/" ++ completion_marker, .data = "complete\n" });
 
-    try publishStaging(tmp.dir, io, "dest.staging", "dest");
+    // Production publishes through cwd using absolute cache paths. Exercise
+    // that exact shape: on Windows, renaming a child through tmp.dir's open
+    // directory handle is denied even though the cwd/absolute operation works.
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    var staging_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const staging_path = try std.fmt.bufPrint(&staging_buf, "{s}/dest.staging", .{root_buf[0..root_len]});
+    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try std.fmt.bufPrint(&dest_buf, "{s}/dest", .{root_buf[0..root_len]});
+    try publishStaging(std.Io.Dir.cwd(), io, staging_path, dest_path);
     try std.testing.expect(cacheIsComplete(tmp.dir, io, "dest"));
     try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(io, "dest.staging", .{}));
 }
@@ -134,8 +143,12 @@ pub fn extractJar(io: std.Io, jar_path: []const u8, dest_path: []const u8) !Summ
     try cwd.createDirPath(io, parent_path);
     var lock_buf: [std.fs.max_path_bytes]u8 = undefined;
     const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}.lock", .{dest_path});
-    var lock = try cwd.createFile(io, lock_path, .{ .truncate = false, .lock = .exclusive });
+    var lock = try cwd.createFile(io, lock_path, .{ .truncate = false });
     defer lock.close(io);
+    // Windows byte-range locks do not contend reliably beyond a zero-length
+    // file. Materialize the one-byte range before taking the blocking lock.
+    try lock.setLength(io, 1);
+    try lock.lock(io, .exclusive);
 
     if (cacheIsComplete(cwd, io, dest_path))
         return .{ .files = 0, .bytes = 0, .reused = true };
@@ -143,6 +156,7 @@ pub fn extractJar(io: std.Io, jar_path: []const u8, dest_path: []const u8) !Summ
     var staging_buf: [std.fs.max_path_bytes]u8 = undefined;
     const staging_path = try std.fmt.bufPrint(&staging_buf, "{s}.staging", .{dest_path});
     try prepareExtractionDestination(cwd, io, staging_path);
+    errdefer prepareExtractionDestination(cwd, io, staging_path) catch {};
 
     var jar = cwd.openFile(io, jar_path, .{}) catch |e| {
         std.debug.print("cannot open client jar: {s}\n", .{jar_path});

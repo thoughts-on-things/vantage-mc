@@ -1866,6 +1866,13 @@ fn bakeSpecialModel(arena: std.mem.Allocator, tex: *texture.Builder, block_name:
         if (special.alternate_texture) |alternate|
             layer_index = tex.layerForRegion(alternate, special.region);
     }
+    // Minecraft 26.2 moved beds and signs from packed entity sheets to
+    // ordinary per-face block textures. Retain the old sheet first for older
+    // clients, then use the new full-tile surface when present.
+    if (layer_index == 0) {
+        if (try generatedSpecialTexture(arena, block_name, special)) |alternate|
+            layer_index = tex.layerForRegion(alternate.path, alternate.region);
+    }
     // Resource packs and caches from older Vantage builds may omit entity
     // sheets. Keep the corrected multipart geometry and use the curated
     // family color rather than exposing the checkerboard missing layer.
@@ -2131,6 +2138,20 @@ const SpecialBlockModel = struct {
     golem_pose: GolemPose = .standing,
 };
 
+const SpecialTexture = struct {
+    path: []const u8,
+    region: texture.Region,
+};
+
+const full_tile_region: texture.Region = .{
+    .x = 0,
+    .y = 0,
+    .w = 16,
+    .h = 16,
+    .reference_w = 16,
+    .reference_h = 16,
+};
+
 const bed_textures = std.StaticStringMap([]const u8).initComptime(.{
     .{ "white", "entity/bed/white" },           .{ "orange", "entity/bed/orange" }, .{ "magenta", "entity/bed/magenta" },
     .{ "light_blue", "entity/bed/light_blue" }, .{ "yellow", "entity/bed/yellow" }, .{ "lime", "entity/bed/lime" },
@@ -2215,6 +2236,26 @@ fn stateFacing(state: []const u8) model.Dir {
 fn familyPrefix(name: []const u8, suffix: []const u8) ?[]const u8 {
     if (!std.mem.endsWith(u8, name, suffix)) return null;
     return name[0 .. name.len - suffix.len];
+}
+
+fn generatedSpecialTexture(arena: std.mem.Allocator, full_name: []const u8, special: SpecialBlockModel) !?SpecialTexture {
+    const name = model.stripNs(full_name);
+    const path = switch (special.kind) {
+        .bed => try std.fmt.allocPrint(arena, "block/{s}_{s}_up", .{
+            name,
+            if (special.head_part) "head" else "foot",
+        }),
+        .sign => blk: {
+            const wood = familyPrefix(name, "_wall_sign") orelse familyPrefix(name, "_sign") orelse return null;
+            break :blk try std.fmt.allocPrint(arena, "block/{s}_sign", .{wood});
+        },
+        .hanging_sign => blk: {
+            const wood = familyPrefix(name, "_wall_hanging_sign") orelse familyPrefix(name, "_hanging_sign") orelse return null;
+            break :blk try std.fmt.allocPrint(arena, "block/{s}_hanging_sign", .{wood});
+        },
+        else => return null,
+    };
+    return .{ .path = path, .region = full_tile_region };
 }
 
 fn chestTexture(name: []const u8, state: []const u8) ?[]const u8 {
@@ -2595,6 +2636,30 @@ test "special block models are textured, state-aware, and never full-cell cubes"
     try std.testing.expect(specialBlockModel("minecraft:barrier", "") == null);
     try std.testing.expect(specialBlockModel("minecraft:structure_void", "") == null);
     try std.testing.expect(specialBlockModel("minecraft:moving_piston", "") == null);
+}
+
+test "beds and signs support the per-block textures used by newer clients" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+
+    const bed = specialBlockModel("minecraft:blue_bed", "facing=south,part=head").?;
+    try std.testing.expectEqualStrings(
+        "block/blue_bed_head_up",
+        (try generatedSpecialTexture(a, "minecraft:blue_bed", bed)).?.path,
+    );
+
+    const wall_sign = specialBlockModel("minecraft:spruce_wall_sign", "facing=west").?;
+    try std.testing.expectEqualStrings(
+        "block/spruce_sign",
+        (try generatedSpecialTexture(a, "minecraft:spruce_wall_sign", wall_sign)).?.path,
+    );
+
+    const hanging = specialBlockModel("minecraft:oak_wall_hanging_sign", "facing=north").?;
+    try std.testing.expectEqualStrings(
+        "block/oak_hanging_sign",
+        (try generatedSpecialTexture(a, "minecraft:oak_wall_hanging_sign", hanging)).?.path,
+    );
 }
 
 test "special blocks survive resolver failures without full-cell fallback" {

@@ -111,8 +111,22 @@ pub const Stats = struct {
     /// Chunks whose payload we can't read: lz4-compressed (Paper servers) or
     /// external `.mcc` sidecars.
     chunks_unreadable: usize = 0,
+    /// Loaded chunks with block-palette entries in an unrecognized format
+    /// (rendered as air) — usually a Minecraft release newer than vantage.
+    chunks_unknown_palette: usize = 0,
+    /// Highest DataVersion among `chunks_unknown_palette`, for the warning.
+    unknown_palette_data_version: i32 = 0,
     distinct_blocks: usize = 0,
     distinct_biomes: usize = 0,
+
+    /// Record a successfully decoded chunk.
+    pub fn noteLoaded(self: *Stats, ch: chunk.Chunk) void {
+        self.chunks_loaded += 1;
+        if (ch.unknown_palette_entries > 0) {
+            self.chunks_unknown_palette += 1;
+            self.unknown_palette_data_version = @max(self.unknown_palette_data_version, ch.data_version);
+        }
+    }
 };
 
 /// A half-open XZ sub-box of a grid, in grid-local block coords. Tiled renders
@@ -265,7 +279,7 @@ pub fn assemble(
                 stats.chunks_missing += 1;
                 continue;
             }
-            stats.chunks_loaded += 1;
+            stats.noteLoaded(ch);
             try loaded.append(arena, ch);
         }
     }

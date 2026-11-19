@@ -34,7 +34,7 @@
 | --- | --- |
 | 🖥️ **Map worlds on my computer** | [Download Vantage Desktop](https://vantage.beacon-mc.io/#desktop) for Windows, macOS or Linux |
 | 🌐 **Explore a multiplayer server's map** | Vantage Desktop → **Servers** → the address your admin gave you ([details](./docs/server.md#connecting-from-vantage-desktop)) |
-| ⌨️ **Render or host maps from the command line** | [Grab the CLI](https://github.com/thoughts-on-things/vantage-mc/releases/latest), then follow the [quick start](#quick-start) |
+| ⌨️ **Render or host maps from the command line** | [Grab the CLI](https://downloads.thoughtsonthingsllc.com/#vantage), then follow the [quick start](#quick-start) |
 | 🧩 **Add the viewer to a web app** | [`@thoughts-on-things/vantage-mc`](https://www.npmjs.com/package/@thoughts-on-things/vantage-mc) · [package guide](./web/README.md) |
 | 🛰️ **Run Vantage beside a multiplayer server** | [Server overview](https://vantage.beacon-mc.io/server/) · [integration guide](./docs/server.md) |
 
@@ -51,7 +51,7 @@
 <p align="center">
   <a href="https://vantage.beacon-mc.io/#desktop"><b>Download for your OS →</b></a>
   &nbsp;·&nbsp;
-  <a href="https://github.com/thoughts-on-things/vantage-mc/releases/latest">All release files</a>
+  <a href="https://downloads.thoughtsonthingsllc.com/#vantage">All downloads</a>
 </p>
 
 ## Quick start
@@ -59,12 +59,12 @@
 **1. Get the CLI.** It's one small static binary for Linux, macOS and Windows: no Java, no installer, no dependencies.
 
 ```sh
-# Linux x86-64. Other platforms: https://github.com/thoughts-on-things/vantage-mc/releases/latest
-curl -sL https://github.com/thoughts-on-things/vantage-mc/releases/latest/download/vantage-x86_64-linux.tar.gz | tar xz
+# Linux x86-64. Other platforms: https://downloads.thoughtsonthingsllc.com/#vantage
+curl -sL https://downloads.thoughtsonthingsllc.com/vantage/latest/vantage-x86_64-linux.tar.gz | tar xz
 sudo install vantage /usr/local/bin/   # or keep it local and run ./vantage
 ```
 
-Builds are published for `x86_64-linux`, `aarch64-linux`, `x86_64-macos`, `aarch64-macos` and `x86_64-windows`.
+Builds are published for `x86_64-linux`, `aarch64-linux`, `x86_64-macos`, `aarch64-macos` and `x86_64-windows` at `https://downloads.thoughtsonthingsllc.com/vantage/latest/vantage-<platform>.tar.gz` (`.zip` on Windows). Each file has a `.sha256` next to it, and every release stays available under its version, e.g. `vantage-0.15.1-x86_64-linux.tar.gz`.
 
 **2. Render your world and open it.**
 

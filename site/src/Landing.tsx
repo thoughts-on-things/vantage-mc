@@ -9,7 +9,7 @@ import { PlayerShowcase } from './PlayerShowcase.js';
 import { DesktopShowcase } from './DesktopShowcase.js';
 
 const GITHUB = 'https://github.com/thoughts-on-things/vantage-mc';
-const RELEASES = `${GITHUB}/releases`;
+const DOWNLOADS = 'https://downloads.thoughtsonthingsllc.com';
 const BEACON = 'https://beacon-mc.io';
 const STUDIO = 'https://thoughtsonthingsllc.com';
 const SERVER = './server/';
@@ -338,13 +338,13 @@ export function Landing({ onDemo }: { onDemo: () => void }) {
                 <span className="c"># one small static binary — Linux, macOS, Windows</span>
                 {'\n'}
                 <span className="p">$</span> curl -sL{' '}
-                {`${GITHUB.replace('https://', '')}/releases/latest/download/vantage-x86_64-linux.tar.gz`} | tar xz
+                {`${DOWNLOADS.replace('https://', '')}/vantage/latest/vantage-x86_64-linux.tar.gz`} | tar xz
               </code>
             </pre>
             <p>
               Download a binary from{' '}
-              <a href={RELEASES} rel="noreferrer">
-                GitHub Releases
+              <a href={`${DOWNLOADS}/#vantage`} rel="noreferrer">
+                the downloads page
               </a>
               . No Java, no installer, no dependencies.
             </p>

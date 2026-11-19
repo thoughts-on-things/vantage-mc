@@ -3,69 +3,40 @@ import mapTop from './assets/render-world-v2.png';
 import mapPersp from './assets/render-hero-v2.png';
 import mapBiomes from './assets/render-biomes-v2.png';
 
-const GITHUB = 'https://github.com/thoughts-on-things/vantage-mc';
-const RELEASES = `${GITHUB}/releases`;
-// Fallback target: the latest-release page always resolves, even before the
-// desktop job has ever run. On mount we upgrade it to exact asset URLs via the
-// GitHub API (see useLatestDownloads) for one-click downloads.
-const RELEASES_LATEST = `${RELEASES}/latest`;
-const REPO_API = 'https://api.github.com/repos/thoughts-on-things/vantage-mc/releases/latest';
+// Every release copies its installers to stable, version-free names under
+// latest/, so these links always resolve to the newest build.
+const DOWNLOADS = 'https://downloads.thoughtsonthingsllc.com';
+const ALL_DOWNLOADS = `${DOWNLOADS}/#vantage`;
+const LATEST = `${DOWNLOADS}/vantage/latest`;
+const UPDATER_FEED = `${DOWNLOADS}/vantage/latest.json`;
+const CHANGELOG = 'https://github.com/thoughts-on-things/vantage-mc/blob/main/CHANGELOG.md';
 
-type Downloads = {
-  version: string | null;
-  windows: string;
-  macArm: string;
-  macIntel: string;
-  appImage: string;
-  deb: string;
-  rpm: string;
+const DOWNLOAD_LINKS = {
+  windows: `${LATEST}/Vantage_x64-setup.exe`,
+  macArm: `${LATEST}/Vantage_aarch64.dmg`,
+  macIntel: `${LATEST}/Vantage_x64.dmg`,
+  appImage: `${LATEST}/Vantage_amd64.AppImage`,
+  deb: `${LATEST}/Vantage_amd64.deb`,
+  rpm: `${LATEST}/Vantage.x86_64.rpm`,
 };
 
-const PAGE_FALLBACK: Downloads = {
-  version: null,
-  windows: RELEASES_LATEST,
-  macArm: RELEASES_LATEST,
-  macIntel: RELEASES_LATEST,
-  appImage: RELEASES_LATEST,
-  deb: RELEASES_LATEST,
-  rpm: RELEASES_LATEST,
-};
-
-/** Resolves every desktop artifact on the latest release: the signed Windows
- *  installer, both macOS disk images, and the three Linux packages. Any asset
- *  a release does not have yet keeps the release-page fallback. */
-function useLatestDownloads(): Downloads {
-  const [downloads, setDownloads] = useState<Downloads>(PAGE_FALLBACK);
+/** The newest desktop version, read from the updater feed. Purely cosmetic:
+ *  the links above work without it, so any failure just hides the label. */
+function useLatestVersion(): string | null {
+  const [version, setVersion] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    fetch(REPO_API, { headers: { Accept: 'application/vnd.github+json' } })
+    fetch(UPDATER_FEED)
       .then((r) => (r.ok ? r.json() : null))
-      .then((rel: { tag_name?: string; assets?: { name: string; browser_download_url: string }[] } | null) => {
-        if (!live || !rel?.assets) return;
-        const assets = rel.assets;
-        const find = (...patterns: RegExp[]) => {
-          for (const pattern of patterns) {
-            const hit = assets.find((a) => pattern.test(a.name));
-            if (hit) return hit.browser_download_url;
-          }
-          return RELEASES_LATEST;
-        };
-        setDownloads({
-          version: rel.tag_name?.replace(/^v/, '') ?? null,
-          windows: find(/x64[-_]setup\.exe$/i, /setup.*\.exe$/i, /x64.*\.msi$/i, /\.msi$/i),
-          macArm: find(/aarch64\.dmg$/i),
-          macIntel: find(/(x64|x86_64)\.dmg$/i),
-          appImage: find(/\.AppImage$/i),
-          deb: find(/\.deb$/i),
-          rpm: find(/\.rpm$/i),
-        });
+      .then((feed: { version?: string } | null) => {
+        if (live && feed?.version) setVersion(feed.version.replace(/^v/, ''));
       })
       .catch(() => {});
     return () => {
       live = false;
     };
   }, []);
-  return downloads;
+  return version;
 }
 
 /** Browsers report Intel in the user agent even on Apple silicon, so the GPU
@@ -263,7 +234,7 @@ export function DesktopShowcase() {
     } else if (/linux|x11/i.test(ua) || p.includes('linux')) setOs('linux');
   }, []);
 
-  const downloads = useLatestDownloads();
+  const version = useLatestVersion();
   const step = useRenderLoop(reduced, live);
   const phase = PHASES[step] ?? PHASES[PHASES.length - 1]!;
   const rendering = phase.label !== 'Ready';
@@ -272,7 +243,7 @@ export function DesktopShowcase() {
   const lead =
     os === 'mac'
       ? {
-          href: macSilicon ? downloads.macArm : downloads.macIntel,
+          href: macSilicon ? DOWNLOAD_LINKS.macArm : DOWNLOAD_LINKS.macIntel,
           label: 'Download for macOS',
           Icon: AppleIcon,
           meta: macSilicon
@@ -281,7 +252,7 @@ export function DesktopShowcase() {
         }
       : os === 'linux'
         ? {
-            href: downloads.appImage,
+            href: DOWNLOAD_LINKS.appImage,
             label: 'Download for Linux',
             Icon: LinuxIcon,
             meta: (
@@ -292,7 +263,7 @@ export function DesktopShowcase() {
             ),
           }
         : {
-            href: downloads.windows,
+            href: DOWNLOAD_LINKS.windows,
             label: 'Download for Windows',
             Icon: WindowsIcon,
             meta: <>signed <code>.exe</code> installer · Windows 10 &amp; 11 · 64-bit · updates itself</>,
@@ -468,12 +439,16 @@ export function DesktopShowcase() {
             <DownloadIcon size={17} className="dl-btn-arrow" />
           </a>
           <p className="dl-meta">
-            {downloads.version ? `v${downloads.version} · ` : ''}
+            {version ? `v${version} · ` : ''}
             {lead.meta}
           </p>
           <p className="dl-detected">
-            <a href={RELEASES} rel="noreferrer">
-              All downloads &amp; release notes ↗
+            <a href={ALL_DOWNLOADS} rel="noreferrer">
+              All downloads
+            </a>
+            {' · '}
+            <a href={CHANGELOG} rel="noreferrer">
+              Release notes ↗
             </a>
           </p>
         </div>
@@ -485,7 +460,7 @@ export function DesktopShowcase() {
               <b>Windows</b>
               <small>Signed installer · x64</small>
             </span>
-            <a className="dl-plat-btn" href={downloads.windows} rel="noreferrer" aria-label="Download for Windows">
+            <a className="dl-plat-btn" href={DOWNLOAD_LINKS.windows} rel="noreferrer" aria-label="Download for Windows">
               <DownloadIcon size={16} />
             </a>
           </li>
@@ -496,8 +471,8 @@ export function DesktopShowcase() {
               <small>Apple silicon &amp; Intel</small>
             </span>
             <span className="dl-plat-links">
-              <a href={downloads.macArm} rel="noreferrer">M-series</a>
-              <a href={downloads.macIntel} rel="noreferrer">Intel</a>
+              <a href={DOWNLOAD_LINKS.macArm} rel="noreferrer">M-series</a>
+              <a href={DOWNLOAD_LINKS.macIntel} rel="noreferrer">Intel</a>
             </span>
           </li>
           <li className="dl-plat dl-plat-live">
@@ -507,9 +482,9 @@ export function DesktopShowcase() {
               <small>x86-64</small>
             </span>
             <span className="dl-plat-links">
-              <a href={downloads.appImage} rel="noreferrer">AppImage</a>
-              <a href={downloads.deb} rel="noreferrer">deb</a>
-              <a href={downloads.rpm} rel="noreferrer">rpm</a>
+              <a href={DOWNLOAD_LINKS.appImage} rel="noreferrer">AppImage</a>
+              <a href={DOWNLOAD_LINKS.deb} rel="noreferrer">deb</a>
+              <a href={DOWNLOAD_LINKS.rpm} rel="noreferrer">rpm</a>
             </span>
           </li>
         </ul>

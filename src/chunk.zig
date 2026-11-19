@@ -361,7 +361,7 @@ const TestNbt = struct {
     }
     /// Named tag header: type byte + name.
     fn named(self: *TestNbt, t: nbt.TagType, name: []const u8) !void {
-        try self.byte(@intFromEnum(t));
+        try self.byte(@backingInt(t));
         try self.str(name);
     }
     fn stringTag(self: *TestNbt, name: []const u8, v: []const u8) !void {
@@ -381,13 +381,13 @@ fn serializeTestChunk(a: std.mem.Allocator, palette_len: i32, writePalette: *con
     try w.named(.int, "DataVersion");
     try w.int(i32, 5023);
     try w.named(.list, "sections");
-    try w.byte(@intFromEnum(nbt.TagType.compound));
+    try w.byte(@backingInt(nbt.TagType.compound));
     try w.int(i32, 1);
     try w.named(.byte, "Y");
     try w.byte(0);
     try w.named(.compound, "block_states");
     try w.named(.list, "palette");
-    try w.byte(@intFromEnum(nbt.TagType.compound));
+    try w.byte(@backingInt(nbt.TagType.compound));
     try w.int(i32, palette_len);
     try writePalette(&w);
     try w.named(.long_array, "data");
@@ -451,7 +451,7 @@ test "decode accepts an all-string compact palette" {
     const a = arena_state.allocator();
 
     var palette = [_]nbt.Tag{ .{ .string = "minecraft:stone" }, .{ .string = "minecraft:dirt" } };
-    var data = [_]i64{0} ** (SECTION_BLOCKS * 4 / 64);
+    var data: [SECTION_BLOCKS * 4 / 64]i64 = @splat(0);
     var block_states = [_]nbt.Entry{
         .{ .name = "palette", .tag = .{ .list = .{ .elem = .string, .items = &palette } } },
         .{ .name = "data", .tag = .{ .long_array = &data } },

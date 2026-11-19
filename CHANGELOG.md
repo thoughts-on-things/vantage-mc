@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.15.2](https://github.com/thoughts-on-things/vantage-mc/compare/v0.15.1...v0.15.2) (2026-11-19)
+
+
+### Bug Fixes
+
+* decode Minecraft 26.3 block-state palettes ([#108](https://github.com/thoughts-on-things/vantage-mc/issues/108)) ([2a8942a](https://github.com/thoughts-on-things/vantage-mc/commit/2a8942a565450eb3207c0de4befe3f1e91f6739f))
+
+
+### Documentation
+
+* redesign README to match the product site ([#110](https://github.com/thoughts-on-things/vantage-mc/issues/110)) ([f7cbc28](https://github.com/thoughts-on-things/vantage-mc/commit/f7cbc28c78f8deb6e506aaad6d348803be32411d))
+
+
+### Build System
+
+* update to Zig 0.17.1 and refresh all dependencies ([#109](https://github.com/thoughts-on-things/vantage-mc/issues/109)) ([48e3a84](https://github.com/thoughts-on-things/vantage-mc/commit/48e3a8432873dea0382a3c6949f0d3dfcf24cb8b))
+
 ## [0.15.1](https://github.com/thoughts-on-things/vantage-mc/compare/v0.15.0...v0.15.1) (2026-08-25)
 
 

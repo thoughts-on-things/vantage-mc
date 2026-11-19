@@ -32,9 +32,11 @@ function commandVersion(command, args = ['--version']) {
 }
 
 function checkNode() {
-  const major = Number(process.versions.node.split('.')[0]);
-  if (major < 22) {
-    fail(`Node ${process.versions.node} is too old.`, 'Install Node 22.18 or newer: https://nodejs.org');
+  // Mirrors package.json engines (tsup 9 / Vitest 5): ^22.18 || ^24.11 || >=26.
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  const supported = (major === 22 && minor >= 18) || (major === 24 && minor >= 11) || major >= 26;
+  if (!supported) {
+    fail(`Node ${process.versions.node} is not supported.`, 'Install Node 22.18+, 24.11+, or 26+: https://nodejs.org');
     return false;
   }
   ok(`Node ${process.version}`);

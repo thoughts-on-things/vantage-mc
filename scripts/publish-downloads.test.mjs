@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BASE_URL, buildFeed, contentType, planFiles } from './publish-downloads.mjs';
+import { BASE_URL, buildFeed, compareVersions, contentType, planFiles } from './publish-downloads.mjs';
 
 const DOWNLOAD = BASE_URL;
 const asset = (name) => ({ name, url: `${DOWNLOAD}/${name}` });
@@ -119,4 +119,12 @@ test('uploads carry a content type the browser can act on', () => {
   assert.equal(contentType('vantage/latest.json'), 'application/json');
   assert.equal(contentType('vantage/a.exe.sha256'), 'text/plain; charset=utf-8');
   assert.equal(contentType('vantage/a.dmg'), 'application/octet-stream');
+});
+
+test('versions compare numerically, so an older tag never outranks the live one', () => {
+  assert.equal(compareVersions('0.15.1', '0.16.0'), -1);
+  assert.equal(compareVersions('0.16.0', '0.15.10'), 1);
+  assert.equal(compareVersions('v0.16.0', '0.16.0'), 0);
+  assert.equal(compareVersions('1.0.0-rc.1', '1.0.0'), -1);
+  assert.equal(compareVersions('1.0.0', '0.99.0'), 1);
 });

@@ -95,6 +95,32 @@ export function buildFeed(assets, { version, pubDate, readSignature }) {
   return { feed: { version, pub_date: pubDate, platforms }, missing };
 }
 
+/** Orders `major.minor.patch` versions; a pre-release sorts below its release. */
+export function compareVersions(a, b) {
+  const parse = (v) => {
+    const [core, pre = ''] = String(v).replace(/^v/, '').split('-', 2);
+    return { nums: core.split('.').map((n) => Number.parseInt(n, 10) || 0), pre };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < 3; i += 1) {
+    const diff = (x.nums[i] ?? 0) - (y.nums[i] ?? 0);
+    if (diff !== 0) return Math.sign(diff);
+  }
+  if (x.pre === y.pre) return 0;
+  if (!x.pre) return 1;
+  if (!y.pre) return -1;
+  return x.pre < y.pre ? -1 : 1;
+}
+
+/** The version the live feed serves, or null when there is no feed yet. */
+async function publishedVersion() {
+  const response = await fetch(`${BASE_URL}/latest.json`, { cache: 'no-store' });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Could not read ${BASE_URL}/latest.json: HTTP ${response.status}`);
+  return (await response.json()).version ?? null;
+}
+
 export function contentType(name) {
   if (name.endsWith('.json')) return 'application/json';
   if (name.endsWith('.sha256') || name.endsWith('.sig')) return 'text/plain; charset=utf-8';
@@ -153,11 +179,21 @@ async function main() {
         aliases.push([path, `latest/${latest}`], [aliasChecksum, `latest/${latest}.sha256`]);
       }
     }
+    // Republishing an older tag restores its versioned files but must not roll
+    // latest/ and the update feed back past what is already live.
+    const live = await publishedVersion();
+    const promote = live === null || compareVersions(version, live) >= 0;
+    if (!promote) {
+      console.log(`${live} is already live; publishing ${version}'s versioned files only.`);
+    }
+
     // Aliases only move once every versioned file they point at is in place.
-    for (const [file, key] of aliases) put(file, key, SHORT_LIVED);
+    if (promote) for (const [file, key] of aliases) put(file, key, SHORT_LIVED);
 
     let feedPath = null;
-    if (files.some((file) => file.name.endsWith('.sig'))) {
+    if (!promote) {
+      // Leave latest/ and the feed alone.
+    } else if (files.some((file) => file.name.endsWith('.sig'))) {
       const { feed, missing } = buildFeed(
         files.map(({ name }) => ({ name, url: `${BASE_URL}/${encodeURIComponent(name)}` })),
         {

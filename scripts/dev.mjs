@@ -33,8 +33,8 @@ function commandVersion(command, args = ['--version']) {
 
 function checkNode() {
   const major = Number(process.versions.node.split('.')[0]);
-  if (major < 18) {
-    fail(`Node ${process.versions.node} is too old.`, 'Install Node 18 or newer: https://nodejs.org');
+  if (major < 22) {
+    fail(`Node ${process.versions.node} is too old.`, 'Install Node 22.18 or newer: https://nodejs.org');
     return false;
   }
   ok(`Node ${process.version}`);

@@ -23,5 +23,5 @@ export default defineConfig({
   envPrefix: ['VITE_', 'TAURI_'],
   // Three.js intentionally lives in the lazy ViewerScreen chunk. Its size is
   // expected and does not affect library startup, so keep routine builds quiet.
-  build: { target: 'es2021', minify: 'esbuild', sourcemap: true, chunkSizeWarningLimit: 600 },
+  build: { target: 'es2021', sourcemap: true, chunkSizeWarningLimit: 800 },
 });

@@ -53,8 +53,9 @@ pub fn build(b: *std.Build) void {
             "vendor/libdeflate/lib/arm/cpu_features.c",
             "vendor/libdeflate/lib/x86/cpu_features.c",
         },
-        // libdeflate 1.26+ requires C11.
-        .flags = &.{"-std=c11"},
+        // libdeflate 1.26+ requires C11; GNU mode keeps POSIX declarations
+        // such as O_CLOEXEC visible on glibc (arm/cpu_features.c).
+        .flags = &.{"-std=gnu11"},
     });
     // Vendored stb_image (PNG decode) — C interop. PNG-only, decode-from-memory
     // (see the impl TU).

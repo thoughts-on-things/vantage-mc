@@ -127,4 +127,9 @@ test('versions compare numerically, so an older tag never outranks the live one'
   assert.equal(compareVersions('v0.16.0', '0.16.0'), 0);
   assert.equal(compareVersions('1.0.0-rc.1', '1.0.0'), -1);
   assert.equal(compareVersions('1.0.0', '0.99.0'), 1);
+  assert.equal(compareVersions('1.0.0-rc.2', '1.0.0-rc.10'), -1);
+  assert.equal(compareVersions('1.0.0-rc.10', '1.0.0-rc.2'), 1);
+  assert.equal(compareVersions('1.0.0-alpha', '1.0.0-alpha.1'), -1);
+  assert.equal(compareVersions('1.0.0-alpha.1', '1.0.0-beta'), -1);
+  assert.equal(compareVersions('1.0.0-1', '1.0.0-alpha'), -1);
 });

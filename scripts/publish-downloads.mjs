@@ -95,11 +95,13 @@ export function buildFeed(assets, { version, pubDate, readSignature }) {
   return { feed: { version, pub_date: pubDate, platforms }, missing };
 }
 
-/** Orders `major.minor.patch` versions; a pre-release sorts below its release. */
+/** Orders versions by SemVer precedence (build metadata is not expected). */
 export function compareVersions(a, b) {
   const parse = (v) => {
-    const [core, pre = ''] = String(v).replace(/^v/, '').split('-', 2);
-    return { nums: core.split('.').map((n) => Number.parseInt(n, 10) || 0), pre };
+    const text = String(v).replace(/^v/, '');
+    const dash = text.indexOf('-');
+    const core = dash === -1 ? text : text.slice(0, dash);
+    return { nums: core.split('.').map((n) => Number.parseInt(n, 10) || 0), pre: dash === -1 ? [] : text.slice(dash + 1).split('.') };
   };
   const x = parse(a);
   const y = parse(b);
@@ -107,10 +109,25 @@ export function compareVersions(a, b) {
     const diff = (x.nums[i] ?? 0) - (y.nums[i] ?? 0);
     if (diff !== 0) return Math.sign(diff);
   }
-  if (x.pre === y.pre) return 0;
-  if (!x.pre) return 1;
-  if (!y.pre) return -1;
-  return x.pre < y.pre ? -1 : 1;
+  // A release outranks any of its pre-releases.
+  if (x.pre.length === 0 || y.pre.length === 0) return Math.sign(y.pre.length - x.pre.length);
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i += 1) {
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    const pNum = /^\d+$/.test(p);
+    const qNum = /^\d+$/.test(q);
+    if (pNum && qNum) {
+      const diff = Number(p) - Number(q);
+      if (diff !== 0) return Math.sign(diff);
+    } else if (pNum !== qNum) {
+      return pNum ? -1 : 1;
+    } else if (p !== q) {
+      return p < q ? -1 : 1;
+    }
+  }
+  return 0;
 }
 
 /** The version the live feed serves, or null when there is no feed yet. */

@@ -99,7 +99,7 @@ pub const Parser = struct {
 
     /// Parse the unnamed root compound (modern chunk format, 1.18+).
     pub fn parseRoot(self: *Parser) Error![]Entry {
-        const t: TagType = @enumFromInt(try self.readU8());
+        const t: TagType = @fromBackingInt(@intCast(try self.readU8()));
         if (t != .compound) return error.BadTag;
         _ = try self.readString(); // root name, usually empty
         return self.parseCompound();
@@ -111,7 +111,7 @@ pub const Parser = struct {
             const tag_byte = try self.readU8();
             if (tag_byte == 0) break; // TAG_End
             if (tag_byte > 12) return error.BadTag;
-            const t: TagType = @enumFromInt(tag_byte);
+            const t: TagType = @fromBackingInt(@intCast(tag_byte));
             const name = try self.readString();
             const tag = try self.parsePayload(t);
             try list.append(self.arena, .{ .name = name, .tag = tag });
@@ -122,7 +122,7 @@ pub const Parser = struct {
     fn parseList(self: *Parser) Error!List {
         const elem_byte = try self.readU8();
         if (elem_byte > 12) return error.BadTag;
-        const elem: TagType = @enumFromInt(elem_byte);
+        const elem: TagType = @fromBackingInt(@intCast(elem_byte));
         const n = try self.count();
         const items = try self.arena.alloc(Tag, n);
         for (items) |*it| it.* = try self.parsePayload(elem);

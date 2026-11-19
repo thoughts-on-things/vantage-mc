@@ -45,10 +45,10 @@ function checkNativeTools() {
   let healthy = true;
   const zig = commandVersion('zig', ['version']);
   if (!zig) {
-    fail('Zig was not found.', 'Install Zig 0.16.0 and make sure `zig` is on PATH: https://ziglang.org/download');
+    fail('Zig was not found.', 'Install Zig 0.17.1 and make sure `zig` is on PATH: https://ziglang.org/download');
     healthy = false;
-  } else if (!zig.startsWith('0.16.')) {
-    fail(`Zig ${zig} is installed, but this repository requires 0.16.x.`, 'Use Zig 0.16.0 to avoid pre-1.0 compiler incompatibilities.');
+  } else if (!zig.startsWith('0.17.')) {
+    fail(`Zig ${zig} is installed, but this repository requires 0.17.x.`, 'Use Zig 0.17.1 to avoid pre-1.0 compiler incompatibilities.');
     healthy = false;
   } else {
     ok(`Zig ${zig}`);

@@ -7,9 +7,7 @@
 //! chunks (compression type 2); gzip covers type 1 and `level.dat`.
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("libdeflate.h");
-});
+const c = @import("libdeflate");
 
 /// Inflate a zlib-wrapped (RFC 1950) buffer into a freshly allocated slice.
 pub fn inflateZlib(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
@@ -93,13 +91,14 @@ test "inflateGzip round-trips a known blob" {
 
 test "gzipCompress round-trips through inflateGzip" {
     const a = std.testing.allocator;
-    const payload = "vantage tiles compress well because quantized data repeats " ** 20;
-    const packed_ = try gzipCompress(a, payload, 6);
+    const unit = "vantage tiles compress well because quantized data repeats ";
+    const payload: [20 * unit.len]u8 = @bitCast(@as([20][unit.len]u8, @splat(unit.*)));
+    const packed_ = try gzipCompress(a, &payload, 6);
     defer a.free(packed_);
     try std.testing.expect(packed_.len < payload.len / 2);
     const back = try inflateGzip(a, packed_);
     defer a.free(back);
-    try std.testing.expectEqualStrings(payload, back);
+    try std.testing.expectEqualStrings(&payload, back);
 }
 
 test "inflateZlib rejects garbage" {

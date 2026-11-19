@@ -223,7 +223,7 @@ they remain small inline data URLs.
 
 ## Development
 
-Requirements: Zig 0.16, Rust stable, and Node 18+. Each OS adds its WebView:
+Requirements: Zig 0.17, Rust stable, and Node 18+. Each OS adds its WebView:
 Windows ships WebView2, macOS needs the Xcode Command Line Tools, and Linux
 needs the WebKitGTK dev packages (`libwebkit2gtk-4.1-dev
 libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf` on Debian and

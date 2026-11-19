@@ -688,8 +688,8 @@ test "serialized header is well-formed and sizes match" {
     }
     // One quad: 4 verts, 6 indices.
     try m.positions.appendSlice(a, &.{ 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0 });
-    try m.colors.appendSlice(a, &([_]u8{ 10, 20, 30, 255 } ** 4));
-    try m.normals.appendSlice(a, &([_]i8{ 0, 0, 1, 0 } ** 4));
+    try m.colors.appendSlice(a, &(repeatPattern(u8, .{ 10, 20, 30, 255 }, 4)));
+    try m.normals.appendSlice(a, &(repeatPattern(i8, .{ 0, 0, 1, 0 }, 4)));
     try m.indices.appendSlice(a, &.{ 0, 1, 2, 0, 2, 3 });
     m.vertex_count = 4;
 
@@ -718,11 +718,11 @@ test "VTL3 writes biome attribute and legend" {
     }
     // One quad, biome id 1 on all 4 verts.
     try m.positions.appendSlice(a, &.{ 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0 });
-    try m.uv.appendSlice(a, &([_]f32{ 0, 0 } ** 4));
-    try m.layer.appendSlice(a, &([_]f32{0} ** 4));
-    try m.color.appendSlice(a, &([_]u8{ 255, 255, 255, 255 } ** 4));
-    try m.normals.appendSlice(a, &([_]i8{ 0, 0, 1, 0 } ** 4));
-    try m.biome.appendSlice(a, &([_]f32{1} ** 4));
+    try m.uv.appendSlice(a, &(repeatPattern(f32, .{ 0, 0 }, 4)));
+    try m.layer.appendSlice(a, &(@as([4]f32, @splat(0))));
+    try m.color.appendSlice(a, &(repeatPattern(u8, .{ 255, 255, 255, 255 }, 4)));
+    try m.normals.appendSlice(a, &(repeatPattern(i8, .{ 0, 0, 1, 0 }, 4)));
+    try m.biome.appendSlice(a, &(@as([4]f32, @splat(1))));
     m.vertex_count = 4;
 
     const names = [_][]const u8{ "", "minecraft:plains" };
@@ -759,11 +759,11 @@ test "VTL4 writes both geometry sections and the shared legend" {
     // One quad in each section.
     for ([_]*mesh.Mesh2{ &solid, &fluid }) |m| {
         try m.positions.appendSlice(a, &.{ 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0 });
-        try m.uv.appendSlice(a, &([_]f32{ 0, 0 } ** 4));
-        try m.layer.appendSlice(a, &([_]f32{0} ** 4));
-        try m.color.appendSlice(a, &([_]u8{ 255, 255, 255, 255 } ** 4));
-        try m.normals.appendSlice(a, &([_]i8{ 0, 0, 1, 0 } ** 4));
-        try m.biome.appendSlice(a, &([_]f32{1} ** 4));
+        try m.uv.appendSlice(a, &(repeatPattern(f32, .{ 0, 0 }, 4)));
+        try m.layer.appendSlice(a, &(@as([4]f32, @splat(0))));
+        try m.color.appendSlice(a, &(repeatPattern(u8, .{ 255, 255, 255, 255 }, 4)));
+        try m.normals.appendSlice(a, &(repeatPattern(i8, .{ 0, 0, 1, 0 }, 4)));
+        try m.biome.appendSlice(a, &(@as([4]f32, @splat(1))));
         m.vertex_count = 4;
     }
 
@@ -801,10 +801,10 @@ test "VTL6 quantizes positions and round-trips within tolerance" {
     // A quad with a wide, offset position span so the bbox transform is exercised.
     const px = [_]f32{ -100, 0, 0, 200, 0, 0, 200, 64, 0, -100, 64, 0 };
     try solid.positions.appendSlice(a, &px);
-    try solid.uv.appendSlice(a, &([_]f32{ 0, 0 } ** 4));
+    try solid.uv.appendSlice(a, &(repeatPattern(f32, .{ 0, 0 }, 4)));
     try solid.layer.appendSlice(a, &([_]f32{ 42, 42, 42, 42 }));
-    try solid.color.appendSlice(a, &([_]u8{ 255, 255, 255, 255 } ** 4));
-    try solid.normals.appendSlice(a, &([_]i8{ 0, 0, 1, 0 } ** 4));
+    try solid.color.appendSlice(a, &(repeatPattern(u8, .{ 255, 255, 255, 255 }, 4)));
+    try solid.normals.appendSlice(a, &(repeatPattern(i8, .{ 0, 0, 1, 0 }, 4)));
     try solid.biome.appendSlice(a, &([_]f32{ 7, 7, 7, 7 }));
     solid.vertex_count = 4;
 
@@ -865,10 +865,10 @@ test "VTL7 drops indices, delta-codes positions, and round-trips" {
     const uvs = [_]f32{ 0, 0, 17.0, 0, 17.0, 1, 0, 1, -0.25, 0.5, 0.5, 0.5, 0.5, 1, -0.25, 1 };
     try solid.positions.appendSlice(a, &px);
     try solid.uv.appendSlice(a, &uvs);
-    try solid.layer.appendSlice(a, &([_]f32{42} ** 8));
-    try solid.color.appendSlice(a, &([_]u8{ 255, 250, 245, 240 } ** 8));
-    try solid.normals.appendSlice(a, &([_]i8{ 0, 0, 1, -16 } ** 8));
-    try solid.biome.appendSlice(a, &([_]f32{7} ** 8));
+    try solid.layer.appendSlice(a, &(@as([8]f32, @splat(42))));
+    try solid.color.appendSlice(a, &(repeatPattern(u8, .{ 255, 250, 245, 240 }, 8)));
+    try solid.normals.appendSlice(a, &(repeatPattern(i8, .{ 0, 0, 1, -16 }, 8)));
+    try solid.biome.appendSlice(a, &(@as([8]f32, @splat(7))));
     solid.vertex_count = 8;
 
     const surface: grid.Surface = .{ .sx = 0, .sz = 0, .min_x = 0, .min_z = 0, .biome = &.{}, .height = &.{} };
@@ -945,18 +945,18 @@ test "VTLA carries lm_start, the cave boundaries, the lmuv tail, and the packed 
     }
     // Two quads: one model face (per-vertex light), one greedy (atlas-lit).
     const m = &built.solid;
-    try m.positions.appendSlice(a, &([_]f32{ 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0 } ** 2));
-    try m.uv.appendSlice(a, &([_]f32{ 0, 0 } ** 8));
-    try m.layer.appendSlice(a, &([_]f32{5} ** 8));
-    try m.color.appendSlice(a, &([_]u8{ 255, 255, 255, 255 } ** 8));
-    try m.normals.appendSlice(a, &([_]i8{ 0, 0, 1, -1 } ** 8));
-    try m.biome.appendSlice(a, &([_]f32{1} ** 8));
+    try m.positions.appendSlice(a, &(repeatPattern(f32, .{ 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0 }, 2)));
+    try m.uv.appendSlice(a, &(repeatPattern(f32, .{ 0, 0 }, 8)));
+    try m.layer.appendSlice(a, &(@as([8]f32, @splat(5))));
+    try m.color.appendSlice(a, &(repeatPattern(u8, .{ 255, 255, 255, 255 }, 8)));
+    try m.normals.appendSlice(a, &(repeatPattern(i8, .{ 0, 0, 1, -1 }, 8)));
+    try m.biome.appendSlice(a, &(@as([8]f32, @splat(1))));
     m.vertex_count = 8;
     built.lm_start = 4;
     // The greedy quad's half-texel lmuv: a 3x2-block rect at atlas (0,0).
     try m.lmuv.appendSlice(a, &.{ 1, 1, 1, 5, 7, 5, 7, 1 });
     // Packed RG atlas: sky=10/block=5, followed by exact AO=255.
-    var texels = [_]u8{ 0xa5, 255 } ** 12;
+    var texels = repeatPattern(u8, .{ 0xa5, 255 }, 12);
     built.lightmap = .{ .w = 4, .h = 3, .texels = &texels };
 
     const surface: grid.Surface = .{ .sx = 0, .sz = 0, .min_x = 0, .min_z = 0, .biome = &.{}, .height = &.{} };
@@ -994,4 +994,10 @@ test "VTLA carries lm_start, the cave boundaries, the lmuv tail, and the packed 
     try std.testing.expectEqual(@as(u8, 0xa5), bytes[lm_off + 8]); // packed sky/block
     try std.testing.expectEqual(@as(u8, 255), bytes[lm_off + 8 + 12]); // AO plane
     try std.testing.expectEqual(@as(u8, 255), bytes[lm_off + 8 + 2 * 12 - 1]);
+}
+
+/// Test helper: `pattern` tiled `n` times (Zig 0.17 removed the `**` operator).
+fn repeatPattern(comptime T: type, comptime pattern: anytype, comptime n: usize) [n * pattern.len]T {
+    const unit: [pattern.len]T = pattern;
+    return @bitCast(@as([n][pattern.len]T, @splat(unit)));
 }

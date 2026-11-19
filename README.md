@@ -61,6 +61,7 @@
 ```sh
 # Linux x86-64. Other platforms: https://github.com/thoughts-on-things/vantage-mc/releases/latest
 curl -sL https://github.com/thoughts-on-things/vantage-mc/releases/latest/download/vantage-x86_64-linux.tar.gz | tar xz
+sudo install vantage /usr/local/bin/   # or keep it local and run ./vantage
 ```
 
 Builds are published for `x86_64-linux`, `aarch64-linux`, `x86_64-macos`, `aarch64-macos` and `x86_64-windows`.
@@ -73,7 +74,7 @@ vantage render "~/.minecraft/saves/My World" --out my-map    # every dimension, 
 vantage serve my-map --open                                  # opens the map in your browser
 ```
 
-**3. Share it.** A finished map is just a folder of static files. Put it behind any web server, S3 bucket or Pages site, or embed the [`<VantageViewer>`](./web/README.md) React component in your own app.
+**3. Share it.** A finished map is just a folder of static files: host it on any web server, S3 bucket or Pages site. `vantage serve` bundles the viewer for you; on your own host, load the map with the [web viewer package](./web/README.md) (or its [`<VantageViewer>`](./web/README.md) React component) pointed at the hosted `manifest.json`.
 
 ```text
 my-map/

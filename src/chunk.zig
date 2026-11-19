@@ -173,12 +173,17 @@ const PaletteEntry = struct { name: []const u8, state: []const u8, known: bool }
 ///   - string `"minecraft:stone"`: 26.3+ compact form for a block's default
 ///     state. We don't know each block's default properties, so the state key
 ///     is "" and the model resolver falls back to its default variant.
+///   - compound `{"": "minecraft:stone"}`: the same compact string inside a
+///     palette that also holds compounds. NBT lists are homogeneous, so since
+///     25w09a mixed lists wrap non-compound elements in an empty-key compound.
 /// Anything else decodes as air with `known = false` so callers can warn.
 fn decodePaletteEntry(arena: std.mem.Allocator, p: nbt.Tag) Error!PaletteEntry {
     const unknown: PaletteEntry = .{ .name = "minecraft:air", .state = "", .known = false };
     switch (p) {
         .string => |s| return .{ .name = s, .state = "", .known = true },
         .compound => |c| {
+            if (c.len == 1 and c[0].name.len == 0 and c[0].tag == .string)
+                return .{ .name = c[0].tag.string, .state = "", .known = true };
             const n = nbt.get(c, "id") orelse nbt.get(c, "Name") orelse return unknown;
             if (n.* != .string) return unknown;
             var state: []const u8 = "";
@@ -337,46 +342,97 @@ test "unpack round-trips packed 1-bit biome cells" {
     }
 }
 
+/// Minimal big-endian NBT writer for building serialized test chunks.
+const TestNbt = struct {
+    buf: std.ArrayList(u8) = .empty,
+    a: std.mem.Allocator,
+
+    fn byte(self: *TestNbt, v: u8) !void {
+        try self.buf.append(self.a, v);
+    }
+    fn int(self: *TestNbt, comptime T: type, v: T) !void {
+        var b: [@sizeOf(T)]u8 = undefined;
+        std.mem.writeInt(T, &b, v, .big);
+        try self.buf.appendSlice(self.a, &b);
+    }
+    fn str(self: *TestNbt, s: []const u8) !void {
+        try self.int(u16, @intCast(s.len));
+        try self.buf.appendSlice(self.a, s);
+    }
+    /// Named tag header: type byte + name.
+    fn named(self: *TestNbt, t: nbt.TagType, name: []const u8) !void {
+        try self.byte(@intFromEnum(t));
+        try self.str(name);
+    }
+    fn stringTag(self: *TestNbt, name: []const u8, v: []const u8) !void {
+        try self.named(.string, name);
+        try self.str(v);
+    }
+    fn end(self: *TestNbt) !void {
+        try self.byte(0);
+    }
+};
+
+/// Serialize a one-section chunk whose block palette is a list of compounds
+/// written by `writePalette` (which must emit exactly `palette_len` entries).
+fn serializeTestChunk(a: std.mem.Allocator, palette_len: i32, writePalette: *const fn (*TestNbt) anyerror!void) ![]u8 {
+    var w: TestNbt = .{ .a = a };
+    try w.named(.compound, "");
+    try w.named(.int, "DataVersion");
+    try w.int(i32, 5023);
+    try w.named(.list, "sections");
+    try w.byte(@intFromEnum(nbt.TagType.compound));
+    try w.int(i32, 1);
+    try w.named(.byte, "Y");
+    try w.byte(0);
+    try w.named(.compound, "block_states");
+    try w.named(.list, "palette");
+    try w.byte(@intFromEnum(nbt.TagType.compound));
+    try w.int(i32, palette_len);
+    try writePalette(&w);
+    try w.named(.long_array, "data");
+    const longs = SECTION_BLOCKS * 4 / 64;
+    try w.int(i32, longs);
+    for (0..longs) |_| try w.int(i64, 0);
+    try w.end(); // block_states
+    try w.end(); // section
+    try w.end(); // root
+    return w.buf.items;
+}
+
+fn writeMixedPalette(w: *TestNbt) anyerror!void {
+    // Compact default state, wrapped because the list also holds compounds.
+    try w.stringTag("", "minecraft:stone");
+    try w.end();
+    // Pre-26.3 layout.
+    try w.stringTag("Name", "minecraft:oak_log");
+    try w.named(.compound, "Properties");
+    try w.stringTag("axis", "x");
+    try w.end();
+    try w.end();
+    // 26.3 renamed layout.
+    try w.stringTag("id", "minecraft:oak_stairs");
+    try w.named(.compound, "properties");
+    try w.stringTag("half", "bottom");
+    try w.stringTag("facing", "north");
+    try w.end();
+    try w.end();
+    // Unrecognized shape.
+    try w.named(.int, "mystery");
+    try w.int(i32, 7);
+    try w.end();
+}
+
 test "decode accepts every block-state palette entry format" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    var legacy_props = [_]nbt.Entry{.{ .name = "axis", .tag = .{ .string = "x" } }};
-    var legacy = [_]nbt.Entry{
-        .{ .name = "Name", .tag = .{ .string = "minecraft:oak_log" } },
-        .{ .name = "Properties", .tag = .{ .compound = &legacy_props } },
-    };
-    var new_props = [_]nbt.Entry{
-        .{ .name = "half", .tag = .{ .string = "bottom" } },
-        .{ .name = "facing", .tag = .{ .string = "north" } },
-    };
-    var renamed = [_]nbt.Entry{
-        .{ .name = "id", .tag = .{ .string = "minecraft:oak_stairs" } },
-        .{ .name = "properties", .tag = .{ .compound = &new_props } },
-    };
-    var palette = [_]nbt.Tag{
-        .{ .string = "minecraft:stone" },
-        .{ .compound = &legacy },
-        .{ .compound = &renamed },
-        .{ .int = 7 },
-    };
-    var data = [_]i64{0} ** (SECTION_BLOCKS * 4 / 64);
-    var block_states = [_]nbt.Entry{
-        .{ .name = "palette", .tag = .{ .list = .{ .elem = .compound, .items = &palette } } },
-        .{ .name = "data", .tag = .{ .long_array = &data } },
-    };
-    var section = [_]nbt.Entry{
-        .{ .name = "Y", .tag = .{ .byte = 0 } },
-        .{ .name = "block_states", .tag = .{ .compound = &block_states } },
-    };
-    var sections = [_]nbt.Tag{.{ .compound = &section }};
-    const root = [_]nbt.Entry{
-        .{ .name = "DataVersion", .tag = .{ .int = 5023 } },
-        .{ .name = "sections", .tag = .{ .list = .{ .elem = .compound, .items = &sections } } },
-    };
+    const bytes = try serializeTestChunk(a, 4, writeMixedPalette);
+    var parser: nbt.Parser = .{ .buf = bytes, .arena = a };
+    const root = try parser.parseRoot();
 
-    const ch = try decode(a, &root);
+    const ch = try decode(a, root);
     try std.testing.expectEqual(@as(usize, 1), ch.sections.len);
     const s = ch.sections[0];
     try std.testing.expectEqualStrings("minecraft:stone", s.names[0]);
@@ -387,4 +443,30 @@ test "decode accepts every block-state palette entry format" {
     try std.testing.expectEqualStrings("facing=north,half=bottom", s.states[2]);
     try std.testing.expectEqualStrings("minecraft:air", s.names[3]);
     try std.testing.expectEqual(@as(usize, 1), ch.unknown_palette_entries);
+}
+
+test "decode accepts an all-string compact palette" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var palette = [_]nbt.Tag{ .{ .string = "minecraft:stone" }, .{ .string = "minecraft:dirt" } };
+    var data = [_]i64{0} ** (SECTION_BLOCKS * 4 / 64);
+    var block_states = [_]nbt.Entry{
+        .{ .name = "palette", .tag = .{ .list = .{ .elem = .string, .items = &palette } } },
+        .{ .name = "data", .tag = .{ .long_array = &data } },
+    };
+    var section = [_]nbt.Entry{
+        .{ .name = "Y", .tag = .{ .byte = 0 } },
+        .{ .name = "block_states", .tag = .{ .compound = &block_states } },
+    };
+    var sections = [_]nbt.Tag{.{ .compound = &section }};
+    const root = [_]nbt.Entry{
+        .{ .name = "sections", .tag = .{ .list = .{ .elem = .compound, .items = &sections } } },
+    };
+
+    const ch = try decode(a, &root);
+    try std.testing.expectEqualStrings("minecraft:stone", ch.sections[0].names[0]);
+    try std.testing.expectEqualStrings("minecraft:dirt", ch.sections[0].names[1]);
+    try std.testing.expectEqual(@as(usize, 0), ch.unknown_palette_entries);
 }

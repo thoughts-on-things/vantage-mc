@@ -9,6 +9,10 @@ on:
         description: Build and verify signed Windows installers
         type: boolean
         default: false
+      publish_tag:
+        description: Republish an existing release's files to the downloads site (for example v0.15.1)
+        type: string
+        default: ''
 
 # A release is not safe to interrupt midway through publishing.
 concurrency:
@@ -332,8 +336,8 @@ jobs:
           emit APPLE_TEAM_ID "$APPLE_TEAM_ID"
 
       # The release already exists (release-please created it); tauri-action
-      # builds this platform's bundles, attaches them to that tag, and merges
-      # this platform's entry into the release's latest.json update feed.
+      # builds this platform's bundles and attaches them to that tag. The
+      # updater feed is written once, by the publish-downloads job.
       - uses: tauri-apps/tauri-action@v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -347,8 +351,7 @@ jobs:
           tagName: ${{ needs.release-please.outputs.tag_name }}
           args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
           retryAttempts: 2
-          uploadUpdaterJson: true
-          updaterJsonPreferNsis: true
+          uploadUpdaterJson: false
           uploadWorkflowArtifacts: ${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Verify Windows signatures
@@ -370,23 +373,62 @@ jobs:
             }
           }
 
-  # The matrix jobs above each merge their own platform into latest.json with
-  # a read-modify-write, so two jobs finishing close together can drop each
-  # other's entry. This job is the single authoritative writer: it rebuilds
-  # the feed from the assets that actually made it onto the release.
-  updater-feed:
-    name: Updater feed
-    needs: [release-please, desktop]
-    if: needs.release-please.outputs.release_created == 'true'
+  # Every job above attaches its files to the GitHub release. Once they are
+  # all there, copy them to downloads.thoughtsonthingsllc.com/vantage/ and
+  # write the desktop updater feed (scripts/publish-downloads.mjs). A manual
+  # run with publish_tag republishes an existing release the same way.
+  publish-downloads:
+    name: Publish to downloads site
+    needs: [release-please, binaries, publish-npm, desktop]
+    if: >-
+      !cancelled() && (
+        (needs.release-please.outputs.release_created == 'true' &&
+          needs.binaries.result == 'success' && needs.desktop.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && inputs.publish_tag != '')
+      )
     runs-on: ubuntu-latest
+    # Two runs must never interleave their latest/ and latest.json uploads.
+    concurrency:
+      group: publish-downloads
+      cancel-in-progress: false
     permissions:
       contents: write
+    environment:
+      name: downloads
+      url: https://downloads.thoughtsonthingsllc.com/
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
+      - name: Check Cloudflare credentials
+        env:
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::Missing CLOUDFLARE_API_TOKEN secret. See 'Commits and releases' in CONTRIBUTING.md."
+            exit 1
+          fi
+          # Optional: wrangler looks the account up itself when the token can
+          # read memberships. Only export it when set, never as an empty string.
+          if [ -n "$ACCOUNT_ID" ]; then
+            echo "CLOUDFLARE_ACCOUNT_ID=$ACCOUNT_ID" >> "$GITHUB_ENV"
+          fi
+
       - uses: actions/checkout@v7
 
-      - name: Rebuild latest.json from release assets
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24
+
+      - name: Upload release files and updater feed
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-          VERSION: ${{ needs.release-please.outputs.version }}
-        run: node scripts/build-updater-feed.mjs
+          TAG_NAME: ${{ inputs.publish_tag || needs.release-please.outputs.tag_name }}
+        run: node scripts/publish-downloads.mjs
+
+      - name: Smoke test
+        env:
+          TAG_NAME: ${{ inputs.publish_tag || needs.release-please.outputs.tag_name }}
+        run: |
+          url="https://downloads.thoughtsonthingsllc.com/vantage/vantage-${TAG_NAME#v}-x86_64-linux.tar.gz"
+          curl -fsSI --retry 6 --retry-delay 5 --retry-all-errors "$url" >/dev/null \
+            || { echo "::error::$url is not downloadable"; exit 1; }

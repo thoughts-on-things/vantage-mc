@@ -121,9 +121,21 @@ Release Please maintains the release PR and changelog from commits merged to
 five CLI archives, builds the desktop installers for Windows (MSI + NSIS),
 macOS (Apple silicon and Intel `.dmg`), and Linux (AppImage, deb, rpm) along
 with the signed `latest.json` auto-update feed, and publishes
-`@thoughts-on-things/vantage-mc` to npm with provenance. A failed
-publish job can be retried safely; uploads are overwrite-safe and npm publishing
-first checks whether that exact version already exists.
+`@thoughts-on-things/vantage-mc` to npm with provenance. Once every file is on
+the GitHub release, the **Publish to downloads site** job copies them to
+[downloads.thoughtsonthingsllc.com/vantage/](https://downloads.thoughtsonthingsllc.com/#vantage)
+(the `downloads` R2 bucket), refreshes the version-free copies under
+`vantage/latest/`, and writes the `vantage/latest.json` update feed the desktop
+app polls. A failed publish job can be retried safely; uploads are
+overwrite-safe and npm publishing first checks whether that exact version
+already exists. To republish an existing release, run the Release workflow by
+hand with `publish_tag` set (for example `v0.15.1`).
+
+Publishing to the downloads site needs a Cloudflare API token with *Workers R2
+Storage: Edit* on the account, stored as the `CLOUDFLARE_API_TOKEN` repository
+secret (`gh secret set CLOUDFLARE_API_TOKEN --repo thoughts-on-things/vantage-mc`).
+If the token can't read account memberships, also set the `CLOUDFLARE_ACCOUNT_ID`
+repository variable.
 
 Maintainers must configure the npm package's trusted publisher once with
 organization `thoughts-on-things`, repository `vantage-mc`, workflow

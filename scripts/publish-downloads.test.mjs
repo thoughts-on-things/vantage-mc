@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildFeed } from './build-updater-feed.mjs';
+import { BASE_URL, buildFeed, contentType, planFiles } from './publish-downloads.mjs';
 
-const DOWNLOAD = 'https://github.com/thoughts-on-things/vantage-mc/releases/download/v0.12.0';
-const asset = (name) => ({ name, browser_download_url: `${DOWNLOAD}/${name}` });
+const DOWNLOAD = BASE_URL;
+const asset = (name) => ({ name, url: `${DOWNLOAD}/${name}` });
 const withSig = (name) => [asset(name), asset(`${name}.sig`)];
 const readSignature = (name) => `sig:${name}`;
 
@@ -73,4 +73,50 @@ test('windows falls back to the signed MSI when no NSIS bundle exists', () => {
   );
   assert.equal(missing.includes('windows-x86_64'), false);
   assert.match(feed.platforms['windows-x86_64'].url, /\.msi$/);
+});
+
+// The asset list of v0.15.1, the last release published only to GitHub.
+const V0151 = [
+  'latest.json',
+  'SHA256SUMS',
+  'thoughts-on-things-vantage-mc-0.15.1.tgz',
+  'Vantage-0.15.1-1.x86_64.rpm',
+  'Vantage-0.15.1-1.x86_64.rpm.sig',
+  'vantage-aarch64-linux.tar.gz',
+  'vantage-x86_64-windows.zip',
+  'Vantage_0.15.1_aarch64.app.tar.gz',
+  'Vantage_0.15.1_aarch64.app.tar.gz.sig',
+  'Vantage_0.15.1_aarch64.dmg',
+  'Vantage_0.15.1_amd64.AppImage',
+  'Vantage_0.15.1_x64-setup.exe',
+  'Vantage_0.15.1_x64_en-US.msi',
+];
+
+test('every release file gets a versioned name and installers get a stable alias', () => {
+  const byName = Object.fromEntries(planFiles(V0151, '0.15.1').map((f) => [f.source, [f.name, f.latest]]));
+  assert.deepEqual(byName, {
+    'thoughts-on-things-vantage-mc-0.15.1.tgz': ['thoughts-on-things-vantage-mc-0.15.1.tgz', 'thoughts-on-things-vantage-mc.tgz'],
+    'Vantage-0.15.1-1.x86_64.rpm': ['Vantage-0.15.1-1.x86_64.rpm', 'Vantage.x86_64.rpm'],
+    'Vantage-0.15.1-1.x86_64.rpm.sig': ['Vantage-0.15.1-1.x86_64.rpm.sig', null],
+    'vantage-aarch64-linux.tar.gz': ['vantage-0.15.1-aarch64-linux.tar.gz', 'vantage-aarch64-linux.tar.gz'],
+    'vantage-x86_64-windows.zip': ['vantage-0.15.1-x86_64-windows.zip', 'vantage-x86_64-windows.zip'],
+    'Vantage_0.15.1_aarch64.app.tar.gz': ['Vantage_0.15.1_aarch64.app.tar.gz', 'Vantage_aarch64.app.tar.gz'],
+    'Vantage_0.15.1_aarch64.app.tar.gz.sig': ['Vantage_0.15.1_aarch64.app.tar.gz.sig', null],
+    'Vantage_0.15.1_aarch64.dmg': ['Vantage_0.15.1_aarch64.dmg', 'Vantage_aarch64.dmg'],
+    'Vantage_0.15.1_amd64.AppImage': ['Vantage_0.15.1_amd64.AppImage', 'Vantage_amd64.AppImage'],
+    'Vantage_0.15.1_x64-setup.exe': ['Vantage_0.15.1_x64-setup.exe', 'Vantage_x64-setup.exe'],
+    'Vantage_0.15.1_x64_en-US.msi': ['Vantage_0.15.1_x64_en-US.msi', 'Vantage_x64_en-US.msi'],
+  });
+});
+
+test('a version-free asset is refused instead of overwriting other releases', () => {
+  assert.throws(() => planFiles(['notes.txt'], '0.15.1'), /no 0\.15\.1 in its name/);
+  // A different release's version does not count as "versioned".
+  assert.throws(() => planFiles(['Vantage_0.15.10_amd64.deb'], '0.15.1'));
+});
+
+test('uploads carry a content type the browser can act on', () => {
+  assert.equal(contentType('vantage/latest.json'), 'application/json');
+  assert.equal(contentType('vantage/a.exe.sha256'), 'text/plain; charset=utf-8');
+  assert.equal(contentType('vantage/a.dmg'), 'application/octet-stream');
 });

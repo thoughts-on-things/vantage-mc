@@ -1,0 +1,163 @@
+<!doctype html>
+<!-- Source for the README images in docs/readme/. Regenerate with: node docs/readme/source/render.mjs -->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+@font-face { font-family: Brico; src: url(../../../site/node_modules/@fontsource-variable/bricolage-grotesque/files/bricolage-grotesque-latin-wght-normal.woff2) format('woff2'); font-weight: 200 800; }
+@font-face { font-family: Mono; src: url(../../../site/node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2) format('woff2'); font-weight: 100 800; }
+:root {
+  --bg: #0b0e14;
+  --card: rgba(255, 255, 255, 0.03);
+  --border: rgba(147, 169, 204, 0.14);
+  --border-bright: rgba(147, 169, 204, 0.28);
+  --ink: #eef3fb;
+  --ink-dim: #9fb2d0;
+  --ink-faint: #64789c;
+  --blue: #5b9bff;
+  --green: #57d06a;
+  --grad: linear-gradient(92deg, #6ea8ff 0%, #5b9bff 45%, #57d06a 100%);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: transparent; }
+body { font: 16px/1.6 Brico, sans-serif; color: var(--ink); font-variation-settings: 'opsz' 12, 'wdth' 100; -webkit-font-smoothing: antialiased; padding: 24px; }
+.card { width: 1000px; border-radius: 22px; background: var(--bg); position: relative; overflow: hidden; border: 1px solid var(--border); margin-bottom: 40px; }
+.glow { position: absolute; inset: 0; pointer-events: none;
+  background:
+    radial-gradient(60% 55% at 50% -8%, rgba(91,155,255,.22), transparent 70%),
+    radial-gradient(30% 35% at 88% 4%, rgba(87,208,106,.10), transparent 70%),
+    radial-gradient(40% 40% at 8% 60%, rgba(91,155,255,.06), transparent 70%); }
+.grid { position: absolute; inset: 0; pointer-events: none; opacity: .5;
+  background-image: linear-gradient(rgba(147,169,204,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(147,169,204,.05) 1px, transparent 1px);
+  background-size: 40px 40px; mask-image: radial-gradient(70% 70% at 50% 0%, #000, transparent); }
+.inner { position: relative; }
+.mono { font-family: Mono, monospace; }
+em { font-style: normal; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.tile { width: 18px; height: 18px; display: inline-block; border-radius: 5px; background: linear-gradient(var(--blue) 0 38%, #57a64e 38% 100%); box-shadow: 0 0 14px rgba(91,155,255,.55); }
+
+/* hero */
+#hero .inner { padding: 34px 56px 52px; text-align: center; }
+.top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 46px; }
+.wordmark { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; font-size: 21px; letter-spacing: -.01em; }
+.toplinks { font-family: Mono; font-size: 12.5px; color: var(--ink-faint); display: flex; gap: 22px; }
+.badge { display: inline-flex; align-items: center; gap: 9px; padding: 7px 16px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-family: Mono; font-size: 12.5px; color: var(--ink-dim); letter-spacing: .02em; margin-bottom: 26px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+h1 { margin: 0; font-size: 74px; line-height: 1.02; letter-spacing: -.028em; font-weight: 720; font-variation-settings: 'opsz' 96, 'wdth' 92; }
+.sub { margin: 22px auto 0; max-width: 640px; font-size: 19px; color: var(--ink-dim); }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 42px; }
+.stats div { padding: 18px 12px 15px; border: 1px solid var(--border); border-radius: 16px; background: var(--card); }
+.stats b { display: block; font-size: 30px; font-weight: 720; font-variation-settings: 'opsz' 40, 'wdth' 90; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.stats span { font-family: Mono; font-size: 12px; color: var(--ink-faint); }
+
+/* viewport */
+#viewport { padding: 0; background: #0f131b; }
+.chrome { display: flex; align-items: center; gap: 8px; padding: 13px 16px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,.02); }
+.chrome i { width: 11px; height: 11px; border-radius: 50%; background: rgba(147,169,204,.22); }
+.url { margin-left: 14px; flex: 1; max-width: 420px; font-family: Mono; font-size: 12.5px; color: var(--ink-dim); background: rgba(255,255,255,.04); border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px; }
+.shot { position: relative; line-height: 0; }
+.shot img { width: 100%; display: block; }
+.play { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); line-height: 1; display: inline-flex; align-items: center; gap: 10px; padding: 12px 22px; border-radius: 999px; background: rgba(11,14,20,.78); border: 1px solid var(--border-bright); font-family: Mono; font-size: 14px; color: var(--ink); backdrop-filter: blur(8px); box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+.play span { color: var(--green); }
+
+/* section cards shared */
+.sect .inner { padding: 38px 48px 40px; }
+.kicker { font-family: Mono; font-size: 12.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--blue); margin: 0 0 8px; }
+h2 { margin: 0; font-size: 38px; line-height: 1.08; letter-spacing: -.022em; font-weight: 700; font-variation-settings: 'opsz' 60, 'wdth' 94; }
+.lede { margin: 10px 0 0; color: var(--ink-dim); font-size: 17px; }
+
+/* bench */
+.bars { margin-top: 30px; display: grid; gap: 26px; }
+.metric h3 { margin: 0 0 10px; font-family: Mono; font-size: 12.5px; font-weight: 500; color: var(--ink-faint); letter-spacing: .06em; text-transform: uppercase; }
+.row { display: grid; grid-template-columns: 120px 1fr; align-items: center; gap: 16px; margin-bottom: 9px; }
+.row .name { font-size: 15px; color: var(--ink-dim); }
+.row.v .name { color: var(--ink); font-weight: 650; }
+.track { position: relative; height: 34px; }
+.bar { height: 100%; border-radius: 9px; display: flex; align-items: center; padding: 0 12px; font-family: Mono; font-size: 14px; white-space: nowrap; }
+.row.v .bar { background: var(--grad); color: #07101f; font-weight: 700; box-shadow: 0 0 24px rgba(91,155,255,.3); }
+.row.o .bar { background: rgba(147,169,204,.13); border: 1px solid var(--border); color: var(--ink-dim); }
+.chip { margin-left: 12px; font-family: Mono; font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(87,208,106,.35); background: rgba(87,208,106,.10); color: var(--green); line-height: 1; }
+.after { display: flex; align-items: center; height: 100%; }
+.foot { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--border); font-family: Mono; font-size: 12px; color: var(--ink-faint); display: flex; justify-content: space-between; }
+
+/* flow */
+.flow { margin-top: 30px; display: grid; grid-template-columns: 1fr 34px 1fr 34px 1fr; align-items: center; gap: 10px; }
+.flow div { padding: 20px 20px 18px; border: 1px solid var(--border); border-radius: 16px; background: var(--card); }
+.flow small { display: block; font-family: Mono; font-size: 11.5px; color: var(--ink-faint); letter-spacing: .08em; }
+.flow strong { display: block; margin-top: 8px; font-size: 21px; font-weight: 680; }
+.flow span { display: block; margin-top: 2px; color: var(--ink-dim); font-size: 14.5px; }
+.flow .active { border-color: rgba(91,155,255,.5); background: rgba(91,155,255,.08); box-shadow: 0 0 34px rgba(91,155,255,.18) inset; }
+.flow .active small { color: var(--blue); }
+.flow b { text-align: center; color: var(--ink-faint); font-size: 22px; font-weight: 400; }
+.cmd { margin-top: 24px; font-family: Mono; font-size: 14px; color: var(--ink-dim); padding: 14px 18px; border: 1px solid var(--border); border-radius: 12px; background: rgba(0,0,0,.25); }
+.cmd .p { color: var(--green); margin-right: 10px; }
+</style>
+</head>
+<body>
+
+<section class="card" id="hero">
+  <div class="glow"></div><div class="grid"></div>
+  <div class="inner">
+    <div class="top">
+      <span class="wordmark"><span class="tile"></span>vantage</span>
+    </div>
+    <div class="badge"><span class="dot"></span>free &amp; open source · vanilla worlds · no mods, no plugins</div>
+    <h1>Your Minecraft world,<br />as a <em>living map</em>.</h1>
+    <p class="sub">Point it at a Java save, get a 3D map in your browser a few seconds later. No upload, no mods, no gameplay plugin.</p>
+    <div class="stats">
+      <div><b>~4 s</b><span>to map a whole world</span></div>
+      <div><b>120+ FPS</b><span>in your browser</span></div>
+      <div><b>26× smaller</b><span>than raw geometry</span></div>
+      <div><b>0 uploads</b><span>your save stays yours</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="card" id="viewport">
+  <div class="chrome"><i></i><i></i><i></i><span class="url">vantage.beacon-mc.io/?world=demo</span></div>
+  <div class="shot">
+    <img src="../../render-hero.jpg" />
+    <span class="play"><span>▶</span> launch the live viewer</span>
+  </div>
+</section>
+
+<section class="card sect" id="bench">
+  <div class="glow" style="opacity:.6"></div>
+  <div class="inner">
+    <p class="kicker">the numbers</p>
+    <h2>Measured, not <em>promised</em></h2>
+    <p class="lede">Same world, same machine, both tools start to finish.</p>
+    <div class="bars">
+      <div class="metric">
+        <h3>Full render, start to finish</h3>
+        <div class="row v"><span class="name">Vantage</span><div class="track"><div class="after"><div class="bar" style="width:13.4%">3.8 s</div><span class="chip">7× faster</span></div></div></div>
+        <div class="row o"><span class="name">BlueMap CLI</span><div class="track"><div class="bar" style="width:100%">28.3 s</div></div></div>
+      </div>
+      <div class="metric">
+        <h3>Map size on disk</h3>
+        <div class="row v"><span class="name">Vantage</span><div class="track"><div class="after"><div class="bar" style="width:35.1%">26 MB</div><span class="chip">2.8× smaller</span></div></div></div>
+        <div class="row o"><span class="name">BlueMap CLI</span><div class="track"><div class="bar" style="width:100%">74 MB</div></div></div>
+      </div>
+    </div>
+    <div class="foot"><span>one native binary vs. Java 25 JVM</span><span>defaults · 16 threads · assets cached · BlueMap v5.22</span></div>
+  </div>
+</section>
+
+<section class="card sect" id="flow">
+  <div class="glow" style="opacity:.6"></div>
+  <div class="inner">
+    <p class="kicker">now for multiplayer</p>
+    <h2>The world doesn’t have to live on <em>your PC</em></h2>
+    <p class="lede">A read-only, bounded rendering sidecar beside your Java server. Your host keeps the session.</p>
+    <div class="flow">
+      <div><small>01 · SOURCE</small><strong>Minecraft save</strong><span>authoritative region files</span></div>
+      <b>→</b>
+      <div class="active"><small>02 · DATA PLANE</small><strong>Vantage sidecar</strong><span>render + bounded cache</span></div>
+      <b>→</b>
+      <div><small>03 · ACCESS</small><strong>Launcher / proxy</strong><span>existing player session</span></div>
+    </div>
+    <div class="cmd"><span class="p">$</span>vantage server /srv/minecraft/world --players-file /run/players.json</div>
+  </div>
+</section>
+
+</body>
+</html>

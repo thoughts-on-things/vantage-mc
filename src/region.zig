@@ -54,7 +54,7 @@ pub fn rawChunkFromSectors(buf: []const u8) !?RawChunk {
     // which is not supported.
     const comp_byte = buf[4];
     if (comp_byte & 0x80 != 0) return error.ExternalChunk;
-    const comp: Compression = @enumFromInt(comp_byte);
+    const comp: Compression = @fromBackingInt(@intCast(comp_byte));
     const data_len: usize = len - 1; // length counts the compression byte
     if (5 + data_len > buf.len) return error.Truncated;
     return RawChunk{ .compression = comp, .data = buf[5 .. 5 + data_len] };

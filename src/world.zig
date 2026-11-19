@@ -417,7 +417,7 @@ test "parseRegionName" {
 }
 
 test "tileRevision invalidates only overlapping region aprons" {
-    const table = [_]u8{0} ** region.SECTOR;
+    const table = @as([region.SECTOR]u8, @splat(0));
     const base = [_]LoadedRegion{
         .{ .x = 0, .z = 0, .table = &table, .path = "r.0.0.mca", .revision = 10 },
         .{ .x = 1, .z = 0, .table = &table, .path = "r.1.0.mca", .revision = 20 },
@@ -432,7 +432,7 @@ test "tileRevision invalidates only overlapping region aprons" {
 }
 
 test "indexed tile revisions match catalog scans" {
-    const table = [_]u8{0} ** region.SECTOR;
+    const table = @as([region.SECTOR]u8, @splat(0));
     const regions = [_]LoadedRegion{
         .{ .x = -1, .z = 0, .table = &table, .path = "r.-1.0.mca", .revision = 3 },
         .{ .x = 0, .z = 0, .table = &table, .path = "r.0.0.mca", .revision = 5 },

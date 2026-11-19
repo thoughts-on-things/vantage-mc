@@ -5,7 +5,7 @@
     .version = "0.15.1", // x-release-please-version
     // Globally unique package id; never changes (regenerate only when forking).
     .fingerprint = 0x9c972e94dc8fdd4, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.1",
     // No Zig dependencies — desktop packaging lives in `desktop/` and bundles
     // this package's CLI as a Tauri sidecar.
     .dependencies = .{},

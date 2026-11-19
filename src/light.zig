@@ -290,8 +290,8 @@ test "sky light floods down and sideways into an opening, losing 1 per step" {
     const sx: usize = 5;
     const sy: usize = 3;
     const sz: usize = 1;
-    var ids = [_]u16{0} ** (sx * sy * sz);
-    var lightbuf = [_]u8{0} ** (sx * sy * sz);
+    var ids = @as([sx * sy * sz]u16, @splat(0));
+    var lightbuf = @as([sx * sy * sz]u8, @splat(0));
     const names = [_][]const u8{ "", "minecraft:stone" };
     var g: grid.Grid = .{
         .sx = sx,
@@ -333,8 +333,8 @@ test "block light radiates from an emitter and is blocked by walls" {
 
     // A torch (id 2, emission 14) sits in a 5x1x1 air row; light falls 1/step.
     const sx: usize = 5;
-    var ids = [_]u16{0} ** sx;
-    var lightbuf = [_]u8{0} ** sx;
+    var ids = @as([sx]u16, @splat(0));
+    var lightbuf = @as([sx]u8, @splat(0));
     const names = [_][]const u8{ "", "minecraft:stone", "minecraft:torch" };
     var g: grid.Grid = .{
         .sx = sx,
@@ -370,7 +370,7 @@ test "computeOpen keeps reachable air and culls a sealed pocket" {
     // 5×5×5 of stone with two single-cell voids: one at the window edge
     // (reachable from outside), one fully enclosed in the middle.
     const s: usize = 5;
-    var ids = [_]u16{1} ** (s * s * s);
+    var ids = @as([s * s * s]u16, @splat(1));
     const names = [_][]const u8{ "", "minecraft:netherrack" };
     const g: grid.Grid = .{
         .sx = s,
@@ -405,7 +405,7 @@ test "computeOpen floods a cavern far deeper than light reaches" {
     // A 40-block-deep shaft: sky light would die out after 15 steps, which is
     // why the nether needs reachability rather than brightness.
     const sy: usize = 40;
-    var ids = [_]u16{1} ** (3 * sy * 3);
+    var ids = @as([3 * sy * 3]u16, @splat(1));
     const names = [_][]const u8{ "", "minecraft:netherrack" };
     const g: grid.Grid = .{
         .sx = 3,
@@ -435,8 +435,8 @@ test "water attenuates the sky-light column so the seabed darkens with depth" {
     const sx: usize = 1;
     const sy: usize = 7;
     const sz: usize = 1;
-    var ids = [_]u16{0} ** (sx * sy * sz); // id 0 = air, 1 = water, 2 = stone
-    var lightbuf = [_]u8{0} ** (sx * sy * sz);
+    var ids = @as([sx * sy * sz]u16, @splat(0)); // id 0 = air, 1 = water, 2 = stone
+    var lightbuf = @as([sx * sy * sz]u8, @splat(0));
     const names = [_][]const u8{ "", "minecraft:water", "minecraft:stone" };
     var g: grid.Grid = .{
         .sx = sx,

@@ -205,7 +205,7 @@ fn addWorld(
     out: *std.ArrayList(WorldInfo),
     seen: *std.StringHashMap(void),
 ) !void {
-    const canonical_z = std.Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch try arena.dupeZ(u8, path);
+    const canonical_z = std.Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch try arena.dupeSentinel(u8, path, 0);
     const canonical: []const u8 = canonical_z;
     const key = try normalizedPathKey(arena, canonical);
     const gop = try seen.getOrPut(key);

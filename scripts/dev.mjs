@@ -32,9 +32,11 @@ function commandVersion(command, args = ['--version']) {
 }
 
 function checkNode() {
-  const major = Number(process.versions.node.split('.')[0]);
-  if (major < 18) {
-    fail(`Node ${process.versions.node} is too old.`, 'Install Node 18 or newer: https://nodejs.org');
+  // Mirrors package.json engines (tsup 9 / Vitest 5): ^22.18 || ^24.11 || >=26.
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  const supported = (major === 22 && minor >= 18) || (major === 24 && minor >= 11) || major >= 26;
+  if (!supported) {
+    fail(`Node ${process.versions.node} is not supported.`, 'Install Node 22.18+, 24.11+, or 26+: https://nodejs.org');
     return false;
   }
   ok(`Node ${process.version}`);
@@ -45,10 +47,10 @@ function checkNativeTools() {
   let healthy = true;
   const zig = commandVersion('zig', ['version']);
   if (!zig) {
-    fail('Zig was not found.', 'Install Zig 0.16.0 and make sure `zig` is on PATH: https://ziglang.org/download');
+    fail('Zig was not found.', 'Install Zig 0.17.1 and make sure `zig` is on PATH: https://ziglang.org/download');
     healthy = false;
-  } else if (!zig.startsWith('0.16.')) {
-    fail(`Zig ${zig} is installed, but this repository requires 0.16.x.`, 'Use Zig 0.16.0 to avoid pre-1.0 compiler incompatibilities.');
+  } else if (!zig.startsWith('0.17.')) {
+    fail(`Zig ${zig} is installed, but this repository requires 0.17.x.`, 'Use Zig 0.17.1 to avoid pre-1.0 compiler incompatibilities.');
     healthy = false;
   } else {
     ok(`Zig ${zig}`);

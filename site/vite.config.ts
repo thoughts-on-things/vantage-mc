@@ -14,7 +14,7 @@ export default defineConfig({
   server: { port: Number(process.env['PORT']) || 8754, host: '127.0.0.1' },
   // The lazy viewer chunk intentionally contains Three.js.
   build: {
-    chunkSizeWarningLimit: 600,
+    chunkSizeWarningLimit: 800,
     rollupOptions: { input: ['index.html', 'server/index.html'] },
   },
 });

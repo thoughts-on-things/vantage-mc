@@ -35,7 +35,7 @@ fn main() {
         ])
         .current_dir(&root)
         .status()
-        .expect("Zig 0.16 must be installed to build the Vantage core sidecar");
+        .expect("Zig 0.17 must be installed to build the Vantage core sidecar");
     assert!(status.success(), "Zig core build failed");
 
     let extension = if target.contains("windows") {

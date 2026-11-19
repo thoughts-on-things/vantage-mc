@@ -14,9 +14,7 @@
 //! A tall strip *without* an .mcmeta still collapses to its first frame.
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("stb_image.h");
-});
+const c = @import("stb_image");
 
 /// All block textures are normalized to this edge length. Vanilla block
 /// textures are 16×16; higher-res (resource packs) are point-sampled down.

@@ -572,7 +572,7 @@ test "buildSurface finds the topmost block and its biome per column" {
     defer arena_inst.deinit();
     const a = arena_inst.allocator();
     // 2x4x1 grid (sx=2, sy=4, sz=1). Column x=0 has a block at y=2; x=1 empty.
-    var ids = [_]u16{0} ** 8;
+    var ids = @as([8]u16, @splat(0));
     var names = [_][]const u8{ "", "minecraft:stone" };
     var biome_ids = [_]u16{ 0, 5 }; // one 4x4x4 cell per column-ish (bsx=... small grid)
     var biome_names = [_][]const u8{ "", "minecraft:plains", "minecraft:ocean", "x", "y", "z" };
@@ -610,7 +610,7 @@ test "buildSurface finds the topmost block and its biome per column" {
 
 test "biomeAt maps blocks to 4x4x4 cells" {
     // 8x8x8 block grid -> 2x2x2 biome grid; fill cell (1,0,0) with id 7.
-    var biome_ids = [_]u16{0} ** 8;
+    var biome_ids = @as([8]u16, @splat(0));
     var biome_names = [_][]const u8{ "", "a", "b", "c", "d", "e", "f", "g" };
     const g: Grid = .{
         .sx = 8,

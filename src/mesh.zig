@@ -868,7 +868,7 @@ fn meshRange(ctx: *const MeshCtx, y0: usize, y1: usize, alloc: std.mem.Allocator
                         if (ctx.caveCulled(xi, yi, zi)) continue;
                         cave = ctx.skyHidden(xi, yi, zi);
                     }
-                    const rgb = ctx.tint_colors[bid * ctx.nkind + @intFromEnum(face.tint)];
+                    const rgb = ctx.tint_colors[bid * ctx.nkind + @backingInt(face.tint)];
                     var ao = [4]u8{ 255, 255, 255, 255 };
                     if (face.ao) {
                         for (0..4) |ci| ao[ci] = cornerAo(g, ctx.id_occluder, x, y, z, face.ao_off[ci]);
@@ -1276,7 +1276,7 @@ fn emitGreedyQuad(alloc: std.mem.Allocator, mesh: *Mesh2, ctx: *const MeshCtx, g
         @as(f32, @floatFromInt(g.min_y)) + @as(f32, @floatFromInt(base[1])),
         @as(f32, @floatFromInt(g.min_z)) + @as(f32, @floatFromInt(base[2])),
     };
-    const rgb = ctx.tint_colors[@as(usize, r.key.biome) * ctx.nkind + @intFromEnum(face.tint)];
+    const rgb = ctx.tint_colors[@as(usize, r.key.biome) * ctx.nkind + @backingInt(face.tint)];
     const bid_f: f32 = @floatFromInt(r.key.biome);
     const blend = ctx.blend_biomes and isBlendable(face.tint);
     const min_xf: f32 = @floatFromInt(g.min_x);
@@ -1534,7 +1534,7 @@ fn meshFluidTops(
         const bid: usize = r.key.biome;
         const bid_f: f32 = @floatFromInt(bid);
         const base_rgb: [3]u8 = if (kind == .water)
-            ctx.tint_colors[bid * ctx.nkind + @intFromEnum(biome.Tint.water)]
+            ctx.tint_colors[bid * ctx.nkind + @backingInt(biome.Tint.water)]
         else
             .{ 255, 255, 255 };
         const w_f: f32 = @floatFromInt(r.w);
@@ -1621,7 +1621,7 @@ fn emitFluid(
     const layers = if (kind == .water) ctx.water_layers else ctx.lava_layers;
     const blend = ctx.blend_biomes and kind == .water;
     const base_rgb: [3]u8 = if (kind == .water)
-        ctx.tint_colors[bid * ctx.nkind + @intFromEnum(biome.Tint.water)]
+        ctx.tint_colors[bid * ctx.nkind + @backingInt(biome.Tint.water)]
     else
         .{ 255, 255, 255 };
     const min_xf: f32 = @floatFromInt(g.min_x);
@@ -1802,7 +1802,7 @@ fn cellTint(ctx: *const MeshCtx, bx: i32, by: usize, bz: i32, kind: usize) [3]u8
 /// merged greedy quads stay seamless. Blends in sRGB byte space, as vanilla does.
 fn blendedTint(ctx: *const MeshCtx, kind: biome.Tint, lx: f32, ly: f32, lz: f32) [3]u8 {
     const g = ctx.g;
-    const k = @intFromEnum(kind);
+    const k = @backingInt(kind);
     if (g.biome_ids.len == 0 or g.bsx == 0 or g.bsy == 0 or g.bsz == 0)
         return ctx.tint_colors[k]; // biome 0 fallback
     // Biome cells are 4 blocks wide with centres at block 2,6,10,… so a corner at
@@ -1840,7 +1840,7 @@ fn buildTintTable(arena: std.mem.Allocator, g: grid.Grid, maps: biome.Colormaps,
     for (0..nbiome) |bi| {
         const name = if (bi < g.biome_names.len) g.biome_names[bi] else "";
         const info = if (name.len == 0) biome.default_biome else reg.lookup(name);
-        for (kinds) |k| out[bi * nkind + @intFromEnum(k)] = biome.colorFor(maps, k, info);
+        for (kinds) |k| out[bi * nkind + @backingInt(k)] = biome.colorFor(maps, k, info);
     }
     return out;
 }
@@ -3374,9 +3374,9 @@ test "greedyMerge covers a uniform field with one rectangle" {
     const U = 3;
     const V = 2;
     const k = GKey{ .id = 1, .biome = 0, .ao = .{ 255, 255, 255, 255 }, .light = .{ 240, 240, 240, 240 } };
-    var present = [_]bool{true} ** (U * V);
-    var keys = [_]GKey{k} ** (U * V);
-    var used = [_]bool{false} ** (U * V);
+    var present = @as([U * V]bool, @splat(true));
+    var keys = @as([U * V]GKey, @splat(k));
+    var used = @as([U * V]bool, @splat(false));
     var out: std.ArrayList(Rect) = .empty;
     defer out.deinit(a);
     try greedyMerge(&present, &keys, &used, U, V, &out, a);
@@ -3391,9 +3391,9 @@ test "greedyMerge splits on differing keys" {
     const V = 2;
     const k1 = GKey{ .id = 1, .biome = 0, .ao = .{ 255, 255, 255, 255 }, .light = .{ 240, 240, 240, 240 } };
     const k2 = GKey{ .id = 2, .biome = 0, .ao = .{ 255, 255, 255, 255 }, .light = .{ 240, 240, 240, 240 } };
-    var present = [_]bool{true} ** 4;
+    var present = @as([4]bool, @splat(true));
     var keys = [_]GKey{ k1, k1, k1, k2 }; // row 0 uniform; row 1 splits at (1,1)
-    var used = [_]bool{false} ** 4;
+    var used = @as([4]bool, @splat(false));
     var out: std.ArrayList(Rect) = .empty;
     defer out.deinit(a);
     try greedyMerge(&present, &keys, &used, U, V, &out, a);
@@ -3407,7 +3407,7 @@ test "greedyMerge skips absent cells" {
     const k = GKey{ .id = 1, .biome = 0, .ao = .{ 255, 255, 255, 255 }, .light = .{ 240, 240, 240, 240 } };
     var present = [_]bool{ false, true };
     var keys = [_]GKey{ k, k };
-    var used = [_]bool{false} ** 2;
+    var used = @as([2]bool, @splat(false));
     var out: std.ArrayList(Rect) = .empty;
     defer out.deinit(a);
     try greedyMerge(&present, &keys, &used, U, V, &out, a);
@@ -3470,7 +3470,7 @@ test "two adjacent cells cull their shared faces" {
 test "blendedTint ramps linearly between two biome cells" {
     const a = std.testing.allocator;
     const nkind = @as(usize, biome.Tint.count);
-    const gk = @intFromEnum(biome.Tint.grass);
+    const gk = @backingInt(biome.Tint.grass);
     // Two biome cells in X (bsx=2): cell 0 -> biome id 1 (black), cell 1 -> id 2 (red).
     var biome_ids = [_]u16{ 1, 2 };
     // tint_colors rows for biome ids 0,1,2; only the grass column matters here.
@@ -3526,7 +3526,7 @@ test "greedy pass emits only interior cells (apron feeds reads, not geometry)" {
     // A 4×1×4 slab of one block; interior = the middle 2×2. The up-faces of the
     // 4 interior cells merge into ONE 2×2 quad positioned inside the interior;
     // the 12 apron cells emit nothing.
-    var ids = [_]u16{1} ** 16;
+    var ids = @as([16]u16, @splat(1));
     var names = [_][]const u8{ "", "minecraft:stone" };
     const g: grid.Grid = .{
         .sx = 4,
@@ -3552,7 +3552,7 @@ test "greedy pass emits only interior cells (apron feeds reads, not geometry)" {
         .cull = .up,
         .ao = false,
         .greedy = true,
-        .ao_off = .{.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }} ** 4,
+        .ao_off = @splat(.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }),
     }};
     var cache = [_]?Cached{ null, .{ .faces = &faces_buf, .occluder = true } };
     var greedy_faces = [_][6]i16{ .{ -1, -1, -1, -1, -1, -1 }, .{ -1, -1, -1, -1, -1, -1 } };
@@ -3600,8 +3600,8 @@ test "greedy pass classifies sky-lit vs cave-dark faces (flat mode fragments at 
     // pitch dark. Flat-light merge keys include the light, so the up-faces
     // fragment into a lit rect and a dark rect — the dark one must be flagged
     // cave, the lit one surface.
-    var ids = [_]u16{1} ** 16 ++ [_]u16{0} ** 16;
-    var light = [_]u8{0} ** 32;
+    var ids = @as([16]u16, @splat(1)) ++ @as([16]u16, @splat(0));
+    var light = @as([32]u8, @splat(0));
     for (1..3) |z| {
         light[(1 * 4 + z) * 4 + 1] = 0xF0; // x=1: open sky
         light[(1 * 4 + z) * 4 + 2] = 0x00; // x=2: cave-dark
@@ -3621,7 +3621,7 @@ test "greedy pass classifies sky-lit vs cave-dark faces (flat mode fragments at 
         .cull = .up,
         .ao = false,
         .greedy = true,
-        .ao_off = .{.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }} ** 4,
+        .ao_off = @splat(.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }),
     }};
     var cache = [_]?Cached{ null, .{ .faces = &faces_buf, .occluder = true } };
     var greedy_faces = [_][6]i16{ .{ -1, -1, -1, -1, -1, -1 }, .{ -1, -1, -1, -1, -1, -1 } };
@@ -3700,8 +3700,8 @@ test "atlas mode: a merged rect yields one (w+1)x(h+1) lightmap patch + local lm
     // A 4×2×4 grid: stone floor (y=0), air above (y=1) whose BLOCK light ramps
     // along x — so the floor's merged up-face has a light gradient and must
     // take the atlas path (uniform rects would elide themselves).
-    var ids = [_]u16{1} ** 16 ++ [_]u16{0} ** 16;
-    var light = [_]u8{0xF0} ** 32;
+    var ids = @as([16]u16, @splat(1)) ++ @as([16]u16, @splat(0));
+    var light = @as([32]u8, @splat(0xF0));
     for (0..4) |z| {
         for (0..4) |x| light[(1 * 4 + z) * 4 + x] = (15 << 4) | @as(u8, @intCast(x * 3));
     }
@@ -3720,7 +3720,7 @@ test "atlas mode: a merged rect yields one (w+1)x(h+1) lightmap patch + local lm
         .cull = .up,
         .ao = false,
         .greedy = true,
-        .ao_off = .{.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }} ** 4,
+        .ao_off = @splat(.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }),
     }};
     var cache = [_]?Cached{ null, .{ .faces = &faces_buf, .occluder = true } };
     var greedy_faces = [_][6]i16{ .{ -1, -1, -1, -1, -1, -1 }, .{ -1, -1, -1, -1, -1, -1 } };
@@ -3779,7 +3779,7 @@ test "atlas mode: uniform-light rects stay vertex-lit and out of the atlas" {
     defer arena_inst.deinit();
     const a = arena_inst.allocator();
     // Same slab, but no light data: everything reads open sky — uniform.
-    var ids = [_]u16{1} ** 16;
+    var ids = @as([16]u16, @splat(1));
     var names = [_][]const u8{ "", "minecraft:stone" };
     const g: grid.Grid = .{ .sx = 4, .sy = 1, .sz = 4, .min_x = 0, .min_y = 0, .min_z = 0, .ids = &ids, .names = &names };
     const up = dirIndex(.up);
@@ -3795,7 +3795,7 @@ test "atlas mode: uniform-light rects stay vertex-lit and out of the atlas" {
         .cull = .up,
         .ao = false,
         .greedy = true,
-        .ao_off = .{.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }} ** 4,
+        .ao_off = @splat(.{ .{ 0, 1, 0 }, .{ 0, 1, 0 }, .{ 0, 1, 0 } }),
     }};
     var cache = [_]?Cached{ null, .{ .faces = &faces_buf, .occluder = true } };
     var greedy_faces = [_][6]i16{ .{ -1, -1, -1, -1, -1, -1 }, .{ -1, -1, -1, -1, -1, -1 } };
@@ -3935,8 +3935,8 @@ test "meshFluidTops: a flat 4x4 water sheet merges into one top quad" {
     // A floating 4×4×1 slab of water sources. Every top corner's 2×2 holds a
     // source (which pins it to 14/16), so the whole sheet is flat and must
     // merge into a single greedy rectangle; sides and bottoms stay per-cell.
-    var ids = [_]u16{1} ** 16;
-    var lightbuf = [_]u8{0xF0} ** 16;
+    var ids = @as([16]u16, @splat(1));
+    var lightbuf = @as([16]u8, @splat(0xF0));
     var names = [_][]const u8{ "", "minecraft:water" };
     const g: grid.Grid = .{
         .sx = 4,

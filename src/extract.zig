@@ -60,7 +60,7 @@ fn prepareExtractionDestination(parent: std.Io.Dir, io: std.Io, dest_path: []con
         error.FileNotFound => {},
         else => return err,
     };
-    // Zig 0.16's deleteTree is idempotent: a missing tree is already success.
+    // Zig's deleteTree is idempotent: a missing tree is already success.
     try parent.deleteTree(io, dest_path);
 }
 

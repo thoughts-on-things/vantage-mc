@@ -23,6 +23,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addOptions("build_options", options);
+    // C headers are translated by the build system (Zig 0.17 removed
+    // `@cImport`); sources import them as the `libdeflate` / `stb_image`
+    // modules.
+    exe.root_module.addImport("libdeflate", translateHeader(b, "vendor/libdeflate/libdeflate.h", target, optimize));
+    exe.root_module.addImport("stb_image", translateHeader(b, "vendor/stb/stb_image.h", target, optimize));
     // Embed the public protocol contract from docs/ into the binary so
     // `GET /v1/openapi.json`, repository docs, and launcher generation all use
     // one exact source of truth.
@@ -48,15 +53,9 @@ pub fn build(b: *std.Build) void {
             "vendor/libdeflate/lib/arm/cpu_features.c",
             "vendor/libdeflate/lib/x86/cpu_features.c",
         },
-        // Zig 0.16's Clang can expose AVX-512 intrinsics without carrying the
-        // new evex512 feature through libdeflate's per-function target
-        // attributes. Disable only those optional dispatch variants; the
-        // portable, SSE2, PCLMUL, and AVX2 paths remain available.
-        .flags = &.{
-            "-std=c99",
-            "-DLIBDEFLATE_ASSEMBLER_DOES_NOT_SUPPORT_AVX512VNNI",
-            "-DLIBDEFLATE_ASSEMBLER_DOES_NOT_SUPPORT_VPCLMULQDQ",
-        },
+        // libdeflate 1.26+ requires C11; GNU mode keeps POSIX declarations
+        // such as O_CLOEXEC visible on glibc (arm/cpu_features.c).
+        .flags = &.{"-std=gnu11"},
     });
     // Vendored stb_image (PNG decode) — C interop. PNG-only, decode-from-memory
     // (see the impl TU).
@@ -69,7 +68,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run the vantage CLI");
     run_step.dependOn(&run_cmd.step);
 
@@ -77,6 +76,20 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_tests.step);
+}
+
+fn translateHeader(
+    b: *std.Build,
+    header: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    const tc = b.addTranslateC(.{
+        .root_source_file = b.path(header),
+        .target = target,
+        .optimize = optimize,
+    });
+    return tc.createModule();
 }
 
 fn serverOpenApi(b: *std.Build) std.Build.LazyPath {
@@ -100,13 +113,22 @@ fn viewerAssets(b: *std.Build) std.Build.LazyPath {
         \\pub const files = [_]File{
         \\
     ) catch @panic("OOM");
+    // The bundle is scanned at configure time, so re-run configuration when it
+    // appears, disappears, or gains/loses files (copied contents are tracked by
+    // the WriteFile step itself).
+    b.dependOnDirectoryContents(b.path("web"));
     scan: {
         const rel = "web/dist-viewer";
-        var dir = b.build_root.handle.openDir(io, rel, .{ .iterate = true }) catch break :scan;
+        var dir = b.root.openDir(io, rel, .{ .iterate = true }) catch break :scan;
+        b.dependOnDirectoryContents(b.path(rel));
         defer dir.close(io);
         var walker = dir.walk(a) catch break :scan;
         defer walker.deinit();
         while (walker.next(io) catch break :scan) |entry| {
+            if (entry.kind == .directory) {
+                b.dependOnDirectoryContents(b.path(b.pathJoin(&.{ rel, entry.path })));
+                continue;
+            }
             if (entry.kind != .file) continue;
             // URL + embed paths always use forward slashes (the walker hands
             // back platform separators on Windows).

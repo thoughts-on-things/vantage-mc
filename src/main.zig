@@ -882,7 +882,7 @@ pub const RenderPhase = enum(u8) {
 };
 
 pub const RenderProgress = struct {
-    phase: std.atomic.Value(u8) = .init(@intFromEnum(RenderPhase.idle)),
+    phase: std.atomic.Value(u8) = .init(@backingInt(RenderPhase.idle)),
     completed: std.atomic.Value(usize) = .init(0),
     total: std.atomic.Value(usize) = .init(0),
     callback: ?*const fn (?*anyopaque, Snapshot) void = null,
@@ -901,14 +901,14 @@ pub const RenderProgress = struct {
 
     pub fn snapshot(self: *const RenderProgress) Snapshot {
         return .{
-            .phase = @enumFromInt(self.phase.load(.acquire)),
+            .phase = @fromBackingInt(@intCast(self.phase.load(.acquire))),
             .completed = self.completed.load(.acquire),
             .total = self.total.load(.acquire),
         };
     }
 
     fn setPhase(self: *RenderProgress, phase: RenderPhase) void {
-        self.phase.store(@intFromEnum(phase), .release);
+        self.phase.store(@backingInt(phase), .release);
         self.notify();
     }
 

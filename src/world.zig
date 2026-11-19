@@ -385,7 +385,7 @@ pub fn assembleWindow(
                     stats.chunks_missing += 1;
                     continue;
                 }
-                stats.chunks_loaded += 1;
+                stats.noteLoaded(ch);
                 try chunks.append(arena, ch);
             }
         }

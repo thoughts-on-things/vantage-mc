@@ -1327,6 +1327,8 @@ fn renderDimension(
         stats.chunks_missing += r.stats.chunks_missing;
         stats.chunks_premodern += r.stats.chunks_premodern;
         stats.chunks_unreadable += r.stats.chunks_unreadable;
+        stats.chunks_unknown_palette += r.stats.chunks_unknown_palette;
+        stats.unknown_palette_data_version = @max(stats.unknown_palette_data_version, r.stats.unknown_palette_data_version);
         read_ms += r.read_ms;
         light_ms += r.light_ms;
         mesh_ms += r.mesh_ms;
@@ -1369,6 +1371,10 @@ fn renderDimension(
     if (stats.chunks_unreadable > 0) std.debug.print(
         "  note: {d} chunk(s) skipped: lz4-compressed or external .mcc chunks are not supported yet\n",
         .{stats.chunks_unreadable},
+    );
+    if (stats.chunks_unknown_palette > 0) std.debug.print(
+        "  warning: {d} chunk(s) contain block states in a format vantage doesn't recognize (newest DataVersion {d}); those blocks render as air. This Minecraft version may be newer than vantage supports: update vantage or report it.\n",
+        .{ stats.chunks_unknown_palette, stats.unknown_palette_data_version },
     );
 
     // ---- lowres LOD pyramid -------------------------------------------------

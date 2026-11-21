@@ -208,8 +208,9 @@ For remote hosting:
   all-or-nothing memory and latency problem;
 - use immutable content hashes and CDN caching for static artifacts.
 
-Compression should remain measured by format and deployment. Gzip 7 is the
-current local Pareto point. CDN content encoding may make Brotli or Zstandard
+Compression should remain measured by format and deployment. Gzip 6 is the
+current local Pareto point (level 7 costs about twice the deflate CPU for
+~3% fewer bytes). CDN content encoding may make Brotli or Zstandard
 attractive, but a browser-WASM decoder is not automatically a win once its
 download, memory, and main-thread costs are included.
 

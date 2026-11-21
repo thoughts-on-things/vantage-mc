@@ -1037,9 +1037,11 @@ fn renderWorldArgs(
         .out_dir = "web/public",
         .tile_chunks = 8, // tile span in chunks (128×128 blocks)
         .radius = 0, // optional cap: only tiles within ±radius chunks of spawn/centre (0 = whole world)
-        // Level 7 is the measured Pareto point for quantized tiles: much less CPU
-        // than 9 for only a small payload increase. Users can still choose 1..12.
-        .gz_level = 7,
+        // Level 6 is the measured Pareto point for quantized tiles: about half
+        // the compress CPU of 7 for ~3% more bytes (dense nether tiles spend a
+        // third of the render in deflate), and what `live` already uses. Users
+        // can still choose 1..12.
+        .gz_level = 6,
         .quality = try parseLightQuality(args),
         .blend_biomes = try parseBiomeBlend(args),
         .caves = try parseCaveY(args),
@@ -1290,7 +1292,8 @@ fn renderDimension(
     }
     // Stop the progressive flusher before the final manifest write below takes over.
     if (flush_thread) |t| {
-        flush_ctx.stop.store(true, .release);
+        flush_ctx.stop.store(1, .release);
+        std.Io.futexWake(init.io, u32, &flush_ctx.stop.raw, 1);
         t.join();
     }
     tiles_node.end();
@@ -1542,7 +1545,9 @@ const FlushCtx = struct {
     /// atlas growth is skipped, so the final stretch of a big render doesn't
     /// re-serialize an unchanged multi-MB manifest every tick.
     last_tiles: usize = 0,
-    stop: std.atomic.Value(bool) = .init(false),
+    /// Nonzero once the render is done. A u32 so the flusher can futex-wait
+    /// on it: the final join wakes it at once instead of waiting out a tick.
+    stop: std.atomic.Value(u32) = .init(0),
 };
 
 /// Poll the shared `Live` state every ~400 ms and publish a manifest of the
@@ -1551,8 +1556,12 @@ const FlushCtx = struct {
 fn flushWorker(fc: *FlushCtx) void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    while (!fc.stop.load(.acquire)) {
-        std.Io.sleep(fc.io, std.Io.Duration.fromMilliseconds(400), .awake) catch {};
+    while (fc.stop.load(.acquire) == 0) {
+        std.Io.futexWaitTimeout(fc.io, u32, &fc.stop.raw, 0, .{ .duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(400),
+            .clock = .awake,
+        } }) catch {};
+        if (fc.stop.load(.acquire) != 0) break;
         _ = arena.reset(.retain_capacity);
         flushOnce(fc, arena.allocator()) catch {}; // a dropped flush retries next tick
     }

@@ -84,15 +84,14 @@ pub const SurfaceColors = struct {
     pub fn baseFor(self: *SurfaceColors, name: []const u8, state: []const u8) Base {
         self.mutex.lockUncancelable(self.resolver.io);
         defer self.mutex.unlock(self.resolver.io);
-        // Build the probe key on the stack: the memo lives for the whole render
-        // (or a whole `live`/`server` session), so allocating it per call would
-        // grow the shared arena on every hit. Only a miss keeps a copy.
-        var buf: [512]u8 = undefined;
-        const probe = std.fmt.bufPrint(&buf, "{s}\x00{s}", .{ name, state }) catch
-            return self.computeBase(name, state);
-        if (self.memo.get(probe)) |b| return b;
+        // The memo lives for the whole render (or a whole `live`/`server`
+        // session), so probe with a scratch key and keep a copy only on a miss.
+        var probe: model.StateKey = .{};
+        defer probe.deinit();
+        const pk = probe.build(name, state) catch return fallbackBase(name);
+        if (self.memo.get(pk)) |b| return b;
         const base = self.computeBase(name, state);
-        const key = self.arena.dupe(u8, probe) catch return base;
+        const key = self.arena.dupe(u8, pk) catch return base;
         self.memo.put(key, base) catch {};
         return base;
     }
@@ -141,14 +140,6 @@ fn averageLayer(pixels: []const u8) ?[3]u8 {
     }
     if (w == 0) return null;
     return .{ @intCast(r / w), @intCast(g / w), @intCast(b / w) };
-}
-
-const SurfaceClass = enum(u8) { other, water, foliage };
-
-fn classify(name: []const u8) SurfaceClass {
-    if (isWaterish(name)) return .water;
-    if (isFoliage(name)) return .foliage;
-    return .other;
 }
 
 fn isWaterish(name: []const u8) bool {
@@ -223,8 +214,12 @@ pub fn buildColorMap(
     // once per palette id keeps the column scans below to array reads. Colors
     // and biomes stay lazy: resolving a block that never tops a column could
     // add a texture layer the render would not otherwise have.
-    const class = try arena.alloc(SurfaceClass, g.names.len);
-    for (class, g.names) |*c, name| c.* = classify(name);
+    const water = try arena.alloc(bool, g.names.len);
+    const foliage = try arena.alloc(bool, g.names.len);
+    for (water, foliage, g.names) |*w, *f, name| {
+        w.* = isWaterish(name);
+        f.* = isFoliage(name);
+    }
     const bases = try arena.alloc(?SurfaceColors.Base, g.names.len);
     @memset(bases, null);
     const biomes = try arena.alloc(?biome.BiomeInfo, g.biome_names.len);
@@ -276,7 +271,7 @@ pub fn buildColorMap(
                 const block: f32 = @floatFromInt(packed_light & 0x0F);
                 var c: [3]f32 = undefined;
 
-                if (class[id] == .water) {
+                if (water[id]) {
                     // Water: composite the biome water tint over the seabed's
                     // color with the SAME depth-driven alpha and cooling the
                     // hires water shader uses, so the lowres ring is
@@ -288,7 +283,7 @@ pub fn buildColorMap(
                         wy -= 1;
                         const below = g.ids[g.index(x, wy, z)];
                         if (below == grid.AIR) break;
-                        if (class[below] != .water) {
+                        if (!water[below]) {
                             seabed = below;
                             break;
                         }
@@ -328,13 +323,13 @@ pub fn buildColorMap(
                     }
                     // Trees: canopy colors the cell, the GROUND heights it (see
                     // isFoliage). Skips the air gaps under leaf overhangs too.
-                    if (class[id] == .foliage) {
+                    if (foliage[id]) {
                         var gy = y;
                         while (gy > 0) {
                             gy -= 1;
                             const bid = g.ids[g.index(x, gy, z)];
                             if (bid == grid.AIR) continue;
-                            if (class[bid] == .foliage) continue;
+                            if (foliage[bid]) continue;
                             height[ci] = @intCast(g.min_y + @as(i32, @intCast(gy)));
                             break;
                         }

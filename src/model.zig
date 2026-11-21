@@ -88,6 +88,24 @@ pub const Error = error{
     BadElement,
 } || std.mem.Allocator.Error || std.Io.Dir.ReadFileAllocError || json.ParseError(json.Scanner);
 
+/// A `name\x00state` memo key in scratch storage: on the stack, or on the heap
+/// when a long modded state doesn't fit. Memos that outlive a tile probe with
+/// this and copy the key into their arena only on a miss.
+pub const StateKey = struct {
+    buf: [256]u8 = undefined,
+    heap: ?[]u8 = null,
+
+    pub fn build(self: *StateKey, name: []const u8, state: []const u8) ![]const u8 {
+        if (std.fmt.bufPrint(&self.buf, "{s}\x00{s}", .{ name, state })) |k| return k else |_| {}
+        self.heap = try std.fmt.allocPrint(std.heap.smp_allocator, "{s}\x00{s}", .{ name, state });
+        return self.heap.?;
+    }
+
+    pub fn deinit(self: *StateKey) void {
+        if (self.heap) |h| std.heap.smp_allocator.free(h);
+    }
+};
+
 pub const Resolver = struct {
     arena: std.mem.Allocator,
     io: std.Io,
@@ -111,15 +129,14 @@ pub const Resolver = struct {
         if (self.lock) |l| l.lockUncancelable(self.io);
         defer if (self.lock) |l| l.unlock(self.io);
         if (self.memo) |memo| {
-            // Probe with a stack key: the memo and its arena outlive every tile
-            // (a whole `live`/`server` session), so only a miss may allocate.
-            var buf: [512]u8 = undefined;
-            if (std.fmt.bufPrint(&buf, "{s}\x00{s}", .{ block_name, state })) |probe| {
-                if (memo.get(probe)) |parts| return parts;
-            } else |_| {}
-            const key = try std.fmt.allocPrint(self.arena, "{s}\x00{s}", .{ block_name, state });
+            // The memo and its arena outlive every tile (a whole `live`/`server`
+            // session), so probe with a scratch key and copy only on a miss.
+            var probe: StateKey = .{};
+            defer probe.deinit();
+            const pk = try probe.build(block_name, state);
+            if (memo.get(pk)) |parts| return parts;
             const parts = try self.resolveBlockUncached(block_name, state);
-            try memo.put(key, parts);
+            try memo.put(try self.arena.dupe(u8, pk), parts);
             return parts;
         }
         return self.resolveBlockUncached(block_name, state);

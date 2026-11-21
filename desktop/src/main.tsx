@@ -4,9 +4,12 @@ import '@fontsource-variable/bricolage-grotesque';
 import '@fontsource-variable/jetbrains-mono';
 import './styles.css';
 import { App } from './App.js';
+import { CrashBoundary } from './components/CrashBoundary.js';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <CrashBoundary scope="Vantage">
+      <App />
+    </CrashBoundary>
   </StrictMode>,
 );

@@ -12,6 +12,11 @@ export default defineConfig({
       'vantage-mc/react': fileURLToPath(new URL('../web/src/react/index.ts', import.meta.url)),
       'vantage-mc/core': fileURLToPath(new URL('../web/src/core/index.ts', import.meta.url)),
     },
+    // Those sources import react and three from ../web/node_modules, which
+    // would otherwise bundle a second copy of each into the viewer chunk. Two
+    // Reacts means every hook in the viewer reads a null dispatcher and the
+    // window goes blank the moment a map opens.
+    dedupe: ['react', 'react-dom', 'three'],
   },
   clearScreen: false,
   server: {

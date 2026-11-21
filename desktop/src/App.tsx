@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { LoaderCircle } from 'lucide-react';
 import { AppShell } from './components/AppShell.js';
+import { CrashBoundary } from './components/CrashBoundary.js';
 import { PairingDialog } from './components/PairingDialog.js';
 import { useHosts } from './hooks/useHosts.js';
 import { loadViewer, useLibrary } from './hooks/useLibrary.js';
@@ -23,15 +24,17 @@ export function App() {
   if (viewer) {
     return (
       <>
-        <Suspense fallback={<div className="viewer-loading"><LoaderCircle className="spin" /><span>Starting GPU viewer</span></div>}>
-          <ViewerScreen
-            target={viewer}
-            settings={settings}
-            system={library.system}
-            onThumbnail={(thumbnailUrl) => library.updateWorldThumbnail(viewer.world.path, thumbnailUrl)}
-            onBack={library.closeViewer}
-          />
-        </Suspense>
+        <CrashBoundary scope="The map viewer" onExit={library.closeViewer} exitLabel="Back to library">
+          <Suspense fallback={<div className="viewer-loading"><LoaderCircle className="spin" /><span>Starting GPU viewer</span></div>}>
+            <ViewerScreen
+              target={viewer}
+              settings={settings}
+              system={library.system}
+              onThumbnail={(thumbnailUrl) => library.updateWorldThumbnail(viewer.world.path, thumbnailUrl)}
+              onBack={library.closeViewer}
+            />
+          </Suspense>
+        </CrashBoundary>
         <PairingDialog hosts={hosts} library={library} />
       </>
     );

@@ -250,18 +250,20 @@ fn unpack(arena: std.mem.Allocator, data: []const i64, palette_len: usize, cells
     const mask: u64 = (@as(u64, 1) << bits) - 1;
 
     const out = try arena.alloc(u16, cells);
+    // Walk each long's indices low bits first; entries never span longs. A
+    // short array leaves the tail at palette entry 0.
     var i: usize = 0;
-    while (i < cells) : (i += 1) {
-        const long_idx = i / per_long;
-        if (long_idx >= data.len) {
-            out[i] = 0;
-            continue;
+    for (data) |raw| {
+        if (i >= cells) break;
+        var word: u64 = @bitCast(raw);
+        const end = @min(i + per_long, cells);
+        while (i < end) : (i += 1) {
+            const pidx = word & mask;
+            word >>= bits;
+            out[i] = if (pidx >= palette_len) 0 else @intCast(pidx);
         }
-        const shift: u6 = @intCast((i % per_long) * @as(usize, bits));
-        const raw_long: u64 = @bitCast(data[long_idx]);
-        const pidx: u64 = (raw_long >> shift) & mask;
-        out[i] = if (pidx >= palette_len) 0 else @intCast(pidx);
     }
+    @memset(out[i..], 0);
     return out;
 }
 
@@ -318,6 +320,18 @@ test "unpack round-trips packed 5-bit indices" {
     while (i < 4096) : (i += 1) {
         try std.testing.expectEqual(@as(u16, @intCast(i % palette_len)), got[i]);
     }
+}
+
+test "unpack zero-fills a short array and out-of-palette indices" {
+    const arena = std.testing.allocator;
+    // 4 bits, 16 per long: one long covers cells 0..15, the rest are missing.
+    const word: u64 = 0xF0 | 0x3; // cell 0 = 3, cell 1 = 15 (>= palette_len)
+    const longs = [_]i64{@bitCast(word)};
+    const got = try unpack(arena, &longs, 5, 40, 4);
+    defer arena.free(got);
+    try std.testing.expectEqual(@as(u16, 3), got[0]);
+    try std.testing.expectEqual(@as(u16, 0), got[1]);
+    for (got[2..]) |v| try std.testing.expectEqual(@as(u16, 0), v);
 }
 
 test "unpack round-trips packed 1-bit biome cells" {

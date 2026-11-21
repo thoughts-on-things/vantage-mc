@@ -567,3 +567,15 @@ button:focus-visible, input:focus-visible, [role='button']:focus-visible {
   .header-actions { width: 100%; }
   .search-box { width: 100%; }
 }
+
+/* --- Crash screen ------------------------------------------------------- */
+
+.crash-screen { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 50% 42%, #1d211d, var(--bg) 64%); }
+.crash-card { display: grid; gap: 10px; width: min(520px, 100%); padding: 24px; border: 1px solid var(--danger-line); border-radius: 14px; }
+.crash-icon { color: var(--danger); }
+.crash-card h1 { margin: 0; font-family: var(--font-display); font-size: 20px; font-weight: 620; color: var(--text-1); }
+.crash-card p { margin: 0; color: var(--text-2); font-size: var(--text-sm); line-height: 1.5; }
+.crash-card pre { margin: 4px 0; max-height: 160px; overflow: auto; padding: 10px 12px; border-radius: 8px; background: var(--danger-soft); color: var(--danger); font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+.crash-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.crash-actions button:not(.primary-button) { display: inline-flex; align-items: center; gap: 7px; padding: 8px 13px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface-2); color: var(--text-2); font: inherit; font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
+.crash-actions .primary-button svg:last-child { margin-left: 0; }

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.3](https://github.com/thoughts-on-things/vantage-mc/compare/v0.15.2...v0.15.3) (2026-11-21)
+
+
+### Bug Fixes
+
+* **desktop:** stop the map viewer opening to a black screen ([#113](https://github.com/thoughts-on-things/vantage-mc/issues/113)) ([2143a12](https://github.com/thoughts-on-things/vantage-mc/commit/2143a12c182e3f0c01365e28de5e689a38536a3c))
+
 ## [0.15.2](https://github.com/thoughts-on-things/vantage-mc/compare/v0.15.1...v0.15.2) (2026-11-19)
 
 

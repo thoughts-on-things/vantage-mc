@@ -40,23 +40,29 @@ pub fn compute(arena: std.mem.Allocator, g: grid.Grid, occluder: []const bool, e
 
     var queue: std.ArrayList(u32) = .empty;
 
-    // --- Sky pass. Pass 1: mark every cell open to the top (column walk). ---
-    var z: usize = 0;
-    while (z < g.sz) : (z += 1) {
-        var x: usize = 0;
-        while (x < g.sx) : (x += 1) {
-            var y: usize = g.sy;
-            var level: u8 = MAX;
-            while (y > 0) {
-                y -= 1;
-                const idx = g.index(x, y, z);
-                const id = g.ids[idx];
-                if (occluder[id]) break; // first opaque from the top closes the column
-                sky[idx] = level;
-                // Water dims the column going down, so deep seabed is dark.
-                if (attenuate) |att| {
-                    if (att[id] and level > 0) level -= 1;
-                }
+    // --- Sky pass. Pass 1: mark every cell open to the top. Walks layer by
+    // layer from the top with one running level per column (MAX..0, or
+    // `closed` once the first opaque block caps it), so the grid is read in
+    // memory order rather than one stride-`sx·sz` column at a time. ---
+    const closed: u8 = 0xFF;
+    const layer = g.sx * g.sz;
+    const column = try arena.alloc(u8, layer);
+    @memset(column, MAX);
+    var y: usize = g.sy;
+    while (y > 0) {
+        y -= 1;
+        const base = y * layer;
+        for (column, base..) |*level, idx| {
+            if (level.* == closed) continue;
+            const id = g.ids[idx];
+            if (occluder[id]) {
+                level.* = closed;
+                continue;
+            }
+            sky[idx] = level.*;
+            // Water dims the column going down, so deep seabed is dark.
+            if (attenuate) |att| {
+                if (att[id] and level.* > 0) level.* -= 1;
             }
         }
     }
@@ -177,32 +183,26 @@ pub fn computeOpen(arena: std.mem.Allocator, g: grid.Grid, occluder: []const boo
 /// cell below a roof). Those are the only cells that need to propagate light
 /// inward; interior open cells are surrounded by MAX and would just pop no-ops.
 fn seedFrontier(arena: std.mem.Allocator, g: grid.Grid, sky: []const u8, queue: *std.ArrayList(u32)) !void {
-    const n = g.sx * g.sy * g.sz;
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        if (sky[i] != MAX) continue;
-        const x = i % g.sx;
-        const rem = i / g.sx;
-        const zc = rem % g.sz;
-        const yc = rem / g.sz;
-        var frontier = false;
-        inline for (.{
-            .{ -1, 0, 0 }, .{ 1, 0, 0 },
-            .{ 0, -1, 0 }, .{ 0, 1, 0 },
-            .{ 0, 0, -1 }, .{ 0, 0, 1 },
-        }) |d| {
-            if (!frontier) {
-                const nx = @as(isize, @intCast(x)) + d[0];
-                const ny = @as(isize, @intCast(yc)) + d[1];
-                const nz = @as(isize, @intCast(zc)) + d[2];
-                if (nx >= 0 and ny >= 0 and nz >= 0 and
-                    nx < g.sx and ny < g.sy and nz < g.sz)
-                {
-                    if (sky[g.index(@intCast(nx), @intCast(ny), @intCast(nz))] != MAX) frontier = true;
-                }
+    const sx = g.sx;
+    const layer = g.sx * g.sz;
+    var y: usize = 0;
+    while (y < g.sy) : (y += 1) {
+        var z: usize = 0;
+        while (z < g.sz) : (z += 1) {
+            const row = g.index(0, y, z);
+            // Most rows are buried (no open cell at all): one SIMD scan skips them.
+            if (std.mem.indexOfScalar(u8, sky[row..][0..sx], MAX) == null) continue;
+            var x: usize = 0;
+            while (x < sx) : (x += 1) {
+                const i = row + x;
+                if (sky[i] != MAX) continue;
+                const frontier =
+                    (x > 0 and sky[i - 1] != MAX) or (x + 1 < sx and sky[i + 1] != MAX) or
+                    (y > 0 and sky[i - layer] != MAX) or (y + 1 < g.sy and sky[i + layer] != MAX) or
+                    (z > 0 and sky[i - sx] != MAX) or (z + 1 < g.sz and sky[i + sx] != MAX);
+                if (frontier) try queue.append(arena, @intCast(i));
             }
         }
-        if (frontier) try queue.append(arena, @intCast(i));
     }
 }
 

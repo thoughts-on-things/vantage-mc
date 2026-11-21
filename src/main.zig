@@ -1037,9 +1037,11 @@ fn renderWorldArgs(
         .out_dir = "web/public",
         .tile_chunks = 8, // tile span in chunks (128×128 blocks)
         .radius = 0, // optional cap: only tiles within ±radius chunks of spawn/centre (0 = whole world)
-        // Level 7 is the measured Pareto point for quantized tiles: much less CPU
-        // than 9 for only a small payload increase. Users can still choose 1..12.
-        .gz_level = 7,
+        // Level 6 is the measured Pareto point for quantized tiles: about half
+        // the compress CPU of 7 for ~3% more bytes (dense nether tiles spend a
+        // third of the render in deflate), and what `live` already uses. Users
+        // can still choose 1..12.
+        .gz_level = 6,
         .quality = try parseLightQuality(args),
         .blend_biomes = try parseBiomeBlend(args),
         .caves = try parseCaveY(args),

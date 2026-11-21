@@ -111,12 +111,15 @@ pub const Resolver = struct {
         if (self.lock) |l| l.lockUncancelable(self.io);
         defer if (self.lock) |l| l.unlock(self.io);
         if (self.memo) |memo| {
+            // Probe with a stack key: the memo and its arena outlive every tile
+            // (a whole `live`/`server` session), so only a miss may allocate.
+            var buf: [512]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, "{s}\x00{s}", .{ block_name, state })) |probe| {
+                if (memo.get(probe)) |parts| return parts;
+            } else |_| {}
             const key = try std.fmt.allocPrint(self.arena, "{s}\x00{s}", .{ block_name, state });
-            const gop = try memo.getOrPut(key);
-            if (gop.found_existing) return gop.value_ptr.*;
-            errdefer _ = memo.remove(key);
             const parts = try self.resolveBlockUncached(block_name, state);
-            gop.value_ptr.* = parts;
+            try memo.put(key, parts);
             return parts;
         }
         return self.resolveBlockUncached(block_name, state);

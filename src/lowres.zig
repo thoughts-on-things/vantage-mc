@@ -84,11 +84,17 @@ pub const SurfaceColors = struct {
     pub fn baseFor(self: *SurfaceColors, name: []const u8, state: []const u8) Base {
         self.mutex.lockUncancelable(self.resolver.io);
         defer self.mutex.unlock(self.resolver.io);
-        const key = std.fmt.allocPrint(self.arena, "{s}\x00{s}", .{ name, state }) catch return fallbackBase(name);
-        const gop = self.memo.getOrPut(key) catch return fallbackBase(name);
-        if (gop.found_existing) return gop.value_ptr.*;
-        gop.value_ptr.* = self.computeBase(name, state);
-        return gop.value_ptr.*;
+        // Build the probe key on the stack: the memo lives for the whole render
+        // (or a whole `live`/`server` session), so allocating it per call would
+        // grow the shared arena on every hit. Only a miss keeps a copy.
+        var buf: [512]u8 = undefined;
+        const probe = std.fmt.bufPrint(&buf, "{s}\x00{s}", .{ name, state }) catch
+            return self.computeBase(name, state);
+        if (self.memo.get(probe)) |b| return b;
+        const base = self.computeBase(name, state);
+        const key = self.arena.dupe(u8, probe) catch return base;
+        self.memo.put(key, base) catch {};
+        return base;
     }
 
     fn computeBase(self: *SurfaceColors, name: []const u8, state: []const u8) Base {
@@ -135,6 +141,14 @@ fn averageLayer(pixels: []const u8) ?[3]u8 {
     }
     if (w == 0) return null;
     return .{ @intCast(r / w), @intCast(g / w), @intCast(b / w) };
+}
+
+const SurfaceClass = enum(u8) { other, water, foliage };
+
+fn classify(name: []const u8) SurfaceClass {
+    if (isWaterish(name)) return .water;
+    if (isFoliage(name)) return .foliage;
+    return .other;
 }
 
 fn isWaterish(name: []const u8) bool {
@@ -204,6 +218,40 @@ pub fn buildColorMap(
     @memset(rgb, 0);
     @memset(height, EMPTY);
 
+    // Per-palette tables. Classifying a name takes substring scans, and a
+    // color or biome lookup takes a render-wide mutex and a hash; doing each
+    // once per palette id keeps the column scans below to array reads. Colors
+    // and biomes stay lazy: resolving a block that never tops a column could
+    // add a texture layer the render would not otherwise have.
+    const class = try arena.alloc(SurfaceClass, g.names.len);
+    for (class, g.names) |*c, name| c.* = classify(name);
+    const bases = try arena.alloc(?SurfaceColors.Base, g.names.len);
+    @memset(bases, null);
+    const biomes = try arena.alloc(?biome.BiomeInfo, g.biome_names.len);
+    @memset(biomes, null);
+    const Tables = struct {
+        g: grid.Grid,
+        colors: *SurfaceColors,
+        bases: []?SurfaceColors.Base,
+        biomes: []?biome.BiomeInfo,
+
+        fn base(t: @This(), id: u16) SurfaceColors.Base {
+            if (t.bases[id]) |b| return b;
+            const b = t.colors.baseFor(t.g.nameOf(id), t.g.stateOf(id));
+            t.bases[id] = b;
+            return b;
+        }
+
+        fn biomeInfo(t: @This(), id: u16) biome.BiomeInfo {
+            if (id >= t.biomes.len) return t.colors.reg.lookup(t.g.biomeNameOf(id));
+            if (t.biomes[id]) |b| return b;
+            const b = t.colors.reg.lookup(t.g.biomeNameOf(id));
+            t.biomes[id] = b;
+            return b;
+        }
+    };
+    const tables: Tables = .{ .g = g, .colors = colors, .bases = bases, .biomes = biomes };
+
     var cz: usize = 0;
     while (cz < size) : (cz += 1) {
         var cx: usize = 0;
@@ -222,14 +270,13 @@ pub fn buildColorMap(
                 if (id == grid.AIR) continue;
 
                 height[ci] = @intCast(g.min_y + @as(i32, @intCast(y)));
-                const name = g.nameOf(id);
-                const info = colors.reg.lookup(g.biomeNameOf(g.biomeAt(x, y, z)));
+                const info = tables.biomeInfo(g.biomeAt(x, y, z));
                 const packed_light = g.lightAt(@intCast(x), @as(isize, @intCast(y)) + 1, @intCast(z));
                 const sky: f32 = @floatFromInt(packed_light >> 4);
                 const block: f32 = @floatFromInt(packed_light & 0x0F);
                 var c: [3]f32 = undefined;
 
-                if (isWaterish(name)) {
+                if (class[id] == .water) {
                     // Water: composite the biome water tint over the seabed's
                     // color with the SAME depth-driven alpha and cooling the
                     // hires water shader uses, so the lowres ring is
@@ -241,7 +288,7 @@ pub fn buildColorMap(
                         wy -= 1;
                         const below = g.ids[g.index(x, wy, z)];
                         if (below == grid.AIR) break;
-                        if (!isWaterish(g.nameOf(below))) {
+                        if (class[below] != .water) {
                             seabed = below;
                             break;
                         }
@@ -259,7 +306,7 @@ pub fn buildColorMap(
                     const cool = [3]f32{ 0.55, 0.66, 0.85 };
                     var sb = [3]f32{ 0.55, 0.5, 0.4 }; // generic sediment fallback
                     if (seabed != grid.AIR) {
-                        const sbase = colors.baseFor(g.nameOf(seabed), g.stateOf(seabed));
+                        const sbase = tables.base(seabed);
                         for (0..3) |k| sb[k] = @as(f32, @floatFromInt(sbase.rgb[k])) / 255.0;
                         if (sbase.tint != .none) {
                             const tc = biome.colorFor(colors.maps, sbase.tint, info);
@@ -273,7 +320,7 @@ pub fn buildColorMap(
                         c[k] = std.math.lerp(sb[k], w, alpha);
                     }
                 } else {
-                    const base = colors.baseFor(name, g.stateOf(id));
+                    const base = tables.base(id);
                     for (0..3) |k| c[k] = @as(f32, @floatFromInt(base.rgb[k])) / 255.0;
                     if (base.tint != .none) {
                         const tc = biome.colorFor(colors.maps, base.tint, info);
@@ -281,13 +328,13 @@ pub fn buildColorMap(
                     }
                     // Trees: canopy colors the cell, the GROUND heights it (see
                     // isFoliage). Skips the air gaps under leaf overhangs too.
-                    if (isFoliage(name)) {
+                    if (class[id] == .foliage) {
                         var gy = y;
                         while (gy > 0) {
                             gy -= 1;
                             const bid = g.ids[g.index(x, gy, z)];
                             if (bid == grid.AIR) continue;
-                            if (isFoliage(g.nameOf(bid))) continue;
+                            if (class[bid] == .foliage) continue;
                             height[ci] = @intCast(g.min_y + @as(i32, @intCast(gy)));
                             break;
                         }
